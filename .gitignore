@@ -1,0 +1,41 @@
+# ---- 构建目录 ----
+/build*/
+/out/
+cmake-build-*/
+
+# ---- 编译产物 ----
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.d
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+
+# ---- IDE ----
+.vscode/
+.idea/
+*.user
+*.sln
+*.vcxproj*
+.cache/
+.clangd/
+
+# ---- 运行时 ----
+*.relaypart
+*.log
+relayer-archive-*.tar.xz
+crash-*.dmp
+
+# ---- 其他 ----
+.DS_Store
+Thumbs.db

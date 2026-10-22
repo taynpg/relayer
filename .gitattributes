@@ -1,0 +1,35 @@
+# 统一换行符，避免 Windows 上 CRLF 混进仓库导致 CI 上的格式检查无故失败。
+#
+# 注意：工作区检出时仍是 CRLF（Windows 编辑器友好），仓库内一律 LF。
+* text=auto eol=lf
+
+# ---- 二进制：不做任何换行转换 ----
+*.png binary
+*.jpg binary
+*.ico binary
+*.gif binary
+*.zip binary
+*.tar binary
+*.xz binary
+*.exe binary
+*.dll binary
+*.lib binary
+*.a binary
+
+# ---- Windows 专用脚本保留 CRLF ----
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# ---- 明确按文本处理 ----
+*.md text
+*.txt text
+*.yml text
+*.yaml text
+*.json text
+*.py text
+*.cmake text
+CMakeLists.txt text
+*.c text
+*.h text
+*.cpp text
+*.hpp text

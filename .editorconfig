@@ -1,0 +1,38 @@
+# 编辑器基础约定。
+#
+# 与 .clang-format 分工：这里只管"任何编辑器都该统一"的空白与编码，
+# 代码排版交给 clang-format。
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{c,cc,cpp,cxx,h,hh,hpp,inl}]
+indent_size = 4
+max_line_length = 120
+
+[*.{cmake,txt}]
+indent_size = 4
+
+[CMakeLists.txt]
+indent_size = 4
+
+[*.{py}]
+indent_size = 4
+max_line_length = 120
+
+[*.{yml,yaml,json,md}]
+indent_size = 2
+
+[*.md]
+# Markdown 的行尾双空格是有意义的换行标记，不能自动清掉
+trim_trailing_whitespace = false
+
+[*.{bat,cmd}]
+end_of_line = crlf

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用问题 / 讨论
+    url: https://github.com/taynpg/relayer/discussions
+    about: 不确定是不是 bug、想问怎么用、想聊设计，都走 Discussions
