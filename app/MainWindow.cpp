@@ -341,11 +341,36 @@ void MainWindow::onTransTaskRun(const relayer::app::RelayTaskItems &items)
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请先在连接面板连接中继"));
         return;
     }
+
+    // 整批都没填对端、也没设当前通信对象：没有任何收件人，早说比让任务
+    // 表刷一排"已跳过"好。只有部分行空的情况交给任务表单按行处理。
+    const QString defaultPeer = connector_->currentPeerId();
+    if (defaultPeer.isEmpty())
+    {
+        bool allEmpty = true;
+        for (const auto &it : items)
+        {
+            if (!it.peerId.isEmpty())
+            {
+                allEmpty = false;
+                break;
+            }
+        }
+        if (allEmpty)
+        {
+            QMessageBox::warning(this, QStringLiteral("提示"),
+                                 QStringLiteral("这批任务没有指定对端，也没有选「当前通信对象」。\n"
+                                                "请在连接面板右键在线对端 → 设为通信对象，或在对照表里填对端 id。"));
+            return;
+        }
+    }
+
     if (core_->busy() && core_->canPreempt())
     {
         log_->appendLog(QStringLiteral("[接收] 让位于任务，结束后自动恢复\n"));
     }
-    taskControl_->startTasks(items, lastConn_);
+    // 对端列留空的行由任务表单默认发给连接面板右键选定的"当前通信对象"。
+    taskControl_->startTasks(items, lastConn_, defaultPeer);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)

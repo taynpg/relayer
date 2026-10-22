@@ -762,12 +762,9 @@ void ComparisonControl::onTrans()
                                  QStringLiteral("第 %1 行的名称或本地目录为空").arg(row + 1));
             return;
         }
-        if (peer.isEmpty())
-        {
-            QMessageBox::warning(this, QStringLiteral("提示"),
-                                 QStringLiteral("第 %1 行没有填对端 id（在线列表里可右键复制）").arg(row + 1));
-            return;
-        }
+        // 对端留空是合法用法：由任务表单默认发给连接面板选定的"当前
+        // 通信对象"（连接面板右键 → 设为通信对象）。两者都没设时，
+        // 任务表会把这些行标"已跳过"并给出提示，不在这里拦。
         if (!QFileInfo::exists(localDir))
         {
             QMessageBox::warning(this, QStringLiteral("提示"),

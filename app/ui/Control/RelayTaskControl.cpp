@@ -133,7 +133,7 @@ void RelayTaskControl::attachCoreService(relayer::app::CoreService *core)
     connect(core_, &CoreService::progressChanged, this, &RelayTaskControl::onProgress);
 }
 
-void RelayTaskControl::startTasks(const RelayTaskItems &items, const ConnInfo &conn)
+void RelayTaskControl::startTasks(const RelayTaskItems &items, const ConnInfo &conn, const QString &defaultPeerId)
 {
     if (running_)
     {
@@ -147,6 +147,10 @@ void RelayTaskControl::startTasks(const RelayTaskItems &items, const ConnInfo &c
     rows_.clear();
     for (const auto &item : items)
     {
+        // 对端列留空 = 发给连接面板右键选定的"当前通信对象"。在这里就地
+        // 解析成具体 id（表格里显示实际目标，发送与重传不用再区分两种
+        // 来源）；解析结果仍为空时才落"已跳过"。
+        const QString peer = item.peerId.isEmpty() ? defaultPeerId : item.peerId;
         if (!item.isDir)
         {
             QString filePath = item.localDir;
@@ -156,7 +160,7 @@ void RelayTaskControl::startTasks(const RelayTaskItems &items, const ConnInfo &c
             }
             QFileInfo info(filePath);
             const QString rel = item.relDir.isEmpty() ? item.name : item.relDir + QStringLiteral("/") + item.name;
-            rows_.push_back({info.fileName(), filePath, item.peerId, rel, static_cast<quint64>(info.size()), kWait});
+            rows_.push_back({info.fileName(), filePath, peer, rel, static_cast<quint64>(info.size()), kWait});
             continue;
         }
 
@@ -167,12 +171,13 @@ void RelayTaskControl::startTasks(const RelayTaskItems &items, const ConnInfo &c
             const QString abs = it.next();
             const QString rel = QDir(item.localDir).relativeFilePath(abs);
             QFileInfo info(abs);
-            rows_.push_back({info.fileName(), abs, item.peerId, rootRel + QStringLiteral("/") + rel,
+            rows_.push_back({info.fileName(), abs, peer, rootRel + QStringLiteral("/") + rel,
                              static_cast<quint64>(info.size()), kWait});
         }
     }
 
-    // 未指定对端的行直接标跳过：发送前必须补上，静默丢弃会让人以为发过了。
+    // 当前通信对象也没设的行直接标跳过：发送前必须补上，静默丢弃会让
+    // 人以为发过了。
     for (int i = 0; i < rows_.size(); ++i)
     {
         if (rows_[i].peerId.isEmpty())
@@ -188,6 +193,19 @@ void RelayTaskControl::startTasks(const RelayTaskItems &items, const ConnInfo &c
     {
         emit logMessage(QStringLiteral("[任务] 没有可发送的文件（目录为空？）\n"));
         return;
+    }
+
+    // 有跳过行时给出可执行的指引：不是"对端没填"，而是"没设通信对象"。
+    int skipped = 0;
+    for (const auto &r : rows_)
+    {
+        skipped += (r.status == kSkipped) ? 1 : 0;
+    }
+    if (skipped > 0)
+    {
+        emit logMessage(QStringLiteral("[任务] %1 项被跳过：对端未填且连接面板未设「当前通信对象」"
+                                       "（右键在线对端 → 设为通信对象）\n")
+                            .arg(skipped));
     }
 
     running_ = true;

@@ -48,7 +48,12 @@ public:
 public slots:
     // 开始一批任务。items 里目录行在此展开为文件序列（从 MainWindow
     // 的临时执行器迁来）。conn 是发送用的连接参数（MainWindow 持有）。
-    void startTasks(const relayer::app::RelayTaskItems &items, const relayer::app::ConnInfo &conn);
+    //
+    // defaultPeerId 是连接面板右键选定的"当前通信对象"：对端列留空的行
+    // 默认发给它（不额外验证——选它本身就是用户的授权）；填了对端的行
+    // 才按填的 id 发送。两者都空时该行标"已跳过"。
+    void startTasks(const relayer::app::RelayTaskItems &items, const relayer::app::ConnInfo &conn,
+                    const QString &defaultPeerId = QString());
 
     // 停止批次：当前项硬取消，剩余等待项标"已取消"。批次结束照常发
     // batchFinished（ok=false）。
@@ -77,7 +82,7 @@ public:
         kTransing,   // 传输中
         kDone,       // 完成
         kFailed,     // 失败
-        kSkipped,    // 跳过（未指定对端 / 连接断开后剩余）
+        kSkipped,    // 跳过（未指定对端且未选定通信对象 / 连接断开后剩余）
         kCancelled,  // 已取消
     };
 
