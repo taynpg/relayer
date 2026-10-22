@@ -165,7 +165,9 @@ void ConnectorControl::onConnectClicked()
     conn.password = password;
     conn.noAuth = noAuth;
 
-    if (core_ && !core_->listPeers(conn))
+    // 刷新优先复用常驻接收会话（不换 id、不断开）；会话不在线时 CoreService
+    // 内部回落到临时连接探测（等价于以前的 listPeers）。
+    if (core_ && !core_->refreshPeers(conn))
     {
         // 只有真在传输才会到这（接收挂起会被 CoreService 自动抢占）。
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有传输正在进行，请等它结束"));
@@ -185,7 +187,8 @@ void ConnectorControl::onClearClicked()
 
 void ConnectorControl::onRefreshClicked()
 {
-    // 与"连接"同一动作：v2 每次操作一条连接，刷新就是重新探测一遍。
+    // 与"连接"同一动作：都会话在线时在常驻接收连接上问列表（id 不变），
+    // 会话不在时重新探测一遍（CoreService::refreshPeers 内部回落）。
     onConnectClicked();
 }
 

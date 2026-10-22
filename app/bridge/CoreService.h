@@ -95,6 +95,11 @@ public:
     // 拉一次在线列表，结果从 peerListReceived 发出。返回值语义同 sendFile。
     bool listPeers(const relayer::app::ConnInfo &conn);
 
+    // 刷新在线列表：常驻接收会话活着时在**那条连接上**问（不换 id、不
+    // 打断接收），否则回落到 listPeers 的临时连接探测。返回 false =
+    // 传输中无法刷新，调用方负责提示。
+    bool refreshPeers(const relayer::app::ConnInfo &conn);
+
     // 中止当前操作（硬停：不发 cancel 帧，与 CLI 的 abort 同语义）。
     void cancelCurrent();
 
@@ -137,6 +142,13 @@ private:
     // ClientConfig 组装。回调里 emit 的都是 Qt 信号——从 io 线程 emit
     // 跨线程信号是安全的（AutoConnection 退化为 QueuedConnection）。
     cli::ClientConfig makeConfig(const relayer::app::ConnInfo &conn);
+
+    // 最近一次建 Client 用的连接参数指纹（host:port:认证方式:口令）。
+    // 只在 GUI 线程读写（makeConfig 与 refreshPeers 的调用方都在 GUI
+    // 线程），refreshPeers 靠它判断"表单里的地址是否还是当前会话的
+    // 地址"——用户改了地址再点连接，必须换新连接，不能在旧会话上问
+    // 旧服务器的列表。
+    QString activeConnKey_;
 
     // 一次操作的公共收尾（io 线程，onDone 回调里调）。
     void finishOperation(const cli::Outcome &o, bool withPeerList);

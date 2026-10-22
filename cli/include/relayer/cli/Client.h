@@ -142,6 +142,10 @@ struct ClientConfig
     // 时走 onDone，不走这里。
     std::function<void(const std::string &message)> onReceiveFailed;
 
+    // 常驻接收会话上刷新在线列表的结果（refreshPeers 的回程）。列表是
+    // **结构化**的：GUI 要填表格，文本拼回去再拆开是往显示格式上挂逻辑。
+    std::function<void(const std::vector<PeerEntry> &peers)> onPeerList;
+
     // 接收方覆盖策略：目标已存在时删掉旧文件再收。透传给
     // TransferPeer::Config::overwriteExisting（见那里的注释——默认拒绝
     // 覆盖是 core 层的刻意设计，打开它等于调用方显式授权"先删目标"）。
@@ -206,6 +210,15 @@ public:
 
     // 连上去打印在线列表。
     void listPeers();
+
+    // 在**当前这条连接**上问一次在线列表（只对常驻接收会话有意义）。
+    //
+    // 为什么必须有：每条新连接都会消耗一个服务端分配的新 id，还会把
+    // 常驻接收顶掉重挂——GUI 的"刷新"如果每次都走 listPeers（临时
+    // 连接），用户每点一次，本机 id 就涨一号（实测如此）。列表就该在
+    // 已经在线的那条连接上问，这是 v1 常驻连接的天然行为，v2 靠本方法
+    // 补回来。结果经 ClientConfig::onPeerList 回报，操作不结束。
+    void refreshPeers();
 
     // 主动停下。不发 cancel 帧：取消一个正在跑的传输时对端的收尾逻辑
     // 依赖它，但本工具在 Ctrl-C 场景下更应该**硬停**——那才是要测的

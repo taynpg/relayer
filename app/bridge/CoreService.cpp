@@ -83,6 +83,10 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
     cfg.password = fromQt(conn.password);
     cfg.serverAllowNoAuth = conn.noAuth;
 
+    // 记下这组参数（GUI 线程），供 refreshPeers 判断会话是否对应表单地址。
+    activeConnKey_ = conn.host + QStringLiteral(":") + QString::number(conn.port) + QStringLiteral(":") +
+                     (conn.noAuth ? QStringLiteral("N") : QStringLiteral("P")) + QStringLiteral(":") + conn.password;
+
     // GUI 的自动接收必须常驻（收完不断开）：每操作一条连接 + 服务端递增
     // 分配 id，"收完就重挂"会让接收方每收一个文件就换一次 id，发送方
     // 表格里的对端 id 立刻过期——再发就发进虚空，等满 answerTimeout 才报错。
@@ -107,6 +111,19 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
         }
         lastId_ = id;
         emit assignedIdChanged(toQt(id));
+    };
+
+    // 常驻接收会话上 refreshPeers 的回程。任何操作的 config 都带上它：
+    // 只有常驻接收会真的走到这里，挂着无害。
+    cfg.onPeerList = [this](const std::vector<cli::PeerEntry> &entries)
+    {
+        QList<PeerRow> rows;
+        rows.reserve(static_cast<qsizetype>(entries.size()));
+        for (const auto &p : entries)
+        {
+            rows.push_back(PeerRow{toQt(p.id), toQt(p.address)});
+        }
+        emit peerListReceived(rows);
     };
 
     return cfg;
@@ -249,6 +266,40 @@ bool CoreService::listPeers(const ConnInfo &conn)
                 [this](const cli::Outcome &o) { finishOperation(o, true); });
             client_->listPeers();
         });
+}
+
+bool CoreService::refreshPeers(const ConnInfo &conn)
+{
+    // 表单参数必须与当前会话一致才复用：用户改了地址/口令再点连接，
+    // 意图是"换服务器"，在旧会话上问列表等于问错人。
+    const QString key = conn.host + QStringLiteral(":") + QString::number(conn.port) + QStringLiteral(":") +
+                        (conn.noAuth ? QStringLiteral("N") : QStringLiteral("P")) + QStringLiteral(":") + conn.password;
+
+    // 常驻接收会话活着（挂起等文件，且没有排队中的被抢占操作）：直接在
+    // 那条连接上问列表。不占通道、不翻转 busy、不产生 operationFinished
+    // ——GUI 的接收状态机与身份显示完全无感，id 自然不会变。
+    //
+    // 条件里必须有 !queuedWork_：有排队的动作说明接收刚被抢占、马上要
+    // 换操作，此刻往旧 client 上发列表是往一条将死的连接上说话。
+    if (busy_.load() && receivePending_.load() && !queuedWork_.load() && key == activeConnKey_)
+    {
+        runOnIo(
+            [this]
+            {
+                // post 排队后才读 client_：GUI 线程不碰这个指针（单线程
+                // 契约），此刻它可能正被替换。
+                if (client_)
+                {
+                    client_->refreshPeers();
+                }
+            });
+        return true;
+    }
+
+    // 会话不在（没连过、接收停了）或参数变了：回落到临时连接探测——
+    // 这一次仍会消耗一个新 id，但那是"建立在线状态"的必要代价；建立
+    // 之后刷新就不再换 id。
+    return listPeers(conn);
 }
 
 void CoreService::cancelCurrent()

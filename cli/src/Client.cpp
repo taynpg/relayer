@@ -488,6 +488,18 @@ struct Client::Impl
         (void)session->send(f);
     }
 
+    void refreshPeers()
+    {
+        // 在现有连接上问列表，不新建连接（见 Client::refreshPeers 的注释）。
+        // touch 刷新空闲基线：等响应的往返不该被看门狗当成"对端无响应"。
+        if (finished || action != Action::kReceive || !authenticated || !session)
+        {
+            return;
+        }
+        touch();
+        requestPeerList();
+    }
+
     // ---------------------------------------------------------------------
     // 传输
     // ---------------------------------------------------------------------
@@ -725,12 +737,30 @@ struct Client::Impl
             }
             peers = std::move(list);
 
-            std::string text = "在线对端 " + std::to_string(peers.size()) + " 个：";
-            for (const auto &p : peers)
+            if (action == Action::kList)
             {
-                text += "\n  " + p.id + "  " + p.address;
+                // list 操作的契约输出：拼文本、结束。临时连接到此为止。
+                std::string text = "在线对端 " + std::to_string(peers.size()) + " 个：";
+                for (const auto &p : peers)
+                {
+                    text += "\n  " + p.id + "  " + p.address;
+                }
+                finish(true, std::move(text));
+                return;
             }
-            finish(true, std::move(text));
+
+            // 常驻接收会话上的刷新（refreshPeers）：报结构化列表就走，
+            // **不结束操作**——这条连接还要继续收文件，id 也要保持稳定。
+            if (config.onPeerList)
+            {
+                std::vector<PeerEntry> entries;
+                entries.reserve(peers.size());
+                for (const auto &p : peers)
+                {
+                    entries.push_back(PeerEntry{p.id, p.address});
+                }
+                config.onPeerList(entries);
+            }
             return;
         }
 
@@ -802,6 +832,14 @@ void Client::listPeers()
 {
     impl_->action = Action::kList;
     impl_->connect();
+}
+
+void Client::refreshPeers()
+{
+    // 只对常驻接收会话有意义。前提不满足时静默返回而不是报错：调用方
+    // （CoreService）只会在会话活着时走到这里，多余的错误路径只会诱导
+    // 上层做无意义的分支。
+    impl_->refreshPeers();
 }
 
 void Client::abort()
