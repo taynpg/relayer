@@ -30,6 +30,7 @@ add_test(NAME filestore COMMAND filestore_test)
 add_executable(core_test
     core/FrameTest.cpp
     core/AuthTest.cpp
+    core/StateMachineTest.cpp
 )
 target_link_libraries(core_test PRIVATE relayer_core Catch2::Catch2WithMain)
 target_include_directories(core_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -54,6 +55,13 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME protocol_doc
              COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/check_protocol_doc.py)
     set_tests_properties(protocol_doc PROPERTIES
+                         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                         LABELS "docs")
+
+    # 传输状态机：PROTOCOL.md §8 的状态表/转移表必须与 StateMachine.h 一致。
+    add_test(NAME transition_doc
+             COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/check_transition_doc.py)
+    set_tests_properties(transition_doc PROPERTIES
                          WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
                          LABELS "docs")
 else()

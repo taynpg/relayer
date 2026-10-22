@@ -472,6 +472,27 @@ nonce 重放被拒、两个 proof 恒不相等、乱序帧被拒、失败终态�
 
 ### 3.5 core/transfer：传输引擎
 
+#### 3.5.0 状态机（已完成）
+
+`core/include/relayer/core/transfer/StateMachine.h`。把 `PROTOCOL.md` §8 的状态与
+转移写成一张 `constexpr` 表，`StateMachine::fire(event)` 查表并返回 `Status`。
+
+**状态：已完成**。要点：
+
+- 状态与事件都是显式枚举，转移表 `kTransitions[]` 是纯数据（`{from, event, to}`）。
+  没有 switch-cascade——那种写法漏一个 case 编译器不会说话。
+- 非法转移返回 `kProtocol` 错误、**状态保持不变**。不改成一个 `Failed` 状态，
+  是因为诊断时最需要知道的是"当前停在哪一步"。
+- `kDone` 是唯一终态，任何事件都被拒——包括迟到的 `Resume`：一次已作废的传输
+  不该因为一条晚到的恢复请求又活过来。
+- 测试遍历 **6 状态 × 10 事件 = 60 个组合**，逐个断言"表里写的成功、没写的失败
+  且状态不变"，另有一条独立断言合法 10 条 / 非法 50 条。
+- `tools/check_transition_doc.py` 接进 CTest：直接解析 `PROTOCOL.md` §8.1/§8.2
+  的表格，与代码比对（T1-T5）。已用"篡改目标状态""删掉一条转移"两种方式验证
+  它真的会失败，不是一个恒真的检查。
+- 单元测试里另有一份**手抄**的文档表用于比对。刻意不从 `kTransitions` 生成：
+  那样测试就退化成"表和自己相等"，永远不可能失败。
+
 #### 3.5.1 复用 v1 已验证的设计
 
 - 先落盘后 ACK

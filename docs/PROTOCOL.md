@@ -437,6 +437,14 @@ Idle → Handshaking → Transferring → Finalizing → Done
 
 这条规则需要有测试遍历全部组合来保证，不能靠"实现的时候记得"。
 
+实现与校验：
+
+- 代码：`core/include/relayer/core/transfer/StateMachine.h` 的 `kTransitions[]`
+- 单元测试遍历 6×10=60 个组合（`tests/core/StateMachineTest.cpp`）
+- `tools/check_transition_doc.py` 在本节与代码之间做双向比对，接在 CTest 里
+
+改本节表格或改代码表，任一侧漏改都会让 CI 变红。
+
 ### 8.3 分块与增量校验
 
 传输大文件时按块（默认 4MB）发送，每块算一个 SHA-256。
