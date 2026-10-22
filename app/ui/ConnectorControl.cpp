@@ -165,9 +165,11 @@ void ConnectorControl::onConnectClicked()
     conn.password = password;
     conn.noAuth = noAuth;
 
-    if (core_)
+    if (core_ && !core_->listPeers(conn))
     {
-        core_->listPeers(conn);
+        // 只有真在传输才会到这（接收挂起会被 CoreService 自动抢占）。
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有传输正在进行，请等它结束"));
+        return;
     }
     emit probeRequested(conn);
     saveIpHistory(text);
@@ -189,11 +191,11 @@ void ConnectorControl::onRefreshClicked()
 
 void ConnectorControl::onBusyChanged(bool busy)
 {
-    // busy 期间三个按钮全部禁用，避免并发探测把状态搅乱（同 v1 的
-    // onConnectting）。
-    ui_->btnConnect->setEnabled(!busy);
+    // 连接/刷新按钮**不再随 busy 禁用**：v2 的"在线"由自动接收循环维持，
+    // 接收挂起期间 busy 恒为 true，禁用会让用户永远点不了刷新（实测如此）。
+    // CoreService 已能抢占挂起的接收，传输中再点会收到明确提示。
+    // 断开按钮保留 busy 禁用：它要动对端表，探测中途清表会跟结果渲染打架。
     ui_->btnDisconnect->setEnabled(!busy);
-    ui_->btnRefresh->setEnabled(!busy);
 }
 
 void ConnectorControl::onAssignedIdChanged(const QString &id)

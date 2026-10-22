@@ -156,11 +156,6 @@ void MainWindow::onSendToPeer(const QString &peerId, const QString &peerName)
     {
         return;
     }
-    if (core_->busy())
-    {
-        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有操作正在进行，请等它结束"));
-        return;
-    }
 
     const QString file = QFileDialog::getOpenFileName(this, QStringLiteral("选择要发送的文件"));
     if (file.isEmpty())
@@ -168,9 +163,20 @@ void MainWindow::onSendToPeer(const QString &peerId, const QString &peerName)
         return;
     }
 
+    // 挂起的接收让位给发送（CoreService 抢占），发送结束自动重挂——
+    // 否则"等文件"这个永不结束的操作会把发送通道永久堵死。
+    if (core_->busy() && core_->canPreempt())
+    {
+        log_->appendLog(QStringLiteral("[接收] 让位于发送，结束后自动恢复\n"));
+    }
+    if (!core_->sendFile(file, QString(), peerId, lastConn_))
+    {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有传输正在进行，请等它结束"));
+        return;
+    }
+
     lastProgressLog_ = std::chrono::steady_clock::now();
     log_->appendLog(QStringLiteral("[发送] %1 → %2（%3）\n").arg(QDir(file).dirName(), peerId, peerName));
-    core_->sendFile(file, QString(), peerId, lastConn_);
 }
 
 void MainWindow::onProgress(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond)
@@ -236,8 +242,9 @@ void MainWindow::onOperationFinished(bool ok, const QString &summary, const QStr
         return;  // 任务进行中不恢复自动接收，通道让给任务
     }
 
-    // 一次接收结束后立刻重新挂起，维持"在线"。
-    if (receiveWanted_ && !core_->busy())
+    // 重挂接收要等两件事都落地：busy 翻回 false，且没有"被抢占排队、
+    // 马上要开跑"的操作（hasQueuedWork）——否则接收会跟它抢通道。
+    if (receiveWanted_ && !core_->busy() && !core_->hasQueuedWork())
     {
         startAutoReceive();
     }
@@ -253,9 +260,15 @@ void MainWindow::onOperationFinished(bool ok, const QString &summary, const QStr
 
 void MainWindow::onTransTaskRun(const relayer::app::RelayTaskItems &items)
 {
-    if (taskRunning_ || core_->busy())
+    if (taskRunning_)
     {
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有任务正在进行，请等它结束"));
+        return;
+    }
+    // 忙但只是接收挂起：可抢占，继续；传输中：拒绝。
+    if (core_->busy() && !core_->canPreempt())
+    {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有传输正在进行，请等它结束"));
         return;
     }
     if (lastConn_.host.isEmpty())
@@ -302,6 +315,10 @@ void MainWindow::onTransTaskRun(const relayer::app::RelayTaskItems &items)
         return;
     }
     taskRunning_ = true;
+    if (core_->busy() && core_->canPreempt())
+    {
+        log_->appendLog(QStringLiteral("[接收] 让位于任务，结束后自动恢复\n"));
+    }
     log_->appendLog(QStringLiteral("[任务] 开始：%1 个文件\n").arg(taskQueue_.size()));
     startNextTaskItem();
 }
@@ -325,7 +342,14 @@ void MainWindow::startNextTaskItem()
                         .arg(taskIndex_ + 1)
                         .arg(taskQueue_.size())
                         .arg(QFileInfo(t.localDir).fileName(), t.peerId, t.relDir));
-    core_->sendFile(t.localDir, t.relDir, t.peerId, lastConn_);
+    if (!core_->sendFile(t.localDir, t.relDir, t.peerId, lastConn_))
+    {
+        // 防御：入口已挡过真忙，到这说明通道被意外占住。宁可中止任务
+        // 也不能让任务链卡在"等一个永远不来的 operationFinished"。
+        log_->appendLog(QStringLiteral("[任务] 通道被占用，任务中止\n"));
+        taskQueue_.clear();
+        taskRunning_ = false;
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)

@@ -96,17 +96,67 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
     return cfg;
 }
 
-void CoreService::sendFile(const QString &localPath, const QString &remoteName, const QString &toPeerId,
+bool CoreService::runOrAfterReceive(std::function<void()> beginOp)
+{
+    if (!busy_)
+    {
+        // 空闲：同步占上 busy（gate 住 GUI 线程的后续请求），io 线程开跑。
+        busy_ = true;
+        emit busyChanged(true);
+        runOnIo(std::move(beginOp));
+        return true;
+    }
+    if (!receivePending_)
+    {
+        return false;  // 传输中，真忙
+    }
+
+    // 抢占挂起的接收：排队动作 → 取消接收 → onDone 落地后动作开跑。
+    //
+    // 顺序要点：queuedWork_ 置 true 必须先于 abort()——abort 同步走 onDone，
+    // onDone 里 emit 的 operationFinished 会被 queued 投递到 GUI；GUI 处理它时
+    // 决定要不要重挂自动接收，判据就是 queuedWork_。若在 abort 之后才置位，
+    // GUI 可能在 io 线程两条语句之间读到旧值，抢先重挂、和排队的动作抢通道。
+    runOnIo(
+        [this, act = std::move(beginOp)]() mutable
+        {
+            queuedWork_ = true;
+            if (client_)
+            {
+                client_->abort();  // 同步走 onDone：emit finished、busy 翻 false
+            }
+            // act 里会重新占 busy。post 而不是直接调：此刻仍在 abort 的
+            // 调用链上，直接建新 Client 替换 client_ 又是回调栈析构的老坑。
+            asio::post(ctx_, std::move(act));
+        });
+    return true;
+}
+
+void CoreService::finishOperation(const cli::Outcome &o, bool withPeerList)
+{
+    // io 线程。先发列表（list 的惯例顺序：先数据后结论），再发结论与
+    // busy 翻转——GUI 侧依赖"收到 finished 时 busy 已可用"来解锁按钮。
+    if (withPeerList && !o.peerList.empty())
+    {
+        QList<PeerRow> rows;
+        rows.reserve(static_cast<qsizetype>(o.peerList.size()));
+        for (const auto &p : o.peerList)
+        {
+            rows.push_back(PeerRow{toQt(p.id), toQt(p.address)});
+        }
+        emit peerListReceived(rows);
+    }
+    emit operationFinished(o.ok, toQt(o.summary), toQt(o.status.message));
+
+    busy_ = false;
+    receivePending_ = false;
+    emit busyChanged(false);
+}
+
+bool CoreService::sendFile(const QString &localPath, const QString &remoteName, const QString &toPeerId,
                            const ConnInfo &conn)
 {
-    if (busy_)
-    {
-        return;
-    }
-    busy_ = true;
-    emit busyChanged(true);
-
-    runOnIo(
+    return runOrAfterReceive(
         [this, localPath, remoteName, toPeerId, cfg = makeConfig(conn)]() mutable
         {
             // 上一个 Client 结束后残留的 timer cancel 需要一轮 run 才落地，
@@ -117,29 +167,14 @@ void CoreService::sendFile(const QString &localPath, const QString &remoteName, 
             // 的成员，那时析构 Client 就是 use-after-free。CLI 的 main
             // 从不中途释放，所以那条路没暴露过；这里改成"留着到下一次
             // 操作再替换"，替换点在本 lambda 里，不在任何回调栈上。
+            busy_ = true;
+            receivePending_ = false;
+            queuedWork_ = false;
+            emit busyChanged(true);
             client_ = std::make_shared<cli::Client>(
                 ctx_, std::move(cfg), [this](const cli::ProgressReport &p)
                 { emit progressChanged(p.bytesDone, p.bytesTotal, p.bytesPerSecond); },
-                [this](const cli::Outcome &o)
-                {
-                    // io 线程。先发列表（list 的惯例顺序：先数据后结论），
-                    // 再发结论与 busy 翻转——GUI 侧依赖"收到 finished 时
-                    // busy 已可用"来解锁按钮。
-                    if (!o.peerList.empty())
-                    {
-                        QList<PeerRow> rows;
-                        rows.reserve(static_cast<qsizetype>(o.peerList.size()));
-                        for (const auto &p : o.peerList)
-                        {
-                            rows.push_back(PeerRow{toQt(p.id), toQt(p.address)});
-                        }
-                        emit peerListReceived(rows);
-                    }
-                    emit operationFinished(o.ok, toQt(o.summary), toQt(o.status.message));
-
-                    busy_ = false;
-                    emit busyChanged(false);
-                });
+                [this](const cli::Outcome &o) { finishOperation(o, true); });
             client_->sendFile(fromQt(localPath), fromQt(remoteName), fromQt(toPeerId));
         });
 }
@@ -148,7 +183,7 @@ void CoreService::startReceive(const QString &targetDir, const ConnInfo &conn)
 {
     if (busy_)
     {
-        return;
+        return;  // 只有 MainWindow 调用，且它有 receiveActive_ 状态机，到不了这里
     }
     busy_ = true;
     emit busyChanged(true);
@@ -156,48 +191,31 @@ void CoreService::startReceive(const QString &targetDir, const ConnInfo &conn)
     runOnIo(
         [this, targetDir, cfg = makeConfig(conn)]() mutable
         {
+            busy_ = true;
+            receivePending_ = true;
+            queuedWork_ = false;
             client_ = std::make_shared<cli::Client>(
                 ctx_, std::move(cfg), [this](const cli::ProgressReport &p)
                 { emit progressChanged(p.bytesDone, p.bytesTotal, p.bytesPerSecond); },
-                [this](const cli::Outcome &o)
-                {
-                    emit operationFinished(o.ok, toQt(o.summary), toQt(o.status.message));
-                    busy_ = false;
-                    emit busyChanged(false);
-                });
+                [this](const cli::Outcome &o) { finishOperation(o, false); });
             client_->receiveFile(fromQt(targetDir));
         });
 }
 
-void CoreService::listPeers(const ConnInfo &conn)
+bool CoreService::listPeers(const ConnInfo &conn)
 {
-    if (busy_)
-    {
-        return;
-    }
-    busy_ = true;
-    emit busyChanged(true);
-
-    runOnIo(
+    return runOrAfterReceive(
         [this, cfg = makeConfig(conn)]() mutable
         {
+            busy_ = true;
+            receivePending_ = false;
+            queuedWork_ = false;
+            emit busyChanged(true);
             // 不需要进度。必须是显式 lambda 而不是 {}：make_shared 是
             // 可变参转发，braced-init-list 无法在转发中推导参数类型。
             client_ = std::make_shared<cli::Client>(
                 ctx_, std::move(cfg), [](const cli::ProgressReport &) {},
-                [this](const cli::Outcome &o)
-                {
-                    QList<PeerRow> rows;
-                    rows.reserve(static_cast<qsizetype>(o.peerList.size()));
-                    for (const auto &p : o.peerList)
-                    {
-                        rows.push_back(PeerRow{toQt(p.id), toQt(p.address)});
-                    }
-                    emit peerListReceived(rows);
-                    emit operationFinished(o.ok, toQt(o.summary), toQt(o.status.message));
-                    busy_ = false;
-                    emit busyChanged(false);
-                });
+                [this](const cli::Outcome &o) { finishOperation(o, true); });
             client_->listPeers();
         });
 }

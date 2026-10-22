@@ -70,15 +70,30 @@ public:
         return busy_;
     }
 
+    // busy 是否属于"接收挂起等文件"——这种忙可以被打断（见 runOrAfterReceive），
+    // 真正的传输忙不能。
+    bool canPreempt() const noexcept
+    {
+        return busy_ && receivePending_;
+    }
+
+    // 有已抢占、还没开始执行的排队操作。GUI 据此决定要不要重挂自动接收：
+    // 排队的操作马上会把 busy 重新占上，此刻重挂会跟它抢通道。
+    bool hasQueuedWork() const noexcept
+    {
+        return queuedWork_;
+    }
+
     // 把本地文件发给对端。remoteName 为空时用本地文件名。
-    void sendFile(const QString &localPath, const QString &remoteName, const QString &toPeerId,
+    // 返回 false = 真忙（传输中），本次请求被拒绝；true = 已开始或已排队。
+    bool sendFile(const QString &localPath, const QString &remoteName, const QString &toPeerId,
                   const relayer::app::ConnInfo &conn);
 
     // 挂起等待别人发文件，落到 targetDir 目录。
     void startReceive(const QString &targetDir, const relayer::app::ConnInfo &conn);
 
-    // 拉一次在线列表，结果从 peerListReceived 发出。
-    void listPeers(const relayer::app::ConnInfo &conn);
+    // 拉一次在线列表，结果从 peerListReceived 发出。返回值语义同 sendFile。
+    bool listPeers(const relayer::app::ConnInfo &conn);
 
     // 中止当前操作（硬停：不发 cancel 帧，与 CLI 的 abort 同语义）。
     void cancelCurrent();
@@ -104,9 +119,19 @@ private:
     void startIoThread();
     void runOnIo(std::function<void()> fn);
 
+    // 操作入口的统一闸门：
+    //   - 空闲：同步置 busy，直接跑 beginOp（io 线程）；
+    //   - 接收挂起：抢占——取消接收，beginOp 排队等接收的 onDone 落地后执行；
+    //   - 传输中：返回 false，调用方负责提示。
+    // beginOp 在 io 线程执行，负责建 Client 并发起操作。
+    bool runOrAfterReceive(std::function<void()> beginOp);
+
     // ClientConfig 组装。回调里 emit 的都是 Qt 信号——从 io 线程 emit
     // 跨线程信号是安全的（AutoConnection 退化为 QueuedConnection）。
     cli::ClientConfig makeConfig(const relayer::app::ConnInfo &conn);
+
+    // 一次操作的公共收尾（io 线程，onDone 回调里调）。
+    void finishOperation(const cli::Outcome &o, bool withPeerList);
 
     asio::io_context ctx_;
 
@@ -127,7 +152,12 @@ private:
     std::shared_ptr<cli::Client> client_;
     std::string lastId_;  // 去重：同一个 id 不重复发 assignedIdChanged
 
+    // busy_ / receivePending_ / queuedWork_ 是 atomic：GUI 线程读它们做
+    // 闸门判断，io 线程写。receivePending_ 只在 beginReceive 置 true、
+    // finishOperation 清掉；queuedWork_ 表达"有被抢占排队的操作还没开跑"。
     std::atomic<bool> busy_{false};
+    std::atomic<bool> receivePending_{false};
+    std::atomic<bool> queuedWork_{false};
 };
 
 }  // namespace relayer::app
