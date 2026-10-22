@@ -31,6 +31,7 @@ set(CMAKE_AUTOUIC_SEARCH_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/ui)
 add_executable(relayer WIN32
     main.cpp
     MainWindow.cpp
+    bridge/CoreService.cpp
     relayer.qrc
 )
 
@@ -40,9 +41,7 @@ target_include_directories(relayer PRIVATE
 )
 
 target_link_libraries(relayer PRIVATE
-    relayer_core
-    relayer_asio       # bridge 要在头文件里持有 io_context / Session，必须显式
-    relayer_platform
+    relayer_client      # bridge 直接复用 CLI 的 Client 门面（PUBLIC 带 core/asio/platform）
     Qt6::Widgets
 )
 

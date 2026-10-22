@@ -48,6 +48,16 @@ struct TransferStats
     std::uint64_t acksReceived = 0;
 };
 
+// 在线对端（kAnswerClientList 的一项）。
+//
+// 之前只存在于 Impl 里、以拼好的文本出现在 summary 中。GUI 需要结构化的
+// 列表来填表格，文本拼回去再拆开是往显示格式上挂逻辑，所以提到这里。
+struct PeerEntry
+{
+    std::string id;
+    std::string address;
+};
+
 // 一次操作的最终结论。
 //
 // 不直接用 Status 是有原因的：Status 只有"成功/失败 + 原因"，而这里的
@@ -63,6 +73,8 @@ struct Outcome
     Status status;
     // 传输层的计数。list 这类没有传输的操作全为 0。
     TransferStats stats;
+    // list 操作的在线对端。其他操作为空。
+    std::vector<PeerEntry> peerList;
 };
 
 // 进度回调。bytesPerSecond 由 Client 自己算——传原始计数让每个调用方
@@ -90,6 +102,14 @@ struct ClientConfig
     // 认证与握手的时限。中继不可达时不能无限等——命令行工具挂住比报错
     // 更糟，用户不知道是卡住了还是慢。
     std::chrono::seconds connectTimeout{15};
+
+    // 服务端分配身份的回调（可选）。
+    //
+    // CLI 不用它（CLI 的契约输出是 ASSIGNED_ID= 那行 stdout），GUI 没有
+    // stdout 可抓，靠它把自己的 id 显示出来。**可能被多次调用**：认证刚过
+    // 时 id 为空，收到 kAnswerId 后是真实 id，服务端改名再通知也会再来。
+    // 与 onDone 不同，回调之后操作还会继续。
+    std::function<void(const std::string &)> onIdAssigned;
 
     // 传输参数。chunkSize 在命令行可调，主要用于把"小文件测不出多块"
     // 这条路堵上（见 TransferPeer::Config 的注释）。

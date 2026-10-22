@@ -150,6 +150,13 @@ struct Client::Impl
                 o.stats.acksSent = s.acksSent;
                 o.stats.acksReceived = s.acksReceived;
             }
+            if (action == Action::kList)
+            {
+                for (const auto &p : peers)
+                {
+                    o.peerList.push_back(PeerEntry{p.id, p.address});
+                }
+            }
             onDone(o);
         }
     }
@@ -381,6 +388,10 @@ struct Client::Impl
             {
                 std::printf("ASSIGNED_ID=%s\n", assignedId.c_str());
                 std::fflush(stdout);
+                if (config.onIdAssigned)
+                {
+                    config.onIdAssigned(assignedId);
+                }
             }
 
             onAuthenticated();
