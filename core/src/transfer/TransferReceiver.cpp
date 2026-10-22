@@ -89,15 +89,22 @@ Status TransferReceiver::open(const TransferDesc &desc, std::string_view targetP
         received_.assign(totalChunks_, false);
     }
 
-    // 目标已存在且长度一致：当作"对方已经有这个文件了"。
+    // 目标已存在：一律拒绝，不按大小放宽。
     //
-    // 不看内容——比内容要读两遍文件，而这一步的用途只是"别重复传一遍"。
-    // 上层若在意内容是否相同，应当先比 quickFingerprint（那正是描述里
-    // 带 fingerprint 的用途）。
+    // 早先这里写成"存在且大小相同就报 kAlreadyExists，大小不同就继续"，
+    // 结果是**大小不同时静默覆盖掉用户已有的文件**。大小相同才报错、
+    // 不同反而覆盖，这个行为没有任何用户可以预期，而代价是用户数据。
+    //
+    // 判断"是不是同一个文件"该用描述里的 fingerprint / sha256，但那是
+    // 上层的策略（要不要"内容一样就跳过"），不是这一层的默认。本层只做
+    // 一件不会错的事：不覆盖。
+    //
+    // 调用方要覆盖时应当先删目标 —— 那是一个显式的、能写进日志和 UI 的
+    // 动作，而不是传输过程里的副作用。
     const auto targetStat = store_.stat(targetPath_);
-    if (targetStat.exists && !targetStat.isDir && targetStat.size == totalSize_)
+    if (targetStat.exists && !targetStat.isDir)
     {
-        return Status::Fail(ErrorCode::kAlreadyExists, "target already exists with the same size");
+        return Status::Fail(ErrorCode::kAlreadyExists, "target already exists: " + targetPath_);
     }
 
     // 残片：存在就尽量续传，不存在就建一个空的。

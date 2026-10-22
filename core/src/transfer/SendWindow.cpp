@@ -65,16 +65,22 @@ std::uint32_t SendWindow::freeSlots() const noexcept
     }
     const auto byWindow = used >= window_ ? 0 : window_ - used;
 
-    // 再夹一个"真的还有块可发"的上界：只数状态仍是 kPending 的块。
+    // 再夹一个"真的还有块可发"的上界。
     //
     // 少了这个上界会怎样：一块 1MB 的文件配 4MB 窗口，全部发完之后
     // freeSlots() 会一直报 1/2/3 —— 窗口没满，但没块可发。调用方据此
     // 认为"还有活要干"，于是空转。
     //
-    // 注意不能用 total_ - acked_ 来算：块一旦进入在飞状态，它既没被确认
-    // 也不能再被取走，用它做上界会让"全部在飞、一块都取不出来"的情况
-    // 仍然报出空位。只有 kPending 数才是真正的"可发数量"。
-    const auto available = pending();
+    // **必须是 kPending + kNeedRetransmit，不能只有 kPending。**
+    // 只用 kPending 曾经造成过活跃的死锁：一块丢包后变成 kNeedRetransmit
+    // （它在 inUse 里，占着窗口，但不在 pending 里），于是
+    //     byWindow = window - used > 0
+    //     available = pending() = 0
+    //     freeSlots = min(byWindow, 0) = 0
+    // takeNextBatch 第一行就 budget==0 返回，重传队列里的块永远取不出来。
+    // 而 outstanding() 只报告 kInflight，重传超时扫描也看不到它们——
+    // 两头都以为"没活干"，传输无声停住，不报错也不重试。
+    const auto available = pending() + needRetransmit();
 
     return std::min(byWindow, available);
 }

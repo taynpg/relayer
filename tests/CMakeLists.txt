@@ -37,6 +37,7 @@ add_executable(core_test
     core/SendWindowTest.cpp
     core/TransferSenderTest.cpp
     core/TransferReceiverTest.cpp
+    core/TransferPeerTest.cpp
     core/FrameReaderTest.cpp
     core/ConnectionTest.cpp
     core/HeartbeatTest.cpp

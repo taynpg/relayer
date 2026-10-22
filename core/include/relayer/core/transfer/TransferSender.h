@@ -122,6 +122,19 @@ public:
     // 收到 ACK。
     void applyAck(const ChunkAck &ack);
 
+    // 所有**在飞**的块号（升序）。用于"过一遍重传定时器"。
+    //
+    // 转发到 SendWindow 的同名方法：本层不重新定义语义。之所以不直接把
+    // window_ 暴露出去，是因为窗口里还有 pending / acked 那些状态，
+    // 上层不该看见——它只该知道"哪些块我已经发出去在等回音"。
+    [[nodiscard]] std::vector<std::uint32_t> outstandingChunks() const;
+
+    // 把在飞超时的块标记为待重传。返回被标记的块数。
+    //
+    // 时间判定在上层：SendWindow 刻意不认识时间，而"多久算超时"取决于
+    // 链路质量，那是上层才知道的事。
+    std::uint32_t markRetransmit(const std::vector<std::uint32_t> &chunks);
+
     // 取消：把所有在读和在飞的块归还窗口，清空就绪队列。取消后不可复用。
     void cancelAll();
 

@@ -445,6 +445,16 @@ void TransferSender::applyAck(const ChunkAck &ack)
     }
 }
 
+std::vector<std::uint32_t> TransferSender::outstandingChunks() const
+{
+    return window_ ? window_->outstanding() : std::vector<std::uint32_t>{};
+}
+
+std::uint32_t TransferSender::markRetransmit(const std::vector<std::uint32_t> &chunks)
+{
+    return window_ ? window_->markRetransmit(chunks) : 0;
+}
+
 void TransferSender::cancelAll()
 {
     if (!window_)
