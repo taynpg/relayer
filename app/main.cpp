@@ -7,6 +7,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QApplication::setApplicationName("relayer");
     QApplication::setApplicationVersion(RELAYER_VERSION);
+    QApplication::setOrganizationName("relayer");
 
     if (argc == 2 && std::strcmp(argv[1], "--version") == 0)
     {

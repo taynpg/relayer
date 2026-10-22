@@ -32,6 +32,8 @@ add_executable(relayer WIN32
     main.cpp
     MainWindow.cpp
     bridge/CoreService.cpp
+    ui/ConnectorControl.cpp
+    ui/LogControl.cpp
     relayer.qrc
 )
 
