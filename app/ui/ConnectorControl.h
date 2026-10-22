@@ -45,9 +45,9 @@ signals:
     // 右键"发送文件到此对端"。MainWindow 负责弹文件选择框并调 CoreService。
     void sendToPeerRequested(const QString &peerId, const QString &peerName);
 
-    // 用户点了"连接"，参数校验通过。MainWindow 记住这三个值，供发送与
+    // 用户点了"连接"，参数校验通过。MainWindow 记住这组参数，供发送与
     // 自动接收复用（CoreService 一次一个操作，每次操作都要重新给参数）。
-    void probeRequested(const QString &host, quint16 port, const QString &password);
+    void probeRequested(const relayer::app::ConnInfo &conn);
 
     // 连接/探测的结论，交给日志面板显示。
     void logMessage(const QString &msg);

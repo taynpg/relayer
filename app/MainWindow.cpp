@@ -100,11 +100,9 @@ void MainWindow::wireSignals()
     connect(core_, &relayer::app::CoreService::assignedIdChanged, this, &MainWindow::onAssignedIdChanged);
 }
 
-void MainWindow::onProbeRequested(const QString &host, quint16 port, const QString &password)
+void MainWindow::onProbeRequested(const relayer::app::ConnInfo &conn)
 {
-    lastHost_ = host;
-    lastPort_ = port;
-    lastPassword_ = password;
+    lastConn_ = conn;
 }
 
 void MainWindow::onAssignedIdChanged(const QString &id)
@@ -125,7 +123,7 @@ void MainWindow::startAutoReceive()
     }
     receiveActive_ = true;
     log_->appendLog(QStringLiteral("[接收] 等待接收，落点 %1\n").arg(receiveDir_));
-    core_->startReceive(receiveDir_, lastHost_, lastPort_, lastPassword_);
+    core_->startReceive(receiveDir_, lastConn_);
 }
 
 void MainWindow::onSendToPeer(const QString &peerId, const QString &peerName)
@@ -148,7 +146,7 @@ void MainWindow::onSendToPeer(const QString &peerId, const QString &peerName)
 
     lastProgressLog_ = std::chrono::steady_clock::now();
     log_->appendLog(QStringLiteral("[发送] %1 → %2（%3）\n").arg(QDir(file).dirName(), peerId, peerName));
-    core_->sendFile(file, QString(), peerId, lastHost_, lastPort_, lastPassword_);
+    core_->sendFile(file, QString(), peerId, lastConn_);
 }
 
 void MainWindow::onProgress(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond)

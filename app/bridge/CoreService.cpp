@@ -74,12 +74,13 @@ void CoreService::runOnIo(std::function<void()> fn)
     asio::post(ctx_, std::move(fn));
 }
 
-cli::ClientConfig CoreService::makeConfig(const QString &host, quint16 port, const QString &password)
+cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
 {
     cli::ClientConfig cfg;
-    cfg.host = fromQt(host);
-    cfg.port = port;
-    cfg.password = fromQt(password);
+    cfg.host = fromQt(conn.host);
+    cfg.port = conn.port;
+    cfg.password = fromQt(conn.password);
+    cfg.serverAllowNoAuth = conn.noAuth;
 
     cfg.onIdAssigned = [this](const std::string &id)
     {
@@ -96,7 +97,7 @@ cli::ClientConfig CoreService::makeConfig(const QString &host, quint16 port, con
 }
 
 void CoreService::sendFile(const QString &localPath, const QString &remoteName, const QString &toPeerId,
-                           const QString &host, quint16 port, const QString &password)
+                           const ConnInfo &conn)
 {
     if (busy_)
     {
@@ -106,7 +107,7 @@ void CoreService::sendFile(const QString &localPath, const QString &remoteName, 
     emit busyChanged(true);
 
     runOnIo(
-        [this, localPath, remoteName, toPeerId, cfg = makeConfig(host, port, password)]() mutable
+        [this, localPath, remoteName, toPeerId, cfg = makeConfig(conn)]() mutable
         {
             // 上一个 Client 结束后残留的 timer cancel 需要一轮 run 才落地，
             // 这里的 post 天然排在它们之后，直接替换是安全的。
@@ -143,7 +144,7 @@ void CoreService::sendFile(const QString &localPath, const QString &remoteName, 
         });
 }
 
-void CoreService::startReceive(const QString &targetDir, const QString &host, quint16 port, const QString &password)
+void CoreService::startReceive(const QString &targetDir, const ConnInfo &conn)
 {
     if (busy_)
     {
@@ -153,7 +154,7 @@ void CoreService::startReceive(const QString &targetDir, const QString &host, qu
     emit busyChanged(true);
 
     runOnIo(
-        [this, targetDir, cfg = makeConfig(host, port, password)]() mutable
+        [this, targetDir, cfg = makeConfig(conn)]() mutable
         {
             client_ = std::make_shared<cli::Client>(
                 ctx_, std::move(cfg), [this](const cli::ProgressReport &p)
@@ -168,7 +169,7 @@ void CoreService::startReceive(const QString &targetDir, const QString &host, qu
         });
 }
 
-void CoreService::listPeers(const QString &host, quint16 port, const QString &password)
+void CoreService::listPeers(const ConnInfo &conn)
 {
     if (busy_)
     {
@@ -178,7 +179,7 @@ void CoreService::listPeers(const QString &host, quint16 port, const QString &pa
     emit busyChanged(true);
 
     runOnIo(
-        [this, cfg = makeConfig(host, port, password)]() mutable
+        [this, cfg = makeConfig(conn)]() mutable
         {
             // 不需要进度。必须是显式 lambda 而不是 {}：make_shared 是
             // 可变参转发，braced-init-list 无法在转发中推导参数类型。

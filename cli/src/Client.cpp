@@ -337,6 +337,12 @@ struct Client::Impl
         // 客户端侧的字段名是 clientPassword，不是 server.password——
         // 后者是"服务端要求的口令"，填错了表现为认证失败，很难查。
         sc.clientPassword = config.password;
+        // server.allowNoAuth 在客户端侧的语义是"我知道对端关了认证"：
+        // 决定 ClientHandshake 走 kNoAuth（不期待 Challenge）还是
+        // kRequireAuth。不设置它时，无认证中继发来的 answer_id 会被
+        // 当成"未完成握手册收到了业务帧"而拒绝连接——症状是"连上去
+        // 立刻被断开"，与中继不可达的表现完全不同，极难排查。
+        sc.server.allowNoAuth = config.serverAllowNoAuth;
         sc.handshakeTimeout = config.connectTimeout;
 
         core::session::SessionHandler h;
@@ -408,6 +414,14 @@ struct Client::Impl
             if (finished)
             {
                 return;
+            }
+            // 未认证状态收到业务帧，几乎总是"客户端按认证模式连了一个
+            // 无认证中继"：服务端跳过握手直接发 answer_id，被客户端按
+            // 协议拒绝。这个场景足够常见（服务端 --allow-no-auth 部署），
+            // 给一条可照做的提示，而不是让用户去猜协议细节。
+            if (!config.serverAllowNoAuth && st.message.find("non-auth frame") != std::string::npos)
+            {
+                st.message += "（中继可能以 --allow-no-auth 启动，客户端请加 --no-auth 重试）";
             }
             finish(false, "与中继的连接断开", std::move(st));
         };

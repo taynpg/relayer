@@ -132,19 +132,40 @@ void ConnectorControl::onConnectClicked()
 
     // 口令每次询问而不是持久化：持久化的口令等于把钥匙贴在锁上
     // （v1 存在配置里，E3 全量迁移 Setting 时再决定是否沿用那个习惯）。
-    // 留空即以未认证方式连接（服务端允许时）。
-    QString password = QInputDialog::getText(
-        this, QStringLiteral("认证"), QStringLiteral("认证口令（服务端未启用认证可留空）："), QLineEdit::Password);
+    QString password =
+        QInputDialog::getText(this, QStringLiteral("认证"), QStringLiteral("认证口令："), QLineEdit::Password);
     if (password.isNull())
     {
         return;  // 用户取消
     }
 
+    // 口令为空不自动降级成无认证（服务端侧同一条原则的镜像）：漏填口令
+    // 该报错，而不是替用户决定"那就别认证了"。这里显式确认一次。
+    bool noAuth = false;
+    if (password.isEmpty())
+    {
+        const auto choice = QMessageBox::question(this, QStringLiteral("认证"),
+                                                  QStringLiteral("口令为空。中继是用 --allow-no-auth 启动的吗？\n\n"
+                                                                 "「Yes」以无认证方式连接；「No」返回重新填写口令。"),
+                                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (choice != QMessageBox::Yes)
+        {
+            return;
+        }
+        noAuth = true;
+    }
+
+    relayer::app::ConnInfo conn;
+    conn.host = host;
+    conn.port = port;
+    conn.password = password;
+    conn.noAuth = noAuth;
+
     if (core_)
     {
-        core_->listPeers(host, port, password);
+        core_->listPeers(conn);
     }
-    emit probeRequested(host, port, password);
+    emit probeRequested(conn);
     saveIpHistory(text);
 }
 

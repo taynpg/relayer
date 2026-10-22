@@ -48,6 +48,8 @@ void printUsage()
                 "  -H, --host <addr>        中继地址（默认 127.0.0.1）\n"
                 "  -p, --port <port>        中继端口（默认 9527）\n"
                 "      --password <pw>      认证口令\n"
+                "      --no-auth            中继已用 --allow-no-auth 启动时必须加这个\n"
+                "                           （与 --password 互斥；不自动推断，防止漏填口令静默降级）\n"
                 "      --id <name>          要求服务端分配的身份（一般不用给）\n"
                 "      --chunk-size <bytes> 分块大小（默认 4 MiB，测试时可调小）\n"
                 "      --idle-timeout <sec> 传输开始后多久没有进展就判定对端失联（默认 60）\n"
@@ -219,6 +221,12 @@ ParseResult parseArgs(int argc, char **argv)
                 return r;
             }
         }
+        else if (a == "--no-auth")
+        {
+            // 显式声明"中继已关闭认证"。与 --password 互斥的校验放在
+            // 解析后的统一检查里，和子命令必备参数的检查放在一起。
+            r.args.config.serverAllowNoAuth = true;
+        }
         else if (a == "--id")
         {
             if (!takeValue(a, r.args.config.expectId))
@@ -310,6 +318,16 @@ ParseResult parseArgs(int argc, char **argv)
     if (r.args.command == "recv" && r.args.toDir.empty())
     {
         r.error = "recv 需要 --to-dir 指定落点目录";
+        return r;
+    }
+
+    // 认证方式必须恰好声明一种。两者都不给时客户端不知道服务端是什么
+    // 配置：按认证走会被无认证中继拒绝，按无认证走会被认证中继拒绝。
+    // 与 relayerd 的"口令与 allow-no-auth 必须恰好给一个"是同一条规则
+    // 在两端的镜像。
+    if (r.args.config.serverAllowNoAuth && !r.args.config.password.empty())
+    {
+        r.error = "--no-auth 与 --password 不能同时给出";
         return r;
     }
 

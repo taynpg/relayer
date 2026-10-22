@@ -44,7 +44,7 @@ private slots:
     void onProgress(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond);
     void onOperationFinished(bool ok, const QString &summary, const QString &detail);
     void onAssignedIdChanged(const QString &id);
-    void onProbeRequested(const QString &host, quint16 port, const QString &password);
+    void onProbeRequested(const relayer::app::ConnInfo &conn);
 
 private:
     void buildLayout();
@@ -63,10 +63,8 @@ private:
     QString receiveDir_;
 
     // 最近一次探测的连接参数（ConnectorControl::probeRequested 记录）。
-    // 每个操作一条连接，之后的所有操作都复用这三个值。
-    QString lastHost_;
-    quint16 lastPort_ = 0;
-    QString lastPassword_;
+    // 每个操作一条连接，之后的所有操作都复用这一组值。
+    relayer::app::ConnInfo lastConn_;
 
     // 进度节流：上次写日志的时间点。
     std::chrono::steady_clock::time_point lastProgressLog_{};

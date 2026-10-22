@@ -39,6 +39,21 @@ struct PeerRow
     QString address;
 };
 
+// 一次连接所需的全部参数。收拢成结构体而不是继续给每个方法加参数：
+// sendFile 已经 6 个参数，且这三项在所有操作里总是一起出现。
+struct ConnInfo
+{
+    QString host;
+    quint16 port = 0;
+    QString password;
+
+    // 显式声明"中继已关闭认证"（对应服务端 --allow-no-auth）。
+    // 不从 password 为空自动推断：漏填口令应当报错，而不是静默降级成
+    // 不认证——与服务端侧"要关认证必须显式 --allow-no-auth"是同一条
+    // 原则在客户端的镜像。
+    bool noAuth = false;
+};
+
 class CoreService : public QObject
 {
     Q_OBJECT
@@ -56,14 +71,14 @@ public:
     }
 
     // 把本地文件发给对端。remoteName 为空时用本地文件名。
-    void sendFile(const QString &localPath, const QString &remoteName, const QString &toPeerId, const QString &host,
-                  quint16 port, const QString &password);
+    void sendFile(const QString &localPath, const QString &remoteName, const QString &toPeerId,
+                  const relayer::app::ConnInfo &conn);
 
     // 挂起等待别人发文件，落到 targetDir 目录。
-    void startReceive(const QString &targetDir, const QString &host, quint16 port, const QString &password);
+    void startReceive(const QString &targetDir, const relayer::app::ConnInfo &conn);
 
     // 拉一次在线列表，结果从 peerListReceived 发出。
-    void listPeers(const QString &host, quint16 port, const QString &password);
+    void listPeers(const relayer::app::ConnInfo &conn);
 
     // 中止当前操作（硬停：不发 cancel 帧，与 CLI 的 abort 同语义）。
     void cancelCurrent();
@@ -91,7 +106,7 @@ private:
 
     // ClientConfig 组装。回调里 emit 的都是 Qt 信号——从 io 线程 emit
     // 跨线程信号是安全的（AutoConnection 退化为 QueuedConnection）。
-    cli::ClientConfig makeConfig(const QString &host, quint16 port, const QString &password);
+    cli::ClientConfig makeConfig(const relayer::app::ConnInfo &conn);
 
     asio::io_context ctx_;
 
@@ -118,3 +133,4 @@ private:
 }  // namespace relayer::app
 
 Q_DECLARE_METATYPE(relayer::app::PeerRow)
+Q_DECLARE_METATYPE(relayer::app::ConnInfo)
