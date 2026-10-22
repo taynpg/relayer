@@ -6,6 +6,8 @@
 #include <string_view>
 #include <vector>
 
+#include "relayer/common/Status.h"
+
 // 文件子系统抽象接口。
 //
 // 设计约束（修改前请先读 docs/REWRITE-PLAN.md 第 3.1 节）：
@@ -31,56 +33,16 @@ namespace relayer::filestore
 // 错误
 // ---------------------------------------------------------------------------
 
-enum class ErrorCode
-{
-    kOk = 0,
-    kNotFound,
-    kPermissionDenied,
-    kAlreadyExists,
-    kNotADirectory,
-    kIsADirectory,
-    kNoSpace,
-    kBusy,  // 文件被占用（Windows 上常见：另一个进程独占打开）
-    kTooManyHandles,
-    kInvalidPath,
-    kIoError,
-    kUnsupported,
-    kUnknown,
-};
-
-// 错误码的稳定名称，用于日志。不要用于本地化 UI 文案。
-std::string_view toString(ErrorCode code);
-
-struct Status
-{
-    ErrorCode code = ErrorCode::kOk;
-    std::string message;  // 面向开发者，附带上出错的具体路径与系统错误
-
-    Status() = default;
-    Status(ErrorCode c, std::string msg)
-        : code(c)
-        , message(std::move(msg))
-    {
-    }
-
-    [[nodiscard]] bool ok() const noexcept
-    {
-        return code == ErrorCode::kOk;
-    }
-    explicit operator bool() const noexcept
-    {
-        return ok();
-    }
-
-    static Status Ok()
-    {
-        return {};
-    }
-    static Status Fail(ErrorCode c, std::string msg)
-    {
-        return Status{c, std::move(msg)};
-    }
-};
+// Status 与 ErrorCode 定义在 relayer/common/Status.h（core 与 filestore 共用）。
+// 这里引入别名，是为了让本模块内的代码继续写 Status / ErrorCode 而不必
+// 到处加 relayer:: 前缀；对外签名也没有变化，调用方不受影响。
+//
+// ErrorCode 的可读名称由 relayer::toString(ErrorCode) 提供（也在 Status.h 里）。
+// 这里**不**再导出一个 filestore::toString 转发：两个同名函数在 relayer
+// 命名空间里同时可见时，非限定调用会产生歧义。需要名字的地方写
+// relayer::toString(code)。
+using Status = ::relayer::Status;
+using ErrorCode = ::relayer::ErrorCode;
 
 // ---------------------------------------------------------------------------
 // 元信息

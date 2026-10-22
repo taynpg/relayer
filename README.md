@@ -39,6 +39,11 @@ CI 只在打 tag 时运行（`v*`），也支持手动触发。
 **依赖全部 vendored。** 所有三方库源码入仓，`clone` 下来离线可编。
 版本与许可证见 [`third_party/README.md`](third_party/README.md)。
 
+**协议写在文档里，不是只写在代码里。** [`docs/PROTOCOL.md`](docs/PROTOCOL.md)
+能脱离代码读懂：帧布局、字段语义、解包算法、握手时序、状态机、错误处理。
+它和 `core/include/relayer/core/protocol/Frame.h` 的一致性由
+`tools/check_protocol_doc.py` 在 CI 上逐项比对——加帧类型忘了改文档会红。
+
 ---
 
 ## 构建
@@ -80,19 +85,29 @@ Windows（MSYS2 UCRT64）下的完整依赖安装见 [`CONTRIBUTING.md`](CONTRIB
 ## 目录
 
 ```
+common/        最底层共用件，零 Qt。Status/ErrorCode 与密码学原语
 core/          通信库，零 Qt。协议、加密、认证、传输、发现
 filestore/     文件子系统，零 Qt。IFileStore 与各实现、归档格式
 app/           Qt GUI，唯一允许使用 Qt 的模块
 server/        无界面服务端
 cli/           命令行客户端
-tests/         单元测试 + 架构约束检查
+tests/         单元测试 + 架构约束与文档一致性检查
 tools/         开发脚本
 docs/          设计文档
 third_party/   三方库源码
 ```
 
-依赖方向是单向的：`app → core → filestore(接口)`。反过来不成立，
-违反会被 CI 拦下。
+依赖方向是单向的：
+
+```
+app → core → filestore(接口) → common
+```
+
+`common` 是最底层，不允许反向依赖任何上层模块。反向依赖会形成环，
+由 `tools/check_arch.py` 的 R1-R6 规则在 CI 上拦下。
+
+`common` 单独抽出来的原因：`filestore` 和 `core` 都要用 `Status` 与 SHA-256，
+而两者之间不能互相依赖，否则会形成环。
 
 ---
 

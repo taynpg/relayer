@@ -1,6 +1,7 @@
-#include "relayer/filestore/detail/Sha256.h"
+#include "relayer/common/crypto/Sha256.h"
 
 #include <cstring>
+#include <vector>
 
 namespace relayer::crypto
 {
@@ -188,6 +189,137 @@ std::string Sha256::hex(const Digest &d)
         out[i * 2 + 0] = kHexDigits[d[i] >> 4];
         out[i * 2 + 1] = kHexDigits[d[i] & 0x0F];
     }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// HMAC-SHA256
+// ---------------------------------------------------------------------------
+
+Sha256::Digest hmacSha256(const void *key, std::size_t keyLen, const void *data, std::size_t dataLen)
+{
+    // RFC 2104：
+    //   K' = key 长度 > 64 ? SHA256(key) : key 右补零到 64
+    //   HMAC = SHA256((K' xor opad) || SHA256((K' xor ipad) || data))
+    constexpr std::size_t blockSize = Sha256::kBlockSize;
+
+    std::uint8_t paddedKey[blockSize] = {};
+
+    if (keyLen > blockSize)
+    {
+        const Sha256::Digest hashed = Sha256::hash(key, keyLen);
+        std::memcpy(paddedKey, hashed.data(), hashed.size());
+    }
+    else if (keyLen > 0)
+    {
+        std::memcpy(paddedKey, key, keyLen);
+    }
+
+    std::uint8_t ipad[blockSize];
+    std::uint8_t opad[blockSize];
+    for (std::size_t i = 0; i < blockSize; ++i)
+    {
+        ipad[i] = static_cast<std::uint8_t>(paddedKey[i] ^ 0x36);
+        opad[i] = static_cast<std::uint8_t>(paddedKey[i] ^ 0x5C);
+    }
+
+    // 内层：(K' xor ipad) || data。分两次 update，避免为拼接待 MAC 的消息
+    // 再分配一块连续内存（data 可能很长，而这里只想拷两次头）。
+    std::uint8_t inner[Sha256::kDigestSize];
+    {
+        Sha256 h;
+        h.update(ipad, blockSize);
+        if (dataLen > 0)
+        {
+            h.update(data, dataLen);
+        }
+        const Sha256::Digest d = h.digest();
+        std::memcpy(inner, d.data(), d.size());
+    }
+
+    Sha256 outer;
+    outer.update(opad, blockSize);
+    outer.update(inner, sizeof(inner));
+    return outer.digest();
+}
+
+Sha256::Digest hmacSha256(std::string_view key, std::string_view data)
+{
+    return hmacSha256(key.data(), key.size(), data.data(), data.size());
+}
+
+bool constantTimeEquals(const std::uint8_t *a, const std::uint8_t *b, std::size_t len) noexcept
+{
+    if (a == nullptr || b == nullptr)
+    {
+        return a == b;
+    }
+
+    // volatile 让编译器不能把这个循环优化成"遇到不同就提前跳出的 memcmp"。
+    // 差异累积到一个累加器里，最后一次性判断——分支只在末尾出现一次。
+    volatile std::uint8_t diff = 0;
+    for (std::size_t i = 0; i < len; ++i)
+    {
+        diff = static_cast<std::uint8_t>(diff | (a[i] ^ b[i]));
+    }
+    return diff == 0;
+}
+
+// ---------------------------------------------------------------------------
+// PBKDF2-HMAC-SHA256
+// ---------------------------------------------------------------------------
+
+HmacKey pbkdf2HmacSha256(std::string_view password, const std::uint8_t *salt, std::size_t saltLen,
+                         std::uint32_t iterations)
+{
+    HmacKey out{};
+    if (iterations == 0)
+    {
+        return out;  // 调用方传 0 是 bug，但不要因此崩掉或返回未初始化内存
+    }
+
+    // 只需要 32 字节输出，恰好是 HMAC-SHA256 的一个块，所以只算 U1（块索引 1）。
+    // RFC 8018：U1 = HMAC(P, S || INT_32_BE(1))，U2 = HMAC(P, U1)，...
+    //            T  = U1 xor U2 xor ... xor Uc
+    std::uint8_t u[Sha256::kDigestSize];
+
+    {
+        // 拼 S || INT(1)。salt 通常 16 字节，这里用固定上限的栈缓冲，
+        // 超出则退回堆分配——不假设 salt 长度，但常见路径不分配。
+        std::uint8_t stackBuf[128];
+        const std::size_t total = saltLen + 4;
+        std::uint8_t *msg = stackBuf;
+        std::vector<std::uint8_t> heap;
+        if (total > sizeof(stackBuf))
+        {
+            heap.resize(total);
+            msg = heap.data();
+        }
+        if (saltLen > 0)
+        {
+            std::memcpy(msg, salt, saltLen);
+        }
+        msg[saltLen + 0] = 0;
+        msg[saltLen + 1] = 0;
+        msg[saltLen + 2] = 0;
+        msg[saltLen + 3] = 1;
+
+        const Sha256::Digest d = hmacSha256(password.data(), password.size(), msg, total);
+        std::memcpy(u, d.data(), d.size());
+    }
+
+    std::memcpy(out.data(), u, out.size());
+
+    for (std::uint32_t i = 1; i < iterations; ++i)
+    {
+        const Sha256::Digest d = hmacSha256(password.data(), password.size(), u, sizeof(u));
+        std::memcpy(u, d.data(), d.size());
+        for (std::size_t j = 0; j < out.size(); ++j)
+        {
+            out[j] = static_cast<std::uint8_t>(out[j] ^ u[j]);
+        }
+    }
+
     return out;
 }
 

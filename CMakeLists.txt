@@ -43,6 +43,7 @@ option(RELAYER_WERROR       "Treat warnings as errors"              OFF)
 include(cmake/Warnings.cmake)
 include(cmake/Dependencies.cmake)
 
+add_subdirectory(common)
 add_subdirectory(filestore)
 add_subdirectory(core)
 

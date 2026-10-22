@@ -1,14 +1,22 @@
-#include "relayer/filestore/IFileStore.h"
+#include "relayer/common/Status.h"
 
-namespace relayer::filestore
+namespace relayer
 {
 
-std::string_view toString(ErrorCode code)
+std::string_view toString(ErrorCode code) noexcept
 {
     switch (code)
     {
     case ErrorCode::kOk:
         return "ok";
+
+    case ErrorCode::kCancelled:
+        return "cancelled";
+    case ErrorCode::kTimeout:
+        return "timeout";
+    case ErrorCode::kUnknown:
+        return "unknown";
+
     case ErrorCode::kNotFound:
         return "not_found";
     case ErrorCode::kPermissionDenied:
@@ -31,10 +39,15 @@ std::string_view toString(ErrorCode code)
         return "io_error";
     case ErrorCode::kUnsupported:
         return "unsupported";
-    case ErrorCode::kUnknown:
-        return "unknown";
+
+    case ErrorCode::kProtocol:
+        return "protocol";
+    case ErrorCode::kAuthFailed:
+        return "auth_failed";
     }
-    return "unknown";
+
+    // 走到这里说明新增了枚举值却没更新本函数。
+    return "unrecognized";
 }
 
-}  // namespace relayer::filestore
+}  // namespace relayer

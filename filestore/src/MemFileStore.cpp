@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
-#include "relayer/filestore/detail/Sha256.h"
+#include "relayer/common/crypto/Sha256.h"
 
 namespace relayer::filestore
 {

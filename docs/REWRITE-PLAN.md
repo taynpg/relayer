@@ -292,7 +292,38 @@ v2 新增帧类型（认证、信令），不改动既有帧头的任何字节�
 `docs/PROTOCOL.md` 要能脱离代码读懂：帧布局、字段语义、状态机、时序图、错误处理。
 这是开源项目的基本要求——协议不能只存在于头文件注释里。
 
-#### 3.2.3 状态机
+**状态：已完成**（11 章：设计边界 / 帧布局 / 标志位 / 帧类型全表 / 解包算法 /
+加密载荷 + AAD / 认证握手 / 传输状态机 / 载荷编码约定 / 错误处理 / 与 v1 差异）。
+
+文档与代码的一致性由 `tools/check_protocol_doc.py` 在 CTest 里强制（测试名
+`protocol_doc`）：帧类型表逐项比对枚举值与数值，固定头大小、分块段起始号也一并校验。
+当前 54 个帧类型与文档完全对应。
+
+#### 3.2.3 帧编解码实现
+
+**状态：已完成**（26 用例 / 443 断言）。
+
+接口是显式的字节指针 + 长度，与本项目其余部分的风格一致：
+
+```cpp
+std::vector<char> packFrame(const Frame &f);            // 失败返回空
+Status packFrameChecked(const Frame &f, std::vector<char> &out);   // 失败带原因
+UnPackResult unpackFrame(const char *data, std::size_t len,
+                        Frame &out, std::size_t &consumed);
+```
+
+三态 `UnPackResult { kNeedMoreData, kOk, kProtocolError }` 与 v1 一致，
+但 `consumed` 的语义在三种情况下不同（分别表示"可丢弃的垃圾字节数"、
+"整帧长度"、"出错的帧长度"），这一点在头文件与 `PROTOCOL.md` §5.1 都写死了。
+
+测试覆盖：往返保真（含负数 id、UTF-8 路由字段、0 到 200KB 的 body 长度）、
+头部偏移钉死、body CRC 自动置位的四个边界、打包拒绝超长字段与超长帧、
+**任意前缀长度都不解出帧**、**逐字节喂入**、粘包、前导垃圾、半个 magic 保留、
+body 里的假 magic、虚假 magic + 非法 frameLen 的跳 1 字节重同步、
+头 CRC 篡改、frameLen 篡改、版本不符、body CRC 损坏、类型分段、
+CRC32 标准向量、2 万字节确定性随机数据的 fuzz（不崩且不误判）。
+
+#### 3.2.4 状态机
 
 传输状态机用显式枚举 + 转移表，而不是散落在 `if/else` 里：
 
@@ -304,15 +335,71 @@ Idle → Handshaking → Transferring → Finalizing → Done
 转移表写成数据（`struct Transition { State from; Event e; State to; }`），
 用测试遍历所有非法转移，确保都不会静默通过。
 
+**状态：未开始**（属阶段 C 剩余部分）。
+
 ---
 
 ### 3.3 core/crypto + auth：认证
+
+#### 3.3.0 归属调整：新增 `common/` 基础层
+
+原计划把 `Sha256` 放在 `filestore/detail/`。实际做阶段 C 时撞到一个结构问题：
+`core` 需要 SHA-256（认证要用），但架构规则 R3 禁止 `filestore` 依赖 `core`，
+R2 又只允许 `core` 看到 `IFileStore.h`。放进任何一侧都会造成反向依赖或两份副本。
+
+于是抽出 `common/`：
+
+```
+common/include/relayer/common/Status.h         Status + ErrorCode（relayer 命名空间）
+common/include/relayer/common/crypto/Sha256.h  Sha256 / HmacSha256 / Pbkdf2HmacSha256
+common/include/relayer/common/crypto/Aes256Gcm.h
+```
+
+依赖方向变成 `filestore → common`、`core → common`，两侧都向下依赖同一个定义，
+错误与密钥在模块边界上不需要任何转换。
+
+为不破坏既有代码，`filestore` 里保留了 `using Status = ::relayer::Status;` 别名，
+所以 `filestore::Status`、`filestore::ErrorCode`、`filestore::toString` 全部照旧可用；
+`ErrorCode` 的枚举值也重新编排成了带段落的编号（通用 0-99 / 文件系统 100+ / 协议 200+），
+**既有枚举名与语义不变**。
+
+`tools/check_arch.py` 增加 R6：`common/` 不得包含 filestore / core / app / server / cli 的头文件。
 
 #### 3.3.1 原语
 
 - `Aes256Gcm`（从 v1 迁移，已自包含）
 - `Sha256`（同上）
 - **新增** `Pbkdf2HmacSha256`、`HmacSha256`
+
+**状态：已完成**（16 用例 / 1111 断言，含 SHA-256 既有用例）。
+
+| 原语 | 位置 | 测试来源 |
+|------|------|---------|
+| `Sha256` | `common/crypto/Sha256.h` | FIPS 180-4 官方向量 |
+| `hmacSha256` | 同上 | RFC 4231 全部 7 条向量 |
+| `constantTimeEquals` | 同上 | 语义 + 空指针边界 |
+| `pbkdf2HmacSha256` | 同上 | 迭代 1/2/4096/20000、空 salt、超块长口令 |
+| `aes256GcmEncrypt/Decrypt` | `common/crypto/Aes256Gcm.h` | McGrew-Viega 附录 B 的 AES-256 用例 |
+
+比 v1 多做的三件事：
+
+1. **GCM 支持 AAD**。v1 的实现只做纯加密，AAD 长度写死 0。v2 的协议要把固定头
+   前 28 字节作为 AAD（`PROTOCOL.md` §6.1），否则攻击者改完 `type` 重算 headerCrc
+   就能把"删除文件"伪装成"列目录"而不被发现。
+2. **tag 比较改成常量时间**。v1 用逐字节 `if (...) ok = false` 循环，虽然也没提前
+   返回，但写法容易被后来的人"优化"成 memcmp。现在走 `constantTimeEquals`，
+   并在函数里用 `volatile` 累加器阻止编译器改写成早退。
+3. **解封失败时清空输出**。v1 的 `Aes256GcmDecrypt` 返回 false 时 `out` 里可能已有
+   部分解密的明文，调用方一个疏忽就会用上被篡改的数据。现在 `aes256GcmOpen`
+   在失败分支里显式 `plain.clear()`。
+
+**交叉验证**：除了单元测试里的公开向量，另用 Python `cryptography` 库（独立实现）
+对 71 组输入做了逐字节比对（GCM 各种长度 × 带/不带 AAD、PBKDF2 各种迭代次数与
+含中文/超长口令），结果零差异。这个比对程序是临时的，验证完即删，不进仓库。
+
+**已知取舍**：AES 用 T-table 实现，查表下标依赖密钥，存在缓存计时侧信道。
+威胁模型是"防窃听、防篡改、防重放"，不含防同机旁路攻击。这一点写在
+`Aes256Gcm.h` 的文件头注释里，不用翻文档也能看到。
 
 #### 3.3.2 握手
 
@@ -330,6 +417,9 @@ client                                 server
 - 双方 nonce 混入 HMAC 输入，防重放。
 - 未认证连接发来的业务帧一律丢弃并断开。
 - 禁用认证时（`authEnabled=false`）行为等价 v1，仅限内网自用，README 里写明风险。
+
+**状态：未开始**。协议细节（`tag` 取值、`status` 码表、两个 proof 的 nonce 顺序为何
+相反、nonce 重放防护策略）已在 `PROTOCOL.md` §7 写定，实现时按文档来。
 
 #### 3.3.3 身份绑定
 
@@ -444,11 +534,15 @@ client                                 server
 | --- | --- | --- |
 | **A 地基** | 仓库骨架、CMake、vendored 三方库、CI、`.clang-format`、LICENSE、CONTRIBUTING | 空仓库 CI 绿；`cmake && cmake --build` 通过 |
 | **B filestore** | `IFileStore` + `StdFileStore` + `MemFileStore` + `PathPolicy` + `tar.xz` 归档 | ✅ 已完成：117 用例 / 1718 断言，Release `-Werror` 下 ctest 全绿；与 GNU tar 双向互操作已验证。zip 未做（见 3.1.4） |
-| **C protocol + crypto** | 帧编解码、消息、PBKDF2/HMAC、握手状态机，`PROTOCOL.md` | 半包/粘包/重同步/CRC/重放测试全过 |
+| **C protocol + crypto** | 帧编解码、消息、PBKDF2/HMAC、握手状态机，`PROTOCOL.md` | 🚧 部分完成：`common/` 基础层 + crypto 原语（16 用例 / 1111 断言）+ 帧编解码（26 用例 / 443 断言）+ `PROTOCOL.md` 已竣工；**握手状态机与传输状态机转移表未开始** |
 | **D transport + transfer** | asio 连接、传输引擎接入 `IFileStore` | 三进程集成测试覆盖第 3.5.3 表全部场景 |
 | **E app** | 搬 `.ui`、控件逻辑按 3.7.2 重写、bridge 接线 | GUI 可完成一次完整传输；控件逻辑问题清单逐条关闭 |
 | **F v2 功能** | 认证上线、多任务并行、P2P 直连 | 并行 3 任务互不干扰；直连成功率与回退日志可查 |
 | **G 发布** | 打包、安装包、版本号单一来源、CHANGELOG | 干净机器解压即用 |
+
+当前 CTest 共 5 项：`common`（16 用例 / 1111 断言）、`filestore`（117 / 1718）、
+`core`（26 / 443）、`arch`（架构规则 R1-R6）、`protocol_doc`（文档与代码一致性）。
+合计 159 用例 / 3272 断言。
 
 ---
 

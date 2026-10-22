@@ -5,8 +5,8 @@
 #include <cstring>
 #include <stdexcept>
 
+#include "relayer/common/crypto/Sha256.h"
 #include "relayer/filestore/IFileStore.h"
-#include "relayer/filestore/detail/Sha256.h"
 
 #ifdef _WIN32
 #include <windows.h>

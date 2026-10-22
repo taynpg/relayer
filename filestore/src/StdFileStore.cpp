@@ -11,7 +11,7 @@
 
 #include "PlatformPath.h"
 #include "StdStream.h"
-#include "relayer/filestore/detail/Sha256.h"
+#include "relayer/common/crypto/Sha256.h"
 
 namespace fs = std::filesystem;
 

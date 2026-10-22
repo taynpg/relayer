@@ -11,6 +11,7 @@ R2  core/ 不得包含 filestore 的具体实现，只能包含 IFileStore.h
 R3  filestore/ 不得包含 core/ 的任何头文件
 R4  server/ 不得包含 Qt 头文件，也不得包含 filestore/
 R5  app/ 以外的地方不得包含 Qt 头文件
+R6  common/ 只能依赖标准库与第三方库，不得包含 filestore/ core/ app/ server/ cli/
 
 用法
 ----
@@ -75,6 +76,7 @@ def main() -> int:
 
     violations: list[str] = []
 
+    common_files = list(iter_sources("common"))
     core_files = list(iter_sources("core"))
     filestore_files = list(iter_sources("filestore"))
     server_files = list(iter_sources("server"))
@@ -85,6 +87,7 @@ def main() -> int:
     check_qt_free(core_files, "R1 core-must-be-qt-free", violations)
 
     # R2: core 只能用 IFileStore.h
+    # relayer/common/ 是更底层的模块，core 依赖它是允许的（所以不在禁止之列）。
     for path in core_files:
         for lineno, line in enumerate(read_lines(path), 1):
             m = re.match(r'^\s*#\s*include\s*[<"](.+?)[>"]', line)
@@ -113,6 +116,13 @@ def main() -> int:
     check_qt_free(cli_files, "R5 only-app-may-use-qt", violations)
     check_qt_free(tests_files, "R5 only-app-may-use-qt", violations)
 
+    # R6: common 是最底层，只能往上被依赖，不能自己往上依赖
+    check_qt_free(common_files, "R6 common-must-be-qt-free", violations)
+    for path in common_files:
+        for lineno, line in enumerate(read_lines(path), 1):
+            if re.search(r'#\s*include\s*[<"](relayer/)?(filestore|core|app|server|cli)/', line):
+                violations.append(f"R6 common-must-not-see-upper-layers: {rel(path)}:{lineno}")
+
     if violations:
         print("架构约束检查失败：\n")
         for v in violations:
@@ -120,7 +130,14 @@ def main() -> int:
         print(f"\n共 {len(violations)} 处违反。规则说明见 docs/REWRITE-PLAN.md 2.2 节。")
         return 1
 
-    total = len(core_files) + len(filestore_files) + len(server_files) + len(cli_files) + len(tests_files)
+    total = (
+        len(common_files)
+        + len(core_files)
+        + len(filestore_files)
+        + len(server_files)
+        + len(cli_files)
+        + len(tests_files)
+    )
     print(f"架构约束检查通过（扫描 {total} 个源文件）。")
     return 0
 

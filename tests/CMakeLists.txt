@@ -1,8 +1,18 @@
 # 测试。
 #
 # 命名规则：<模块>_test，一个可执行文件对应一个模块的单元测试。
+# 目录按模块分，跟源码树一一对应：common/ filestore/ core/ ...
 # 集成测试（需要起进程/端口）单独放 integration/，标签设为 [integration]，
 # 默认不在 CI 的快速通道里跑。
+
+add_executable(common_test
+    common/Sha256Test.cpp
+    common/CryptoTest.cpp
+)
+target_link_libraries(common_test PRIVATE relayer_common Catch2::Catch2WithMain)
+target_include_directories(common_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+relayer_set_warnings(common_test)
+add_test(NAME common COMMAND common_test)
 
 add_executable(filestore_test
     filestore/StdFileStoreTest.cpp
@@ -17,22 +27,34 @@ target_include_directories(filestore_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 relayer_set_warnings(filestore_test)
 add_test(NAME filestore COMMAND filestore_test)
 
-add_executable(sha256_test
-    filestore/Sha256Test.cpp
+add_executable(core_test
+    core/FrameTest.cpp
 )
-target_link_libraries(sha256_test PRIVATE relayer_filestore Catch2::Catch2WithMain)
-relayer_set_warnings(sha256_test)
-add_test(NAME sha256 COMMAND sha256_test)
+target_link_libraries(core_test PRIVATE relayer_core Catch2::Catch2WithMain)
+target_include_directories(core_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+relayer_set_warnings(core_test)
+add_test(NAME core COMMAND core_test)
 
-# 架构约束检查：把 docs/REWRITE-PLAN.md 2.2 节的依赖方向变成可执行断言。
-# 放在 CTest 里是因为"人忘了跑脚本"比"人忘了写规则"更常见。
+# 文档与代码的一致性检查。
+#
+# 这类"文档声称是权威、代码是另一份真相"的东西，靠人盯必然漂移。
+# 把它变成 CTest 里的断言，忘了同步就会红。
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
+    # 架构约束：把 docs/REWRITE-PLAN.md 2.2 节的依赖方向变成可执行断言。
+    # 放在 CTest 里是因为"人忘了跑脚本"比"人忘了写规则"更常见。
     add_test(NAME arch
              COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/check_arch.py)
     set_tests_properties(arch PROPERTIES
                          WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
                          LABELS "arch")
+
+    # 协议文档：docs/PROTOCOL.md 的帧类型表必须与 Frame.h 的枚举逐项对应。
+    add_test(NAME protocol_doc
+             COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/check_protocol_doc.py)
+    set_tests_properties(protocol_doc PROPERTIES
+                         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                         LABELS "docs")
 else()
-    message(WARNING "未找到 Python3，跳过架构约束检查测试（tools/check_arch.py）")
+    message(WARNING "未找到 Python3，跳过架构与协议文档检查")
 endif()
