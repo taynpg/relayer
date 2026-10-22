@@ -21,6 +21,8 @@ add_library(relayer_core STATIC
     src/transfer/StateMachine.cpp
     src/transfer/MerkleTree.cpp
     src/transfer/TransferPayload.cpp
+    src/transfer/WorkerPool.cpp
+    src/transfer/SendWindow.cpp
     src/transport/FrameReader.cpp
     src/transport/Connection.cpp
     src/transport/Heartbeat.cpp
