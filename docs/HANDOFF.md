@@ -302,3 +302,14 @@ python tests/e2e/run_e2e.py -k kill-sender --repeat 3   # 查时序不稳
 - **ninja 报 `no work to do`**：源文件改动后 `cmake --build` 常识别不到。
   强制重建：`rm -f build/core/CMakeFiles/relayer_core.dir/src/.../<File>.cpp.obj`，
   或 `touch -d "now" <file>`。
+- **GitHub 22 端口不通**：`git push` 报
+  `Connection reset by ... port 22` / `Could not read from remote repository`。
+  这是网络侧阻断 SSH 22，不是密钥问题（`ssh -T -p 443 git@ssh.github.com`
+  能正常认证）。仓库已配好本地改写，`origin` 现在直接走 443：
+
+  ```bash
+  git config --local url."ssh://git@ssh.github.com:443/".insteadOf "git@github.com:"
+  ```
+
+  这条只在**本地**配置里，新克隆的机器需要重新执行一次。走 HTTPS
+  (`https://github.com/...`) 也可以，但那样每次 push 都要 token。
