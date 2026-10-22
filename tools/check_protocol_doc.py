@@ -67,10 +67,25 @@ def parse_doc_types(doc: str) -> dict[str, int]:
 
 
 def parse_code_const(header: str, name: str) -> int | None:
-    m = re.search(rf"constexpr\s+std::\w+\s+{name}\s*=\s*([0-9][0-9'u]*)", header)
+    """解析 `constexpr <type> NAME = <整数字面量表达式>;` 的数值。
+
+    支持 `4u * 1024 * 1024` 这样的乘法表达式——代码里写 4 MiB 时自然会这么写，
+    而只认单个整数字面量的正则会把它读成 4，然后误报"不一致"。
+    只处理乘法和数字，够用即可；遇到不认识的形状返回 None 让它报出来，
+    而不是猜一个值。
+    """
+    m = re.search(rf"constexpr\s+std::\w+\s+{name}\s*=\s*([^;]+);", header)
     if not m:
         return None
-    return int(m.group(1).replace("'", "").rstrip("uU"))
+
+    expr = m.group(1).strip()
+    total = 1
+    for term in expr.split("*"):
+        t = term.strip().replace("'", "").replace("u", "").replace("U", "").replace("L", "").strip()
+        if not t.isdigit():
+            return None
+        total *= int(t)
+    return total
 
 
 def main() -> int:
@@ -116,15 +131,85 @@ def main() -> int:
         elif int(m.group(1)) != chunk_begin:
             violations.append(f"D4 分块段起始号不一致：代码 {chunk_begin}，文档 {m.group(1)}")
 
+    # D5: 传输层的常量与状态码
+    violations.extend(check_transfer_consts())
+
     if violations:
         print("协议文档一致性检查失败：\n")
         for v in violations:
             print("  " + v)
-        print(f"\n共 {len(violations)} 处不一致。请同步更新 docs/PROTOCOL.md 与 Frame.h。")
+        print(f"\n共 {len(violations)} 处不一致。请同步更新 docs/PROTOCOL.md 与对应头文件。")
         return 1
 
     print(f"协议文档一致性检查通过（{len(code)} 个帧类型与文档完全对应）。")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# D5：传输层常量与状态码
+# ---------------------------------------------------------------------------
+#
+# 这些数值是线格式的一部分，改一个就会让两端对不上，而两边各自的单测
+# 都还是绿的（因为测试读的是同一个常量）。文档里写死一份、代码里写死
+# 一份，由这里比对，是唯一能让"改了却没人发现"变成红灯的办法。
+
+MERKLE_H = ROOT / "core" / "include" / "relayer" / "core" / "transfer" / "MerkleTree.h"
+PAYLOAD_H = ROOT / "core" / "include" / "relayer" / "core" / "transfer" / "TransferPayload.h"
+
+
+def check_transfer_consts() -> list[str]:
+    out: list[str] = []
+    doc = read(DOC)
+    merkle = read(MERKLE_H)
+    payload = read(PAYLOAD_H)
+
+    # 块大小上下限：文档 §9.4.1 写的是 "1024 <= chunkSize <= 4 MiB"。
+    m = re.search(r"(`?\d+`?)\s*<=\s*chunkSize\s*<=\s*(\d+)\s*MiB", doc)
+    if not m:
+        out.append("D5 文档里找不到「chunkSize 范围」的说明（§9.4.1）")
+    else:
+        doc_min = int(re.sub(r"[`\s]", "", m.group(1)))
+        doc_max = int(m.group(2)) * 1024 * 1024
+        code_min = parse_code_const(merkle, "kMinChunkSize")
+        code_max = parse_code_const(merkle, "kMaxChunkSize")
+        if code_min is not None and code_min != doc_min:
+            out.append(f"D5 块大小下限不一致：代码 {code_min}，文档 {doc_min}")
+        if code_max is not None and code_max != doc_max:
+            out.append(f"D5 块大小上限不一致：代码 {code_max}，文档 {doc_max}")
+
+    # 状态码：§9.5 的 AnswerStatus 表、§9.8 的 CompleteStatus 表。
+    out.extend(_check_enum_table(doc, payload, r"###\s*9\.5\s", "AnswerStatus", "kAnswer"))
+    out.extend(_check_enum_table(doc, payload, r"###\s*9\.8\s", "CompleteStatus", "kComplete"))
+
+    return out
+
+
+def _check_enum_table(doc: str, header: str, section: str, enum_name: str, tag: str) -> list[str]:
+    """比对某一节的 `| 值 | 含义 |` 表与代码里的 enum 数值。"""
+    m = re.search(section + r".*?(?=^###\s|\Z)", doc, re.S | re.M)
+    if not m:
+        return [f"D5 文档里找不到「{section}」小节"]
+
+    documented: dict[int, str] = {}
+    for mm in re.finditer(r"^\|\s*(\d+)\s*\|\s*([^|]+)\|", m.group(0), re.M):
+        documented[int(mm.group(1))] = mm.group(2).strip()
+
+    m2 = re.search(rf"enum class {enum_name}\s*:\s*std::uint8_t\s*\{{(.*?)\}};", header, re.S)
+    if not m2:
+        return [f"D5 头文件里找不到 enum class {enum_name}"]
+
+    coded: dict[int, str] = {}
+    for mm in re.finditer(r"^\s*(k\w+)\s*=\s*(\d+)", m2.group(1), re.M):
+        coded[int(mm.group(2))] = mm.group(1)
+
+    out: list[str] = []
+    for value, name in coded.items():
+        if value not in documented:
+            out.append(f"D5 {enum_name}::{name}(={value}) 未在文档 {tag} 表中出现")
+    for value in documented:
+        if value not in coded:
+            out.append(f"D5 文档 {tag} 表里的状态码 {value} 在 {enum_name} 中没有定义")
+    return out
 
 
 if __name__ == "__main__":

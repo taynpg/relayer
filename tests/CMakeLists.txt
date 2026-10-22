@@ -31,6 +31,8 @@ add_executable(core_test
     core/FrameTest.cpp
     core/AuthTest.cpp
     core/StateMachineTest.cpp
+    core/MerkleTreeTest.cpp
+    core/TransferPayloadTest.cpp
     core/FrameReaderTest.cpp
     core/ConnectionTest.cpp
     core/HeartbeatTest.cpp

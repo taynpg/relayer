@@ -8,7 +8,7 @@
 #   include/relayer/core/auth/       握手状态机（纯逻辑）
 #   include/relayer/core/transport/  asio 连接 + 帧切分 + 心跳（纯逻辑部分）
 #   include/relayer/core/session/    会话策略：转发判定、身份绑定、路由（纯逻辑）
-#   include/relayer/core/transfer/   传输状态机（后续：传输引擎）
+#   include/relayer/core/transfer/   传输状态机 + Merkle 树 + 传输引擎
 #
 # 依赖：只能依赖 common（Status / crypto 原语），以及 filestore 的 IFileStore.h。
 
@@ -19,6 +19,8 @@ add_library(relayer_core STATIC
     src/auth/HandshakeServer.cpp
     src/auth/Random.cpp
     src/transfer/StateMachine.cpp
+    src/transfer/MerkleTree.cpp
+    src/transfer/TransferPayload.cpp
     src/transport/FrameReader.cpp
     src/transport/Connection.cpp
     src/transport/Heartbeat.cpp
