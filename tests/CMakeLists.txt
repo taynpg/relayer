@@ -35,6 +35,7 @@ add_executable(core_test
     core/TransferPayloadTest.cpp
     core/WorkerPoolTest.cpp
     core/SendWindowTest.cpp
+    core/TransferSenderTest.cpp
     core/FrameReaderTest.cpp
     core/ConnectionTest.cpp
     core/HeartbeatTest.cpp

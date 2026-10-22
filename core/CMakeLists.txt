@@ -23,6 +23,7 @@ add_library(relayer_core STATIC
     src/transfer/TransferPayload.cpp
     src/transfer/WorkerPool.cpp
     src/transfer/SendWindow.cpp
+    src/transfer/TransferSender.cpp
     src/transport/FrameReader.cpp
     src/transport/Connection.cpp
     src/transport/Heartbeat.cpp
