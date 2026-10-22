@@ -14,6 +14,7 @@
 #include "relayer/core/auth/Handshake.h"
 #include "relayer/core/protocol/Frame.h"
 #include "relayer/core/session/PeerTable.h"
+#include "support/IoPump.h"
 
 using namespace relayer::core::session;
 using namespace relayer::protocol;
@@ -30,15 +31,16 @@ namespace
 
 constexpr const char *kPassword = "correct horse battery staple";
 
-// 把 io_context 跑一段时间。
+// 事件循环推进工具来自 tests/support/IoPump.h。
 //
 // 不用 run() / run_one()：它们在没有就绪任务但有挂起异步操作时会**阻塞**，
-// 而测试里"连接还开着、断言已经做完"是常态。run_for 有明确上限，跑满即返回。
-void pump(asio::io_context &ctx, std::chrono::milliseconds duration)
-{
-    ctx.restart();
-    ctx.run_for(duration);
-}
+// 而测试里"连接还开着、断言已经做完"是常态。
+//
+// 更要紧的是**别用 pump 等一件会发生的事**。pump 的时长是上限：一条只需
+// 2ms 的用例写 pump(3s) 就真跑 3s，二十几条串起来就是几十秒，CI 的 timeout
+// 一砍就表现为"挂住"。等条件用 pumpUntil，它满足即返回。
+using relayer::test::pump;
+using relayer::test::pumpUntil;
 
 // 回环上的一对已连接 socket。测试"服务端单侧"行为时用，省掉连接建立。
 struct SocketPair
@@ -158,11 +160,10 @@ TEST_CASE("handshake succeeds over loopback", "[session][integration]")
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
     REQUIRE(client != nullptr);
 
-    pump(ctx, std::chrono::seconds(3));
+    REQUIRE(
+        pumpUntil(ctx, [&] { return server->authenticated() && client->authenticated(); }, std::chrono::seconds(3)));
 
     REQUIRE(server != nullptr);
-    REQUIRE(server->authenticated());
-    REQUIRE(client->authenticated());
 
     // 服务端只通知一次：它的身份在认证那一刻就定了。
     REQUIRE(serverObs->authenticated == 1);
@@ -212,7 +213,9 @@ TEST_CASE("wrong password fails fast with auth error", "[session][integration]")
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig("wrong password"), makeHandler(clientObs));
 
-    pump(ctx, std::chrono::seconds(3));
+    // 这里等的是**失败**，但它有确定的完成信号：两端都走完关闭流程。
+    // 等"关闭发生了"，而不是"跑了多久大概够了"。
+    REQUIRE(pumpUntil(ctx, [&] { return clientObs->closed == 1 && serverObs->closed == 1; }, std::chrono::seconds(3)));
 
     REQUIRE(server != nullptr);
     REQUIRE_FALSE(client->authenticated());
@@ -280,10 +283,12 @@ TEST_CASE("server allocates a fresh id through the allocator", "[session][integr
         });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
-    pump(ctx, std::chrono::seconds(2));
+    // 要等**两端**都认证完：client->assignedId() 是服务端 kAnswerId 到达后
+    // 才填上的，只等服务端会读到空 id。
+    REQUIRE(
+        pumpUntil(ctx, [&] { return server->authenticated() && client->authenticated(); }, std::chrono::seconds(3)));
 
     REQUIRE(server != nullptr);
-    REQUIRE(server->authenticated());
     REQUIRE(allocCalls == 1);
     REQUIRE(server->assignedId() == "client-1");
     REQUIRE_FALSE(table.contains("should-be-ignored"));
@@ -323,9 +328,10 @@ TEST_CASE("failed allocation falls back and still announces", "[session][integra
         });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
-    pump(ctx, std::chrono::seconds(2));
+    // 这条用例要求的完成度比上一条更高：clientObs->authenticated 得是 2
+    // （匿名一次 + 身份到位一次），所以直接等这个派生量而不是等两端标志。
+    REQUIRE(pumpUntil(ctx, [&] { return clientObs->authenticated == 2; }, std::chrono::seconds(3)));
 
-    REQUIRE(server->authenticated());
     REQUIRE(server->assignedId() == "fallback-id");
     REQUIRE(client->assignedId() == "fallback-id");
     REQUIRE(clientObs->authenticated == 2);  // 匿名一次 + 身份到位一次
@@ -363,8 +369,7 @@ TEST_CASE("late allocator install is rejected after auth", "[session][integratio
         });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
-    pump(ctx, std::chrono::seconds(2));
-    REQUIRE(server->authenticated());
+    REQUIRE(pumpUntil(ctx, [&] { return server->authenticated(); }, std::chrono::seconds(2)));
 
     bool called = false;
     const bool accepted = server->setPeerIdAllocator(
@@ -413,13 +418,12 @@ TEST_CASE("business frames pass in both directions after auth", "[session][integ
         });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
-    pump(ctx, std::chrono::seconds(2));
-    REQUIRE(client->authenticated());
-    REQUIRE(server->authenticated());
+    REQUIRE(
+        pumpUntil(ctx, [&] { return client->authenticated() && server->authenticated(); }, std::chrono::seconds(2)));
 
     // 客户端 -> 服务端
     REQUIRE(client->send(makeFrame(FrameType::kAskId, "client-1")).ok());
-    pump(ctx, std::chrono::milliseconds(500));
+    REQUIRE(pumpUntil(ctx, [&] { return serverObs->frames.size() == 1; }, std::chrono::seconds(2)));
     REQUIRE(serverObs->frames.size() == 1);
     REQUIRE(serverObs->frames[0].type == FrameType::kAskId);
 
@@ -429,7 +433,7 @@ TEST_CASE("business frames pass in both directions after auth", "[session][integ
     // 协商帧（见 Session::handleInbound），不会转发到上层。用它会把这个
     // 测试变成"验证 Session 拦截了什么"，而不是"业务帧能过"。
     REQUIRE(server->send(makeFrame(FrameType::kAnswerHome, {}, "client-1")).ok());
-    pump(ctx, std::chrono::milliseconds(500));
+    REQUIRE(pumpUntil(ctx, [&] { return clientObs->frames.size() == 1; }, std::chrono::seconds(2)));
     REQUIRE(clientObs->frames.size() == 1);
     REQUIRE(clientObs->frames[0].type == FrameType::kAnswerHome);
 }
@@ -481,15 +485,14 @@ TEST_CASE("forward rewrites a forged from to the authenticated id", "[session][i
         });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
-    pump(ctx, std::chrono::seconds(2));
-    REQUIRE(server->authenticated());
+    REQUIRE(pumpUntil(ctx, [&] { return server != nullptr && server->authenticated(); }, std::chrono::seconds(3)));
 
     Frame f = makeFrame(FrameType::kFileRequestSend, "alice", "client-9");
     const auto fwdSt = server->forward(f, server->assignedId());
     INFO("forward failed: " << fwdSt.message << " / assignedId=" << server->assignedId());
     REQUIRE(fwdSt.ok());
 
-    pump(ctx, std::chrono::milliseconds(500));
+    REQUIRE(pumpUntil(ctx, [&] { return clientObs->frames.size() == 1; }, std::chrono::seconds(2)));
     REQUIRE(clientObs->frames.size() == 1);
     REQUIRE(clientObs->frames[0].from == "client-1");
     REQUIRE(clientObs->frames[0].to == "client-9");
@@ -523,8 +526,7 @@ TEST_CASE("server cannot send a frame claiming a third party", "[session][integr
         });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
-    pump(ctx, std::chrono::seconds(2));
-    REQUIRE(server->authenticated());
+    REQUIRE(pumpUntil(ctx, [&] { return server != nullptr && server->authenticated(); }, std::chrono::seconds(3)));
 
     const auto before = server->framesRejected();
     const auto st = server->send(makeFrame(FrameType::kAskFileList, "alice", "client-9"));
@@ -573,8 +575,7 @@ TEST_CASE("forward and send have disjoint identity rules", "[session][integratio
         });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
-    pump(ctx, std::chrono::seconds(2));
-    REQUIRE(server->authenticated());
+    REQUIRE(pumpUntil(ctx, [&] { return server != nullptr && server->authenticated(); }, std::chrono::seconds(3)));
 
     // 同一个 from="client-1"：send() 拒绝，forward() 接受。
     const auto viaSend = server->send(makeFrame(FrameType::kAskFileList, "client-1", "client-9"));
@@ -583,8 +584,7 @@ TEST_CASE("forward and send have disjoint identity rules", "[session][integratio
     const auto viaForward = server->forward(makeFrame(FrameType::kAskFileList, "alice", "client-9"), "client-1");
     REQUIRE(viaForward.ok());
 
-    pump(ctx, std::chrono::milliseconds(500));
-    REQUIRE(clientObs->frames.size() == 1);
+    REQUIRE(pumpUntil(ctx, [&] { return clientObs->frames.size() == 1; }, std::chrono::seconds(2)));
     REQUIRE(clientObs->frames[0].from == "client-1");
 }
 
@@ -616,8 +616,7 @@ TEST_CASE("forward without an authenticated identity is refused", "[session][int
         });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
-    pump(ctx, std::chrono::seconds(2));
-    REQUIRE(server->authenticated());
+    REQUIRE(pumpUntil(ctx, [&] { return server != nullptr && server->authenticated(); }, std::chrono::seconds(3)));
 
     const auto st = server->forward(makeFrame(FrameType::kAskFileList, "alice", "client-9"), "");
     REQUIRE_FALSE(st.ok());
@@ -651,9 +650,8 @@ TEST_CASE("unauthenticated business frame closes the session", "[session][integr
     REQUIRE_FALSE(wire.empty());
     asio::write(pair.b, asio::buffer(wire));
 
-    pump(ctx, std::chrono::milliseconds(500));
+    REQUIRE(pumpUntil(ctx, [&] { return obs->closed == 1; }, std::chrono::seconds(2)));
 
-    REQUIRE(obs->closed == 1);
     REQUIRE(obs->closeStatus.code == ErrorCode::kProtocol);
     REQUIRE(server->framesRejected() == 1);
 }
@@ -734,11 +732,14 @@ TEST_CASE("close notifies exactly once", "[session][integration]")
 
     server->close();
     server->close();  // 幂等
-    pump(ctx, std::chrono::milliseconds(300));
 
-    // 只通知一次。上方 peer 表之类的资源释放依赖这个承诺。
-    REQUIRE(obs->closed == 1);
+    // 只通知一次。上方 peer 表之类的资源释放依赖这个承诺，所有断言都必须
+    // 落在"等到了第一次"之后。
+    REQUIRE(pumpUntil(ctx, [&] { return obs->closed >= 1; }, std::chrono::seconds(2)));
     REQUIRE(obs->closeStatus.ok());
+    // 再跑一小段，确认没有第二次——这是纯否定断言，没有可等的信号。
+    pump(ctx, std::chrono::milliseconds(30));
+    REQUIRE(obs->closed == 1);
 }
 
 TEST_CASE("peer disconnect surfaces as a closed session", "[session][integration]")
@@ -753,9 +754,8 @@ TEST_CASE("peer disconnect surfaces as a closed session", "[session][integration
     asio::error_code ignored;
     pair.b.close(ignored);
 
-    pump(ctx, std::chrono::milliseconds(500));
+    REQUIRE(pumpUntil(ctx, [&] { return obs->closed == 1; }, std::chrono::seconds(2)));
 
-    REQUIRE(obs->closed == 1);
     // 对端正常关闭（EOF）不是错误
     REQUIRE(obs->closeStatus.ok());
 }

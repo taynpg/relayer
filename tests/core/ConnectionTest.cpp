@@ -13,6 +13,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "relayer/core/protocol/Frame.h"
+#include "support/IoPump.h"
 
 using namespace relayer::core::transport;
 using namespace relayer::protocol;
@@ -29,20 +30,19 @@ using relayer::Status;
 namespace
 {
 
-// 把 io_context 跑一段时间。
+// 事件循环推进工具来自 tests/support/IoPump.h。
 //
-// 为什么不用 run() 或 run_one() 循环：
+// 早先这里有一份本地 pump()，SessionTest.cpp 里还有一份一模一样的副本。
+// 现在抽出去了——两个理由：
 //
-//   asio 的 run_one() 在"没有任何就绪任务、但有挂起的异步操作"（比如一个
-//   还在等的 async_read）时会**阻塞等待**，而不是返回 0。测试里经常出现
-//   "连接还开着、断言已经做完"的情况，那时候 run_one() 会永久阻塞。
-//
-//   run_for 有明确的上限，跑满即返回。测试挂死不给任何信息，比失败更糟。
-void pump(asio::io_context &ctx, std::chrono::milliseconds duration)
-{
-    ctx.restart();
-    ctx.run_for(duration);
-}
+//   1. 语义要改时只改一处。复制品不一致的症状是"某批测试莫名变慢/变脆"，
+//      很难联想到是抄错了。
+//   2. 光有 pump(duration) 不够。它的时长是**上限**，一条只要 2ms 的用例
+//      写 pump(2s) 就真跑 2s，20 条串起来 40 秒。CI 的 timeout 一旦设得
+//      比它小，进程被外部杀掉，看起来像"挂住"——这个坑真踩过。
+//      pumpUntil(pred) 是"条件满足立刻返回，只有出事才耗到超时"。
+using relayer::test::pump;
+using relayer::test::pumpUntil;
 
 // 回环上的一个简单 acceptor，返回监听的端口。
 std::uint16_t listenOn(asio::ip::tcp::acceptor &acc)
@@ -134,7 +134,7 @@ TEST_CASE("two connections exchange one frame", "[transport][connection][integra
     const auto st = a->send(makeFrame(FrameType::kAskId, "hello from a"));
     REQUIRE(st.ok());
 
-    pump(ctx, std::chrono::milliseconds(300));
+    REQUIRE(pumpUntil(ctx, [&] { return !got.empty(); }, std::chrono::seconds(2)));
     REQUIRE(got.size() == 1);
     REQUIRE(got[0].type == FrameType::kAskId);
     REQUIRE(std::string(got[0].body.begin(), got[0].body.end()) == "hello from a");
@@ -162,7 +162,9 @@ TEST_CASE("connection preserves frame order", "[transport][connection][integrati
         REQUIRE(a->send(f).ok());
     }
 
-    pump(ctx, std::chrono::seconds(2));
+    // 等"收满 50 帧"而不是"跑 2 秒"。
+    REQUIRE(pumpUntil(ctx, [&] { return indices.size() == kCount; }, std::chrono::seconds(2)));
+
     REQUIRE(indices.size() == kCount);
     // 顺序必须与发送顺序完全一致：TCP 保证字节序，而"逐帧写入"的队列
     // 保证帧边界不被交错。任何一处实现错误（比如并发 async_write）
@@ -190,9 +192,12 @@ TEST_CASE("connection carries a large body", "[transport][connection][integratio
         body[i] = static_cast<char>(i % 253);
     }
     REQUIRE(a->send(makeFrame(FrameType::kAskFileSamples, body)).ok());
-    pump(ctx, std::chrono::seconds(5));
 
-    REQUIRE(gotBody.size() == body.size());
+    // 等"收满 1MB"而不是"跑 5 秒"。1MB 在回环上通常几毫秒就完，等条件
+    // 让这条用例从 5 秒降到毫秒级；而 5 秒作为**上限**仍然保留，真出问题
+    // 时不会无限等。
+    REQUIRE(pumpUntil(ctx, [&] { return gotBody.size() == body.size(); }, std::chrono::seconds(5)));
+
     REQUIRE(std::equal(gotBody.begin(), gotBody.end(), body.begin()));
     REQUIRE(a->bytesSent() > body.size());
     REQUIRE(b->bytesReceived() > body.size());
@@ -215,7 +220,7 @@ TEST_CASE("bidirectional exchange works", "[transport][connection][integration]"
     REQUIRE(b->send(makeFrame(FrameType::kAnswerId, "2")).ok());
     REQUIRE(a->send(makeFrame(FrameType::kAskHome, "3")).ok());
 
-    pump(ctx, std::chrono::milliseconds(300));
+    REQUIRE(pumpUntil(ctx, [&] { return bGot.size() == 2 && aGot.size() == 1; }, std::chrono::seconds(2)));
     REQUIRE(bGot.size() == 2);
     REQUIRE(bGot[0] == FrameType::kAskId);
     REQUIRE(bGot[1] == FrameType::kAskHome);
@@ -255,7 +260,8 @@ TEST_CASE("closing one side notifies the other", "[transport][connection][integr
     a->close();
     REQUIRE(a->state() == ConnectionState::kClosed);
 
-    pump(ctx, std::chrono::milliseconds(300));
+    // 先等"双方都收到通知"，再给一小段确认余量。
+    REQUIRE(pumpUntil(ctx, [&] { return aClosed == 1 && bClosed == 1; }, std::chrono::seconds(2)));
 
     // 本地主动关：双方都收到一次通知
     REQUIRE(aClosed == 1);
@@ -278,13 +284,14 @@ TEST_CASE("onClosed is called exactly once", "[transport][connection][integratio
     b->close();
     b->close();
 
-    pump(ctx, std::chrono::milliseconds(300));
-    REQUIRE(bClosed == 1);
+    REQUIRE(pumpUntil(ctx, [&] { return bClosed >= 1; }, std::chrono::seconds(2)));
 
-    // 再看对端关闭时的重复
+    // 再看对端关闭时的重复。这一段是**纯否定断言**（"不该再来一次"），
+    // 没有完成信号可等，只能靠一个时间窗。50ms 足够走完一轮事件循环，
+    // 又不会像 300ms 那样在 20 条用例上累积成 6 秒。
     a->close();
     a->close();
-    pump(ctx, std::chrono::milliseconds(300));
+    pump(ctx, std::chrono::milliseconds(50));
     REQUIRE(bClosed == 1);  // 没有因为 a 的关闭再来一次
 }
 
@@ -312,7 +319,7 @@ TEST_CASE("peer disconnect is observed", "[transport][connection][integration]")
         b->close();
     }  // b 析构
 
-    pump(ctx, std::chrono::milliseconds(300));
+    REQUIRE(pumpUntil(ctx, [&] { return closedCount == 1; }, std::chrono::seconds(2)));
     REQUIRE(closedCount == 1);
     REQUIRE(a->state() == ConnectionState::kClosed);
 }
@@ -338,9 +345,10 @@ TEST_CASE("sending an oversized field is rejected without closing", "[transport]
     REQUIRE(closed == false);
     REQUIRE(a->state() == ConnectionState::kOpen);
 
-    // 连接仍然可以正常发帧
+    // 连接仍然可以正常发帧。framesSent 是同步累加的，不需要等 IO——
+    // 给一小段跑掉可能残留的写完成回调即可。
     REQUIRE(a->send(makeFrame(FrameType::kAskId, "ok")).ok());
-    pump(ctx, std::chrono::milliseconds(300));
+    pump(ctx, std::chrono::milliseconds(50));
     REQUIRE(a->framesSent() == 1);  // 只算成功的那一次
 }
 
@@ -384,7 +392,7 @@ TEST_CASE("connect succeeds and can send the first frame immediately", "[transpo
     // 立刻发——此时还没连上，帧应当进队列
     REQUIRE(client->send(makeFrame(FrameType::kAuthResponse, "early")).ok());
 
-    pump(ctx, std::chrono::seconds(2));
+    REQUIRE(pumpUntil(ctx, [&] { return !serverGot.empty(); }, std::chrono::seconds(2)));
     REQUIRE(serverGot.size() == 1);
     REQUIRE(serverGot[0] == FrameType::kAuthResponse);
     REQUIRE_FALSE(clientClosed);
@@ -416,10 +424,10 @@ TEST_CASE("connecting to a closed port reports failure", "[transport][connection
                                             }));
     REQUIRE(conn != nullptr);
 
-    // Windows 上连接被拒之前会先重试几次（SYN 重传），2 秒不够。
-    // 这是系统的行为，不是实现的问题，所以测试要给足时间。
-    pump(ctx, std::chrono::seconds(8));
-    REQUIRE(closedCalled);
+    // Windows 上连接被拒之前会先重试几次（SYN 重传），可能比 Linux 慢。
+    // 这是系统的行为，不是实现的问题，所以上限给足 8 秒——但它是**上限**：
+    // 一旦收到关闭通知就立刻返回，正常路径只要几十毫秒。
+    REQUIRE(pumpUntil(ctx, [&] { return closedCalled; }, std::chrono::seconds(8)));
     REQUIRE_FALSE(reason.ok());
 }
 
@@ -439,8 +447,9 @@ TEST_CASE("resolving a bogus host reports failure", "[transport][connection][int
                                             }));
     REQUIRE(conn != nullptr);
 
-    pump(ctx, std::chrono::seconds(5));
-    REQUIRE(closedCalled);
+    // DNS 解析失败通常很快（.invalid 是保留域，一定解析不到），但系统
+    // resolver 有时会卡在超时上，所以上限留 5 秒——条件满足就立刻返回。
+    REQUIRE(pumpUntil(ctx, [&] { return closedCalled; }, std::chrono::seconds(5)));
     REQUIRE_FALSE(reason.ok());
 }
 
@@ -472,7 +481,9 @@ TEST_CASE("adopt reports established before any frame", "[transport][connection]
     REQUIRE(events.empty());
 
     REQUIRE(a->send(makeFrame(FrameType::kAskId, "x")).ok());
-    pump(ctx, std::chrono::milliseconds(500));
+
+    // 等两个事件都到齐，而不是固定跑 500ms。
+    REQUIRE(pumpUntil(ctx, [&] { return events.size() >= 2; }, std::chrono::seconds(2)));
 
     REQUIRE(events.size() == 2);
     REQUIRE(events[0] == "established");
@@ -523,7 +534,11 @@ TEST_CASE("connect reports established once connect succeeds", "[transport][conn
             }
         });
 
-    pump(ctx, std::chrono::seconds(2));
+    // accepted 是 **acceptor 侧**的事件，establishedCount 是**客户端侧**的。
+    // 两者是两条独立的完成路径：内核完成三次握手后，accept 回调先跑、
+    // 客户端的连接完成回调随后才被投递。只等 accepted 就去断言 established
+    // 会偶发读到 0（实测 20 次里 1 次）。所以等真正的目标状态。
+    REQUIRE(pumpUntil(ctx, [&] { return establishedCount == 1; }, std::chrono::seconds(2)));
 
     REQUIRE(accepted);
     REQUIRE(establishedCount == 1);
@@ -532,8 +547,7 @@ TEST_CASE("connect reports established once connect succeeds", "[transport][conn
 
     // 服务端主动断开，客户端才应该关闭
     serverSock->close();
-    pump(ctx, std::chrono::seconds(1));
-    REQUIRE(closedCalled);
+    REQUIRE(pumpUntil(ctx, [&] { return closedCalled; }, std::chrono::seconds(2)));
 }
 
 // ===========================================================================
