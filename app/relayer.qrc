@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RCC>
+    <qresource prefix="/">
+        <file>Resource/Client.ico</file>
+        <file>Resource/Server.ico</file>
+        <file>Resource/Gui.ico</file>
+    </qresource>
+</RCC>
