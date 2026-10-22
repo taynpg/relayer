@@ -186,6 +186,9 @@ void CoreService::finishOperation(const cli::Outcome &o, bool withPeerList)
 
     // 先发列表（list 的惯例顺序：先数据后结论），再发结论与
     // busy 翻转——GUI 侧依赖"收到 finished 时 busy 已可用"来解锁按钮。
+    // connectionLost 标记必须在结论**之前**落地：跨线程 queued 信号
+    // 的槽执行晚于本函数返回，先置位才能保证读到的不是上一次的旧值。
+    lastConnectionLost_.store(o.connectionLost, std::memory_order_release);
     if (withPeerList && !o.peerList.empty())
     {
         QList<PeerRow> rows;

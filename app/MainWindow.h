@@ -17,6 +17,11 @@ class ComparisonControl;
 class ExplorerControl;
 class LogControl;
 
+namespace relayer::app
+{
+class RelayTaskControl;
+}
+
 // 主窗口：v1 的 relayFile（Gui/relayFile.{h,cpp}）在 v2 的对应物。
 //
 // 布局镜像 v1 的 initLayout：上半 = 连接面板 + 选项卡，下半留给文件浏览
@@ -55,16 +60,13 @@ private:
     void wireSignals();
     void startAutoReceive();
 
-    // 任务执行器（E3.4 的临时实现：顺序逐个发，日志反馈进度；
-    // E3.5 的 RelayTask 表单会接管展示与控制）。
-    void startNextTaskItem();
-
     Ui::MainWindow *ui_;
     relayer::app::CoreService *core_;
     ConnectorControl *connector_;
     LogControl *log_;
     ExplorerControl *explorer_ = nullptr;
     ComparisonControl *comparison_ = nullptr;
+    relayer::app::RelayTaskControl *taskControl_ = nullptr;
 
     // 自动接收状态。receiveActive_ 表达"此刻有常驻接收会话挂着"
     // （keepReceiving：收完文件不断开）；receiveWanted_ 表达"用户想要
@@ -75,11 +77,6 @@ private:
 
     // 接收会话失败重试计数（成功连接/成功操作即清零）。
     int receiveRetries_ = 0;
-
-    // 任务队列：配置表"发送到对端"展开后的文件序列（目录行已展开为文件）。
-    relayer::app::RelayTaskItems taskQueue_;
-    int taskIndex_ = 0;
-    bool taskRunning_ = false;
 
     // 最近一次探测的连接参数（ConnectorControl::probeRequested 记录）。
     // 每个操作一条连接，之后的所有操作都复用这一组值。

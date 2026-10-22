@@ -71,6 +71,11 @@ struct Outcome
     std::string summary;
     // 出错时的技术细节（路径、系统错误）。可能为空。
     Status status;
+    // 连接级失败：中继断开、对端失联——重试剩余工作没有意义，调用方
+    // （任务批次）应当就此打住。文件级失败（目标已存在、写盘失败、
+    // 校验不过）不置位，批次继续下一个。v1 的 RelayTask 有同款判断
+    // （core->isConnected()），v2 没有常驻连接可查，靠结论携带。
+    bool connectionLost = false;
     // 传输层的计数。list 这类没有传输的操作全为 0。
     TransferStats stats;
     // list 操作的在线对端。其他操作为空。

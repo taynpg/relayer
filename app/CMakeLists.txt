@@ -39,6 +39,7 @@ add_executable(relayer WIN32
     ui/Control/ComparisonControl.cpp
     ui/Control/ExplorerControl.cpp
     ui/Control/OwnTableWidget.cpp
+    ui/Control/RelayTaskControl.cpp
     relayer.qrc
 )
 

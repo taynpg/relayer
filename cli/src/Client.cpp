@@ -113,7 +113,7 @@ struct Client::Impl
 
     // 结束这件事只能发生一次。所有路径（成功、失败、超时、连接断）都
     // 走这里，否则会出现"先因为超时报了错，两秒后又因为对端回帧报了成功"。
-    void finish(bool ok, std::string summary, Status status = Status{})
+    void finish(bool ok, std::string summary, Status status = Status{}, bool connectionLost = false)
     {
         if (finished)
         {
@@ -138,6 +138,7 @@ struct Client::Impl
             o.ok = ok;
             o.summary = std::move(summary);
             o.status = std::move(status);
+            o.connectionLost = connectionLost;
             if (peer)
             {
                 // 只在这里读一次：finish 之后 peer 会被上层释放，之后再取
@@ -294,7 +295,10 @@ struct Client::Impl
                "对端长时间无响应（" +
                    std::to_string(std::chrono::duration_cast<std::chrono::seconds>(config.idleTimeout).count()) +
                    " 秒无进展）",
-               Status::Fail(ErrorCode::kTimeout, "peer idle"));
+               Status::Fail(ErrorCode::kTimeout, "peer idle"),
+               // 发送方视角的"对端失联"就是连接级失败：可能是对端进程死了，
+               // 也可能是中继链路断了。批次执行者凭它决定"剩余项不再发"。
+               true);
     }
 
     void touch()
@@ -432,7 +436,7 @@ struct Client::Impl
             {
                 st.message += "（中继可能以 --allow-no-auth 启动，客户端请加 --no-auth 重试）";
             }
-            finish(false, "与中继的连接断开", std::move(st));
+            finish(false, "与中继的连接断开", std::move(st), true);
         };
 
         session = core::session::Session::connect(ctx, config.host, config.port, std::move(sc), std::move(h));
@@ -682,7 +686,7 @@ struct Client::Impl
             // 这是 kill 测试里**必然**走到的分支：发送端进程消失，
             // 接收端在 idleTimeout 后得到这个结论。目标文件是否完好
             // 由测试断言，这里的措辞不该暗示"文件坏了"。
-            finish(false, "对端已断开（传输未完成）", r.status);
+            finish(false, "对端已断开（传输未完成）", r.status, true);
             return;
 
         case core::transfer::TransferOutcome::kFailed:

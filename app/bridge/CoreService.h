@@ -84,6 +84,15 @@ public:
         return queuedWork_;
     }
 
+    // 最近一次失败是否属于连接级失败（中继断开/对端失联，见
+    // cli::Outcome::connectionLost）。任务批次凭它决定"剩余项不再发"。
+    // 在 finishOperation 发出 operationFinished 之前置位，GUI 槽读到的
+    // 一定是本次结论的值。
+    bool lastFailureConnectionLost() const noexcept
+    {
+        return lastConnectionLost_.load(std::memory_order_acquire);
+    }
+
     // 把本地文件发给对端。remoteName 为空时用本地文件名。
     // 返回 false = 真忙（传输中），本次请求被拒绝；true = 已开始或已排队。
     bool sendFile(const QString &localPath, const QString &remoteName, const QString &toPeerId,
@@ -182,6 +191,10 @@ private:
     std::atomic<bool> busy_{false};
     std::atomic<bool> receivePending_{false};
     std::atomic<bool> queuedWork_{false};
+
+    // 最近一次结论的连接级失败标记（io 线程写、GUI 线程读，见
+    // lastFailureConnectionLost() 的注释）。
+    std::atomic<bool> lastConnectionLost_{false};
 };
 
 }  // namespace relayer::app
