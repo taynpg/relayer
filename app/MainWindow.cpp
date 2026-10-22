@@ -151,6 +151,20 @@ void MainWindow::onSendToPeer(const QString &peerId, const QString &peerName)
 
 void MainWindow::onProgress(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond)
 {
+    // 接收挂起等文件时总量为 0，进度没有信息量。cli::Client 的进度定时器
+    // 仍会 100ms 一次地报零值，全打出来就是一屏"进度 -- 0.0B"——只提示
+    // 一次"等待文件"，等真正有总量了再恢复进度日志。
+    if (bytesTotal == 0)
+    {
+        if (!idleProgressLogged_)
+        {
+            idleProgressLogged_ = true;
+            log_->appendLog(QStringLiteral("  等待文件……\n"));
+        }
+        return;
+    }
+    idleProgressLogged_ = false;
+
     // 节流到每秒一条：进度本来 100ms 一次，全量写日志会淹没结论行。
     const auto now = std::chrono::steady_clock::now();
     if (now - lastProgressLog_ < std::chrono::seconds(1))

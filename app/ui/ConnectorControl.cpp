@@ -226,16 +226,6 @@ void ConnectorControl::onPeerListReceived(const QList<PeerRow> &rows)
     }
 }
 
-void ConnectorControl::onOperationFinished(bool ok, const QString &summary, const QString &detail)
-{
-    // 探测失败的常见原因（服务端没开、口令错）在这里只负责把结论交给
-    // 日志面板，不弹框——探测是低风险操作，弹框打断比失败本身更烦。
-    const QString line = ok ? QStringLiteral("[连接] %1").arg(summary)
-                            : QStringLiteral("[连接失败] %1%2")
-                                  .arg(summary, detail.isEmpty() ? QString() : QStringLiteral("（%1）").arg(detail));
-    emit logMessage(line);
-}
-
 void ConnectorControl::onTableContextMenu(const QPoint &pos)
 {
     auto *item = ui_->tableClients->itemAt(pos);
@@ -281,5 +271,6 @@ void ConnectorControl::attachCoreService(relayer::app::CoreService *core)
     connect(core, &relayer::app::CoreService::busyChanged, this, &ConnectorControl::onBusyChanged);
     connect(core, &relayer::app::CoreService::assignedIdChanged, this, &ConnectorControl::onAssignedIdChanged);
     connect(core, &relayer::app::CoreService::peerListReceived, this, &ConnectorControl::onPeerListReceived);
-    connect(core, &relayer::app::CoreService::operationFinished, this, &ConnectorControl::onOperationFinished);
+    // operationFinished 的日志由 MainWindow 统一出口，这里不接（接了
+    // 会把同一行结论打两遍）。
 }

@@ -76,7 +76,6 @@ private:
     void onBusyChanged(bool busy);
     void onAssignedIdChanged(const QString &id);
     void onPeerListReceived(const QList<relayer::app::PeerRow> &rows);
-    void onOperationFinished(bool ok, const QString &summary, const QString &detail);
 
     Ui::ConnectorControl *ui_;
     relayer::app::CoreService *core_;

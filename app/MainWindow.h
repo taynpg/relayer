@@ -68,4 +68,7 @@ private:
 
     // 进度节流：上次写日志的时间点。
     std::chrono::steady_clock::time_point lastProgressLog_{};
+
+    // 等待文件（总量为 0）的提示只打一次，避免空闲进度刷屏。
+    bool idleProgressLogged_ = false;
 };
