@@ -468,7 +468,7 @@ nonce 重放被拒、两个 proof 恒不相等、乱序帧被拒、失败终态�
 - 关闭流程显式：`shutdown(fd) → 等待在读回调返回 → 释放`，杜绝 v1 里的"对象析构时还在收帧"。
 - 心跳与超时统一由 `transport` 层提供，不散落在业务层。
 
-**状态：部分完成**（帧切分 + 连接；心跳与超时未做）。
+**状态：部分完成**（帧切分 + 连接 + 心跳；认证接线与转发未做）。
 
 #### 3.4.1 帧切分（`FrameReader`，已完成）
 
@@ -518,11 +518,34 @@ nonce 重放被拒、两个 proof 恒不相等、乱序帧被拒、失败终态�
   `-Werror -Wsign-conversion -Wold-style-cast`，不加 `SYSTEM` 会有几十个来自
   三方代码的报错。`SYSTEM` 只抑制警告，不改语义。
 
-#### 3.4.4 未做
+#### 3.4.4 心跳与超时（已完成）
 
-- 心跳与超时（`kAskHeart` / `kAnswerHeart` 的定时器）
+`core/include/relayer/core/transport/Heartbeat.h` + `tests/core/HeartbeatTest.cpp`
+（14 用例 / 766 断言）。参数与规则见 `PROTOCOL.md` §8.5。
+
+核心取舍：**把时间决策抽成纯函数**。`HeartbeatPolicy::check(now)` 输入时间点、
+输出 `{kNone, kSendPing, kTimedOut}`，不碰 socket 也不碰定时器。测试因此可以
+传任意虚构时间，把十分钟的连接行为在微秒内跑完——如果时间判断散落在定时器
+回调里，测试只能真的 `sleep`，那是 CI 偶发失败的头号来源。
+
+几个刻意的决定：
+
+- **双向心跳而非只靠 TCP keepalive**：keepalive 默认 2 小时才报死，且检测
+  不到"对端进程卡死但 socket 还开着"。
+- **任何入站字节都算生命迹象**，业务帧也算。心跳要回答"对端还有没有反应"，
+  不是"对端是否遵循心跳协议"——一个只在发数据的对端显然活着。
+- **出站动作不重置空闲计时器**。发 ping 不能当作连接健康的证据，否则只要
+  我们在发包就永远不超时。
+- **检查顺序先判超时、再判是否发新 ping**。写反会让死连接一直发新心跳，
+  把问题掩盖成"在重试"。
+- 边界一律用 `>=`。用 `>` 会出现"周期恰好等于阈值时永远不触发"。
+
+#### 3.4.5 未做
+
 - 连接建立后的认证接线（`ServerHandshake` / `ClientHandshake` 挂到
-  `onFrame` 上）——属于 3.4.5 的"服务端会话"，随转发路径一起做
+  `onFrame` 上）——属于"服务端会话"，随转发路径一起做
+- 心跳定时器接线（`asio::steady_timer` 每 `kTickInterval` 调一次 `check()`）
+- 转发路径上调用 `bindSenderIdentity()`
 
 ---
 

@@ -21,6 +21,7 @@ add_library(relayer_core STATIC
     src/transfer/StateMachine.cpp
     src/transport/FrameReader.cpp
     src/transport/Connection.cpp
+    src/transport/Heartbeat.cpp
 )
 
 target_include_directories(relayer_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
