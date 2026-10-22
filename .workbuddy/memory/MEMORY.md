@@ -47,12 +47,11 @@
 ## 构建与验证
 
 ```bash
-# app/ 目录还没建（阶段 E），而 RELAYER_BUILD_GUI 默认 ON → 必须显式关掉，
-# 否则 configure 直接报 "add_subdirectory given source app"
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
-      -DRELAYER_BUILD_GUI=OFF -DRELAYER_BUILD_TESTS=ON
+# app/ 已落地（阶段 E），GUI 默认 ON，本机 Qt 6.11.2 能被 CMake 找到
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DRELAYER_BUILD_TESTS=ON
 cmake --build build
-cd build && ctest --output-on-failure        # 含 e2e_quick，约 90 秒
+cd build && ctest --output-on-failure        # 7 项，约 51 秒
+# 没有 Qt 的机器/CI 要显式 -DRELAYER_BUILD_GUI=OFF
 
 # 带 -Werror 的 Release 验证（提交前跑一次）
 cmake -S . -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DRELAYER_WERROR=ON
@@ -76,13 +75,23 @@ cmake --build build-rel && cd build-rel && ctest
     / TransferSender / TransferReceiver / TransferPeer）
   - `server/`（relayerd）、`cli/`（relayer-cli）
   - `tests/e2e/run_e2e.py`：10 个三进程场景，完整跑 295 秒全过
-- ⬜ 阶段 E ～ G（Qt 前端 / P2P / 发布）—— 下一步是 E，写 `app/`
+- 🚧 **阶段 E 进行中**（Qt 前端，`app/`）
+  - ✅ E1 骨架 + 9 个 `.ui` 迁移；E2 `bridge/CoreService`（唯一 Qt 边界）
+  - ✅ E3.1 InfoDrop / CheckableComboBox；E3.2 OwnTableWidget 重写
+  - ✅ E3.3 ExplorerControl（本地浏览；远端面板要协议扩展，属阶段 F）
+  - ✅ E3.4 ComparisonControl（JSON 持久化 + 相对目录落盘）
+  - ✅ E3.5 RelayTaskControl 任务表单（停止/重传/批次失败规则）
+  - ✅ 身份稳定（连接=常驻接收会话 + sessionId 解复用）、性能三杠杆
+  - ⬜ 剩余：Setting 对话框（`btnLock` 仍禁用）、ReplaceArea 作用域、
+    速度显示（清单 #11 ProgressTracker）、E4 真实链路验收
+- ⬜ 阶段 F（多任务并行 / P2P / 远端浏览归档）、G（发布）
 
 测试基线：`ctest` 7 项全过（common / filestore / core / arch / protocol_doc /
-transition_doc / e2e_quick）。core 335 用例 / 5451 断言；e2e 10 场景。
+transition_doc / e2e_quick），51 秒。common 16/1111、filestore 117/1718、
+core 341/5482，合计 474 用例 / 8311 断言；e2e 10 场景（完整跑 295 秒）。
 
-**交接文档：`docs/HANDOFF.md`** —— 阶段 D 的全部缺陷、坑与验证记录都在里面，
-比记忆详细。接手先读它。
+**交接文档：`docs/HANDOFF.md`** —— **§0 是阶段 E 现状（先读这里）**，
+§1-§11 是阶段 D 的缺陷、坑与验证记录。细化进度见 `docs/REWRITE-PLAN.md §4.1`。
 
 ## 定位
 
