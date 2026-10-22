@@ -41,6 +41,10 @@ namespace relayer::core::session
 // 前置声明，供 Session 的友元声明使用。
 struct SessionAccess;
 
+// SessionHandler 在 Session 之前定义（Session 要拿它做成员），
+// 而它的回调签名里带 Session&，所以这里必须先声明类名。
+class Session;
+
 using protocol::Frame;
 using protocol::FrameType;
 using transport::Connection;
@@ -104,23 +108,41 @@ struct SessionConfig
 
 struct SessionHandler
 {
+    // 三个回调都以 `Session &self` 开头。
+    //
+    // 为什么需要它：服务端同时管着几十上百条连接，回调触发时必须知道
+    // "这是哪一条"。不用闭包捕获，是因为构造 Session 之前就要传 handler
+    // ——那时拿不到自己的 shared_ptr，鸡生蛋。也不让调用方在 handler 里
+    // 存一个"当前会话"的临时变量：那是全局状态，并发下必然出错。
+    //
+    // 传引用而不是 shared_ptr：回调期间 Session 一定活着（它自己正在
+    // 调用回调），而传 shared_ptr 会让调用方很容易不小心长期持有，
+    // 把一个该断开的连接拖住不放。
+
     // 认证完成，可以走业务帧了。
     //
     // assignedId：服务端分配（或客户端被告知）的身份。这里的 id 由上层
     // 注入——core 不认识"客户端 id 怎么分配"这种业务规则。
-    std::function<void(std::string assignedId)> onAuthenticated;
+    std::function<void(Session &self, std::string assignedId)> onAuthenticated;
 
     // 收到一帧业务帧（认证完成之后）。已通过 SessionPolicy 的入站检查，
     // 也已经按 §11.4 做了出站断言**之前**的状态——也就是说 from 是
     // 对端自称的，转发时仍须调用 applyIdentityBinding()。
-    std::function<void(const Frame &)> onFrame;
+    std::function<void(Session &self, const Frame &)> onFrame;
 
     // 会话结束。保证只调用一次。
+    //
+    // `assignedId` 是这条会话的身份（未认证就断开时为空串）。
+    //
+    // 不传 Session& 而是传 id，原因是这个回调是**投递**执行的（见
+    // Session::finish）：从投递到执行之间，上层可能已经丢掉了最后一个
+    // 引用，会话对象已经销毁。而"哪条连接断了"这件事必须能告诉上层——
+    // 服务端要据此把该 id 从在线表里摘掉。id 是值语义，活得过对象。
     //
     // 与 Connection::onClosed 的区别：Connection 只在 TCP 层关闭时通知，
     // 而会话可能先因为认证失败 / 握手超时 / 协议违规而结束——那之后
     // 还要主动断开底层连接。上层只需要关心这一个"结束"。
-    std::function<void(Status)> onClosed;
+    std::function<void(std::string assignedId, Status)> onClosed;
 };
 
 // ---------------------------------------------------------------------------

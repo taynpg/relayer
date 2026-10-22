@@ -171,7 +171,7 @@ template <typename Fn> void connectPair(Harness &h, Fn &&onReady)
     // 两侧的 onFrame 先占位，peer 建好后再改指它们。
     // std::function 可赋值，是这里最简单可靠的二次绑定方式。
     auto serverHandler = std::make_shared<SessionHandler>();
-    serverHandler->onFrame = [&h](const Frame &f)
+    serverHandler->onFrame = [&h](Session &, const Frame &f)
     {
         if (h.receiver)
         {
@@ -190,7 +190,7 @@ template <typename Fn> void connectPair(Harness &h, Fn &&onReady)
         });
 
     auto clientHandler = std::make_shared<SessionHandler>();
-    clientHandler->onFrame = [&h](const Frame &f)
+    clientHandler->onFrame = [&h](Session &, const Frame &f)
     {
         if (h.sender)
         {

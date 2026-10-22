@@ -100,13 +100,15 @@ struct Observation
 SessionHandler makeHandler(const std::shared_ptr<Observation> &obs)
 {
     SessionHandler h;
-    h.onAuthenticated = [obs](std::string id)
+    // 回调首参是触发它的那条会话。本文件的用例一次只跑一条连接，
+    // 所以这里不关心它；但签名必须带上，否则编译不过。
+    h.onAuthenticated = [obs](Session &, std::string id)
     {
         ++obs->authenticated;
         obs->assignedId = std::move(id);
     };
-    h.onFrame = [obs](const Frame &f) { obs->frames.push_back(f); };
-    h.onClosed = [obs](Status s)
+    h.onFrame = [obs](Session &, const Frame &f) { obs->frames.push_back(f); };
+    h.onClosed = [obs](std::string, Status s)
     {
         ++obs->closed;
         obs->closeStatus = std::move(s);

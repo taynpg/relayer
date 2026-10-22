@@ -356,7 +356,7 @@ void Session::handleInbound(const Frame &frame)
             // 用它做路由。只在真的变化时通知，避免重复回调。
             if (handler_.onAuthenticated)
             {
-                handler_.onAuthenticated(assignedId_);
+                handler_.onAuthenticated(*this, assignedId_);
             }
         }
         return;
@@ -364,7 +364,7 @@ void Session::handleInbound(const Frame &frame)
 
     if (handler_.onFrame)
     {
-        handler_.onFrame(frame);
+        handler_.onFrame(*this, frame);
     }
 }
 
@@ -398,7 +398,7 @@ void Session::enterAuthenticated()
     // 情况下，客户端会永远收不到认证通知。
     if (handler_.onAuthenticated)
     {
-        handler_.onAuthenticated(assignedId_);
+        handler_.onAuthenticated(*this, assignedId_);
     }
 }
 
@@ -443,7 +443,7 @@ void Session::enterAuthenticatedServer()
 
     if (handler_.onAuthenticated)
     {
-        handler_.onAuthenticated(assignedId_);
+        handler_.onAuthenticated(*this, assignedId_);
     }
 }
 
@@ -685,19 +685,22 @@ void Session::finish(Status status, bool closeTransport)
         conn_->close();
     }
 
-    // 把 handler 拷出来再通知：上层很可能在这个回调里丢掉最后一个
+    // 把 handler 与 id 拷出来再通知：上层很可能在这个回调里丢掉最后一个
     // Session 引用，那一刻 this 就没了。与 Connection::doClose 里的做法
-    // 是同一个理由。
+    // 是同一个理由——所以 id 也必须是拷贝，不能到投递时才去读 this。
     auto notify = handler_.onClosed;
     if (!notify)
     {
         return;
     }
+    std::string id = assignedId_;
 
     // 投递而不是同步调用。finish() 有很多调用点（包括在 Connection 的帧
     // 回调里），同步通知会让上层在"会话还在处理这一帧"的栈上就把会话
     // 拆掉，之后本函数剩下的语句会访问已销毁的对象。
-    asio::post(ctx_, [n = std::move(notify), s = std::move(status)]() mutable { n(std::move(s)); });
+    asio::post(ctx_,
+               [n = std::move(notify), id = std::move(id), s = std::move(status)]() mutable
+               { n(std::move(id), std::move(s)); });
 }
 
 std::string Session::peer() const
