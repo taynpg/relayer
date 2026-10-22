@@ -30,7 +30,7 @@
 | E3.2 | `OwnTableWidget`：`ComColumn`/`ExpColumn` 枚举、列可编辑性收敛到 `isReadOnlyColumn()`、`ensureItem/setText/setReadOnly` 拆分、`ensureRowComplete` |
 | E3.3 | `ExplorerControl`：本地浏览（导航/排序/筛选/拖出/右键动作表）。远端面板**故意不做**——v2 没有 list-dir 帧 |
 | E3.4 | `ComparisonControl`：`rows_` + `viewToRow_` 投影、JSON 持久化（替 v1 的 Sqlite）、`selectedRows()`、动作表、去掉 `static bool inited` |
-| E3.5 | `RelayTaskControl`（主窗口「任务」选项卡）:批次顺序推进、停止、单行重传；文件级失败继续、连接级失败终止 |
+| E3.5 | `RelayTaskControl`（主窗口「任务」选项卡）：批次顺序推进、停止、单行重传；文件级失败继续、连接级失败终止 |
 | 身份 | 连接/刷新/发送**共用同一条常驻会话**，id 只分配一次；发送在接收会话上挂第二个 `TransferPeer`，帧靠 `sessionId` 解复用 |
 | 性能 | 默认块 256 KiB（上限仍 4 MiB）、控制帧插队（`isBulkFrame()`）、单帧写超时 60s、接收端写流复用 |
 
@@ -43,8 +43,9 @@
    区分大小写」的普通替换（注释在 cpp 里写明了）。`ReplaceArea.ui` 同样未接线。
 3. **速度显示 / `ProgressTracker`**（§3.7.2 清单 #11）：`RelayTaskControl::onProgress()`
    收了 `bytesPerSecond` 但没用；空文件除零、时间边界没有集中处。
-4. **E4 验收**：需要一次**真实链路**（两台机器经中继，不是 loopback）的完整收发记录；
-   e2e 还缺 no-auth 场景（`--allow-no-auth` 走过一次手工路径，见 §0.6 最后一条）。
+4. **E4 验收**：需要一次**真实链路**（两台机器经中继，不是本机回环）的完整收发记录。
+   目前为止 GUI 的收发都是在本机中继 + loopback 上验证的；e2e 也缺 no-auth 场景
+   （`--allow-no-auth` 走过一次手工路径，见 §0.6 最后一条）。
 5. **阶段 F**：远端浏览/下载、对端打包 tar.xz、P2P 直连、多任务并行。前三个都要动协议，
    `PROTOCOL.md` 得先写帧定义再写代码。
 
@@ -69,9 +70,9 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DRELAYER_BUILD_TESTS=ON
 cmake --build build
 cd build && ctest --output-on-failure     # 7 项，约 51 秒（e2e_quick 40s）
 
-build/bin/relayerd.exe --port 9100 --password <口令>   # 中继
-build/bin/relayer.exe                                   # GUI
-build/bin/relayer-cli.exe send/recv ...                 # 对照参考实现、e2e 用
+build/bin/relayerd.exe --port 9527 --password <口令>   # 中继（默认端口 9527）
+build/bin/relayer.exe                                  # GUI
+build/bin/relayer-cli.exe send/recv ...                # 对照参考实现、e2e 用
 ```
 
 没有 Qt 的机器（或 CI）要显式 `-DRELAYER_BUILD_GUI=OFF`，否则 configure 会停在
