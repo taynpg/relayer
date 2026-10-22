@@ -11,10 +11,12 @@
 
 add_library(relayer_filestore STATIC
     src/Status.cpp
+    src/PathPolicy.cpp
     src/Sha256.cpp
     src/PlatformPath.cpp
     src/StdStream.cpp
     src/StdFileStore.cpp
+    src/MemFileStore.cpp
 )
 
 target_include_directories(relayer_filestore

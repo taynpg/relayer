@@ -10,6 +10,7 @@
 using relayer::filestore::DirEntry;
 using relayer::filestore::ErrorCode;
 using relayer::filestore::FileStat;
+using relayer::filestore::PathPolicy;
 using relayer::filestore::Status;
 using relayer::filestore::StdFileStore;
 using relayer::test::TempDir;
@@ -49,41 +50,16 @@ std::vector<char> readAll(StdFileStore &fs, const std::string &path, Status &st)
 // 路径
 // ---------------------------------------------------------------------------
 
-TEST_CASE("normalize 折叠 . 与 ..，统一分隔符", "[filestore][path]")
+TEST_CASE("StdFileStore 的路径方法委托给 PathPolicy", "[filestore][path]")
 {
+    // 这里不做穷举：路径规则本身的测试全在 PathPolicyTest.cpp。
+    // 本用例只验证"委托确实接上了"，防止实现被换掉后静默偏离。
     StdFileStore fs;
     REQUIRE(fs.normalize("a/./b/../c") == "a/c");
-    REQUIRE(fs.normalize("a\\b\\c") == "a/b/c");
-    REQUIRE(fs.normalize("a//b///c") == "a/b/c");
-    REQUIRE(fs.normalize("") == "");
-}
-
-TEST_CASE("join 不重复插入分隔符", "[filestore][path]")
-{
-    StdFileStore fs;
-    REQUIRE(fs.join("a", "b") == "a/b");
-    REQUIRE(fs.join("a/", "b") == "a/b");
-    REQUIRE(fs.join("", "b") == "b");
-    REQUIRE(fs.join("a", "") == "a");
-}
-
-TEST_CASE("parent 与 fileName 处理根目录", "[filestore][path]")
-{
-    StdFileStore fs;
-    REQUIRE(fs.fileName("a/b/c.txt") == "c.txt");
-    REQUIRE(fs.parent("a/b/c.txt") == "a/b");
-    REQUIRE(fs.fileName("c.txt") == "c.txt");
-    // 根目录的 parent 仍返回根，不能返回空串（否则调用方会拼出相对路径）
-    const std::string rootParent = fs.parent("C:/");
-    REQUIRE_FALSE(rootParent.empty());
-}
-
-TEST_CASE("isAbsolute 区分绝对与相对", "[filestore][path]")
-{
-    StdFileStore fs;
-    REQUIRE(fs.isAbsolute("C:/temp/x"));
-    REQUIRE_FALSE(fs.isAbsolute("temp/x"));
-    REQUIRE_FALSE(fs.isAbsolute(""));
+    REQUIRE(fs.join("a/", "/b") == "a/b");
+    REQUIRE(fs.resolveWithin("/root", "../escape").empty());
+    REQUIRE(fs.resolveWithin("/root", "/abs").empty());
+    REQUIRE_FALSE(fs.resolveWithin("/root", "sub/file.txt").empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +170,7 @@ TEST_CASE("非 UTF-8 与中文路径都能正确落盘", "[filestore][io][unicod
     FileStat st = fs.stat(path);
     REQUIRE(st.exists);
     REQUIRE(st.size == 7);
-    REQUIRE(fs.fileName(path) == leaf);
+    REQUIRE(PathPolicy{}.fileName(path) == leaf);
 
     Status err;
     const auto back = readAll(fs, path, err);

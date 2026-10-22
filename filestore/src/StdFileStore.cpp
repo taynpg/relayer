@@ -104,63 +104,23 @@ fs::path toPath(std::string_view p)
 // ---------------------------------------------------------------------------
 // 路径
 // ---------------------------------------------------------------------------
+// 全部委托给 PathPolicy。不在这里用 std::filesystem::path 的 lexically_normal，
+// 是因为它要先把路径转成宽字符再转回来，多两次分配，而且 C++17/C++20 对
+// 相对路径里 `..` 的处理有细微差异。纯字符串实现的规则可控、可测。
 
 std::string StdFileStore::normalize(std::string_view path) const
 {
-    if (path.empty())
-    {
-        return {};
-    }
-    // lexically_normal 只做字符串层面的折叠，不访问磁盘，
-    // 因此对不存在的路径也安全（normalize 的语义要求如此）。
-    const fs::path p = toPath(path);
-    std::string out = p.lexically_normal().generic_string();
-    // generic_string 在某些平台上会给根目录保留尾部分隔符，这里统一去掉，
-    // 但 "C:/" 这种根要保持原样。
-    while (out.size() > 1 && out.back() == '/')
-    {
-        const bool isRoot = out.size() == 3 && out[1] == ':';
-        if (isRoot)
-        {
-            break;
-        }
-        out.pop_back();
-    }
-    return out;
+    return policy_.normalize(path);
 }
 
 std::string StdFileStore::join(std::string_view a, std::string_view b) const
 {
-    if (a.empty())
-    {
-        return std::string(b);
-    }
-    if (b.empty())
-    {
-        return std::string(a);
-    }
-    std::string out(a);
-    if (out.back() != '/' && out.back() != '\\')
-    {
-        out.push_back('/');
-    }
-    out.append(b);
-    return out;
+    return policy_.join(a, b);
 }
 
-std::string StdFileStore::parent(std::string_view path) const
+std::string StdFileStore::resolveWithin(std::string_view root, std::string_view child) const
 {
-    return toPath(path).parent_path().generic_string();
-}
-
-std::string StdFileStore::fileName(std::string_view path) const
-{
-    return toPath(path).filename().generic_string();
-}
-
-bool StdFileStore::isAbsolute(std::string_view path) const
-{
-    return toPath(path).is_absolute();
+    return policy_.resolveWithin(root, child);
 }
 
 // ---------------------------------------------------------------------------

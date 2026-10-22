@@ -159,12 +159,21 @@ public:
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
 
     // ---- 路径 ----
-    // 统一分隔符、折叠 . 与 ..、去掉末尾分隔符。不访问磁盘。
+    // 路径折叠、拼接、绝对性判定都是纯字符串逻辑，与磁盘无关，
+    // 实现应当退化为 `return policy_.normalize(path);`。
+    //
+    // 之所以还留在接口上（而不是让调用方直接用 PathPolicy）：
+    // 调用方手上只有 IFileStore&，不该再额外传一个 policy；
+    // 而且允许实现覆盖（例如某个实现自带"沙箱根"，拼接时要额外处理）。
+    //
+    // 注意 join 不折叠 `..`，需要折叠请再调 normalize。
     [[nodiscard]] virtual std::string normalize(std::string_view path) const = 0;
     [[nodiscard]] virtual std::string join(std::string_view a, std::string_view b) const = 0;
-    [[nodiscard]] virtual std::string parent(std::string_view path) const = 0;
-    [[nodiscard]] virtual std::string fileName(std::string_view path) const = 0;
-    [[nodiscard]] virtual bool isAbsolute(std::string_view path) const = 0;
+
+    // 归档条目落点校验的唯一入口（zip-slip / tar 路径穿越）。
+    // 返回空串表示"该条目必须被拒绝"：绝对路径、逃出 root、指向 root 自身。
+    // 具体规则见 PathPolicy::resolveWithin 的注释，实现直接转调即可。
+    [[nodiscard]] virtual std::string resolveWithin(std::string_view root, std::string_view child) const = 0;
 
     // ---- 元信息 ----
     // 路径不存在时返回 exists=false 的成功结果，而不是失败。

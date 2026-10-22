@@ -6,6 +6,8 @@
 
 add_executable(filestore_test
     filestore/StdFileStoreTest.cpp
+    filestore/PathPolicyTest.cpp
+    filestore/MemFileStoreTest.cpp
 )
 target_link_libraries(filestore_test PRIVATE relayer_filestore Catch2::Catch2WithMain)
 target_include_directories(filestore_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

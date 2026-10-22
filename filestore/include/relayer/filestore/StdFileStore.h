@@ -4,6 +4,7 @@
 #include <string>
 
 #include "relayer/filestore/IFileStore.h"
+#include "relayer/filestore/PathPolicy.h"
 
 namespace relayer::filestore
 {
@@ -32,9 +33,7 @@ public:
 
     [[nodiscard]] std::string normalize(std::string_view path) const override;
     [[nodiscard]] std::string join(std::string_view a, std::string_view b) const override;
-    [[nodiscard]] std::string parent(std::string_view path) const override;
-    [[nodiscard]] std::string fileName(std::string_view path) const override;
-    [[nodiscard]] bool isAbsolute(std::string_view path) const override;
+    [[nodiscard]] std::string resolveWithin(std::string_view root, std::string_view child) const override;
 
     [[nodiscard]] FileStat stat(std::string_view path) const override;
     [[nodiscard]] Status probeWritable(std::string_view path) const override;
@@ -50,6 +49,9 @@ public:
     Status atomicReplace(std::string_view from, std::string_view to) const override;
 
     [[nodiscard]] std::string quickFingerprint(std::string_view path, std::int64_t sizeOverride = -1) const override;
+
+private:
+    PathPolicy policy_;
 };
 
 }  // namespace relayer::filestore

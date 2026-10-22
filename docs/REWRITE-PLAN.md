@@ -103,63 +103,85 @@ app  ──▶ core ──▶ filestore(接口)
 
 #### 3.1.2 `IFileStore` 接口
 
+> **实现状态（2026-10-22）**：接口已落地，与本节的草案有三处偏离，
+> 以实际代码 `filestore/include/relayer/filestore/IFileStore.h` 为准：
+>
+> 1. `Status` 增加了 `ErrorCode` 枚举（草案只有 `bool ok`）。原因是只有布尔
+>    的话，调用方无法区分"文件被占用"和"磁盘满"，而这两者的处理方式完全不同
+>    （前者重试、后者报错）。
+> 2. `WriteMode` 改成 `bool truncate`。实际只需要两个状态，
+>    额外造一个枚举没有收益。
+> 3. 路径方法从 5 个（`normalize/join/parent/fileName/isAbsolute`）收成 3 个
+>    （`normalize/join/resolveWithin`）。纯字符串逻辑抽到独立的 `PathPolicy`，
+>    接口只保留需要"实现可能有差异"的部分，并新增 `resolveWithin`
+>    作为归档路径穿越的唯一防线。
+
 ```cpp
-namespace filestore {
+namespace filestore
+{
 
-struct FileStat {
-    bool        exists   = false;
-    bool        isDir    = false;
-    std::uint64_t size   = 0;
-    std::int64_t  mtime  = 0;      // Unix epoch 秒
-    bool        readable = false;
-    bool        writable = false;
+struct FileStat
+{
+    bool          exists{};
+    bool          isDir{};
+    bool          isSymlink{};
+    std::uint64_t size{};       // 目录为 0
+    std::int64_t  mtime{};      // Unix epoch 秒
+    bool          readable{};
+    bool          writable{};
+    bool          executable{};
 };
 
-enum class WriteMode { Truncate, Append };
+enum class ErrorCode
+{
+    kOk = 0, kNotFound, kPermissionDenied, kAlreadyExists,
+    kNotADirectory, kIsADirectory, kNoSpace, kBusy,
+    kTooManyHandles, kInvalidPath, kIoError, kUnsupported, kUnknown,
+};
 
-// 打开失败/读写失败统一用 Result，不用异常穿越接口边界
-struct Status {
-    bool        ok = true;
+struct Status
+{
+    ErrorCode   code = ErrorCode::kOk;
     std::string message;
-    static Status Ok()            { return {}; }
-    static Status Fail(std::string msg);
-    explicit operator bool() const { return ok; }
+
+    [[nodiscard]] bool ok() const noexcept;
+    explicit operator bool() const noexcept;
+    static Status Ok();
+    static Status Fail(ErrorCode c, std::string msg);
 };
 
-class IFileStore {
+class IFileStore
+{
 public:
     virtual ~IFileStore() = default;
 
-    // ---- 路径 ----
-    virtual std::string normalize(const std::string& path) const = 0;
-    virtual std::string join(const std::string& a, const std::string& b) const = 0;
-    virtual std::string parent(const std::string& path) const = 0;
-    virtual std::string fileName(const std::string& path) const = 0;
-    virtual bool        isAbsolute(const std::string& path) const = 0;
+    [[nodiscard]] virtual std::string_view name() const noexcept = 0;
+
+    // ---- 路径（纯逻辑，实现退化为委托 PathPolicy）----
+    [[nodiscard]] virtual std::string normalize(std::string_view path) const = 0;
+    [[nodiscard]] virtual std::string join(std::string_view a, std::string_view b) const = 0;
+    // 归档条目落点校验：返回空串表示必须拒绝
+    [[nodiscard]] virtual std::string resolveWithin(std::string_view root, std::string_view child) const = 0;
 
     // ---- 元信息 ----
-    virtual FileStat stat(const std::string& path) const = 0;
-    // 可写探测：存在时测试能否写入，不存在时测试父目录能否创建。
-    // 与平台相关（Windows 的共享模式/占用），由实现负责判断。
-    virtual Status probeWritable(const std::string& path) const = 0;
+    [[nodiscard]] virtual FileStat stat(std::string_view path) const = 0;
+    [[nodiscard]] virtual Status probeWritable(std::string_view path) const = 0;
 
     // ---- 读写 ----
-    virtual std::unique_ptr<IReadStream>  openRead(const std::string& path, Status& st) const = 0;
-    virtual std::unique_ptr<IWriteStream> openWrite(const std::string& path, WriteMode mode, Status& st) const = 0;
+    virtual std::unique_ptr<IReadStream>  openRead(std::string_view path, Status& st) const = 0;
+    virtual std::unique_ptr<IWriteStream> openWrite(std::string_view path, bool truncate, Status& st) const = 0;
 
     // ---- 目录 ----
-    virtual Status list(const std::string& dir, bool recursive,
-                        std::vector<DirEntry>& out) const = 0;
-    virtual Status mkdirs(const std::string& dir) const = 0;
+    virtual Status list(std::string_view dir, bool recursive, std::vector<DirEntry>& out) const = 0;
+    virtual Status mkdirs(std::string_view dir) const = 0;
 
     // ---- 变更 ----
-    virtual Status remove(const std::string& path) const = 0;
-    virtual Status resize(const std::string& path, std::uint64_t size) const = 0;
-    // 原子替换：目标已存在时必须覆盖（Windows 下不能用裸 std::filesystem::rename）
-    virtual Status atomicReplace(const std::string& from, const std::string& to) const = 0;
+    virtual Status remove(std::string_view path) const = 0;
+    virtual Status resize(std::string_view path, std::uint64_t size) const = 0;
+    virtual Status atomicReplace(std::string_view from, std::string_view to) const = 0;
 
-    // ---- 便捷 ----
-    virtual std::string quickFingerprint(const std::string& path, std::int64_t sizeOverride = -1) const = 0;
+    [[nodiscard]] virtual std::string quickFingerprint(std::string_view path,
+                                                      std::int64_t sizeOverride = -1) const = 0;
 };
 
 }   // namespace filestore
@@ -172,14 +194,31 @@ public:
 - **不用异常穿越接口**：文件操作失败是常态（被占用、无权限、磁盘满），全部走 `Status`。
 - **`atomicReplace` 语义写死在注释里**：目标存在必须覆盖。
 - **`probeWritable` 单独成方法**：把平台差异关进实现，引擎只读结果。
+- **路径规则集中在 `PathPolicy`**：`PathStyle::kPosix` / `kWindows` 可显式指定，
+  因此同一套路径用例在两种平台都能跑，不依赖宿主。`resolveWithin` 用**段比较**
+  而非字符串前缀，天然带分隔符边界——v1 的 zip-slip 就出在前缀比较没有边界上。
 
 #### 3.1.3 实现
 
-| 实现 | 用途 | 说明 |
+| 实现 | 用途 | 状态 |
 | --- | --- | --- |
-| `StdFileStore` | 默认 | `std::filesystem` + `std::fstream`，Windows 上路径转宽字符 |
-| `QtFileStore` | 可选 | 仅当 Qt 可用时编译，用于 `std::filesystem` 出坑时切换 |
-| `MemFileStore` | 测试 | 内存文件树，可注入短写/失败 |
+| `StdFileStore` | 默认，`std::filesystem` + C stdio 流 | 已实现，已测 |
+| `MemFileStore` | 测试，内存文件树 + 故障注入 | 已实现，已测 |
+| `QtFileStore` | 可选，仅当 `std::filesystem` 出坑时切换 | 暂不实现 |
+
+`MemFileStore` 的能力（阶段 B 实际落地）：
+
+| 能力 | 接口 | 用途 |
+| --- | --- | --- |
+| 容量上限 | `setCapacity(n)` | 模拟磁盘满，写超限返回 `kNoSpace` |
+| 路径前缀故障 | `FaultInjection::pathPrefix` | 模拟"任务 A 写入失败而任务 B 正常" |
+| 写到一半失败 | `FaultInjection::afterOps` | 前 N 次写成功、之后失败 |
+| 一次性故障 | `FaultInjection::once` | 模拟"文件被占用一会儿后释放" |
+| 崩溃丢缓冲 | `setFlushOnClose(false)` | 写流未 flush 就被销毁 |
+
+**指纹一致性由测试强制**：`MemFileStore::quickFingerprint` 必须与
+`StdFileStore` 完全一致，否则所有基于内存实现写的续传测试都在验证假的东西。
+对应用例 `两个实现的指纹算法一致`。
 
 #### 3.1.4 归档
 
@@ -402,7 +441,7 @@ client                                 server
 - 框架 Catch2，vendored。
 - 单测：纯函数、状态机、路径、编解码。
 - 集成：三进程端到端。
-- CI：Windows + Linux，Debug + Release 双跑。
+- CI：Windows + Linux，Debug + Release 双跑（**仅 tag 触发**，见 7 节决策记录）。
 
 ### 5.5 提交规范
 
@@ -413,13 +452,46 @@ client                                 server
 
 ## 6. 需要拍板的决策
 
-| # | 问题 | 建议 |
+| # | 问题 | 结论 |
 | --- | --- | --- |
-| 1 | 依赖：vendored 还是 FetchContent | vendored + 记录版本（符合"编译简单"） |
-| 2 | Qt 版本 | 只支持 Qt 6，砍掉 Qt5 条件编译 |
-| 3 | 仓库历史 | `D:\Code\relayer` 全新 `git init`，v1 留在原仓库当参考 |
-| 4 | 测试框架 | Catch2（vendored） |
-| 5 | 服务端是否需要文件能力 | **不需要**，`relayerd` 只做转发/认证/目录 |
+| 1 | 依赖：vendored 还是 FetchContent | **已定：vendored**，版本与许可证记在 `third_party/README.md` |
+| 2 | Qt 版本 | **已定：只支持 Qt 6**，砍掉 Qt5 条件编译 |
+| 3 | 仓库历史 | **已定**：`D:\Code\relayer` 全新 `git init`，v1 留在原仓库当参考 |
+| 4 | 测试框架 | **已定：Catch2**（vendored） |
+| 5 | 服务端是否需要文件能力 | **已定：不需要**，见下方 6.1 |
+
+### 6.1 服务端的职责边界（重要）
+
+**`relayerd` 只做转发。** 它不理解文件，不读写磁盘上的用户数据，不打包、
+不校验内容、不缓存分片。它知道的只有「谁在线」「谁想连谁」「这条连接该往哪条
+通道倒字节」。
+
+这个边界带来三条硬性约束，写进架构检查：
+
+1. **`server/` 不链接 `filestore`**（已有的 R4 规则）。不是"暂时不用"，而是
+   永远不用——一旦允许，转发层迟早会被塞进"顺手校验一下"的逻辑。
+2. **服务端进程的工作目录里不产生任何用户数据文件**。日志除外，且日志路径
+   可配置、可关闭。
+3. **端到端校验由两端自己做**。服务端无法伪造校验通过，也无法因为自己的
+   磁盘问题导致传输失败。
+
+这样做换来的是三件事：
+
+- **安全面小**：服务端被攻破时不持有用户数据，也没有可被路径穿越利用的
+  文件操作入口（v1 的 zip-slip 这类问题在服务端根本不存在，因为服务端
+  不碰归档）。
+- **部署简单**：无状态、无磁盘依赖，可以跑在只读文件系统的容器里，
+  也可以多实例水平扩展（会话粘滞即可）。
+- **可审计**：想确认"服务端真的没偷看我的文件"，读一遍 `server/` 就够了，
+  代码量会控制在一两千行。
+
+代价也很明确，必须写在文档里避免以后被当成 bug：
+
+- 服务端**无法**在两端都在线之前暂存文件，所以**不支持离线投递**。
+  要发文件，双方必须同时在线的窗口内完成握手。
+- 服务端**无法**校验数据完整性，损坏只能由接收端发现并请求重传。
+- 如果两端都无法直连且中继带宽不足，传输会变慢——这是物理限制，
+  不是实现问题。
 
 ---
 
@@ -434,3 +506,5 @@ client                                 server
 | 2026-10-22 | 控件逻辑允许重写，布局不动 | v1 控件层逻辑与展示耦合，问题集中（见 3.7.2） |
 | 2026-10-22 | 帧格式沿用 RFM1 | 已验证，避免重蹈协议升级风险 |
 | 2026-10-22 | 新增分块 Merkle 校验 | v1 只校验长度，内容错位无法发现 |
+| 2026-10-22 | **服务端纯转发，零文件能力**（见 6.1） | 缩小攻击面、无状态部署、可审计；代价是不支持离线投递 |
+| 2026-10-22 | CI 只在 `v*` tag 与手动触发时运行 | 日常 push 跑全量 Windows + Qt 构建耗额度，收益低于本地 ctest |
