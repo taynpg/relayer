@@ -3,6 +3,7 @@
 #include <QWidget>
 
 #include "bridge/CoreService.h"
+#include "model/TransferTask.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui
@@ -12,6 +13,7 @@ class MainWindow;
 QT_END_NAMESPACE
 
 class ConnectorControl;
+class ComparisonControl;
 class ExplorerControl;
 class LogControl;
 
@@ -46,23 +48,34 @@ private slots:
     void onOperationFinished(bool ok, const QString &summary, const QString &detail);
     void onAssignedIdChanged(const QString &id);
     void onProbeRequested(const relayer::app::ConnInfo &conn);
+    void onTransTaskRun(const relayer::app::RelayTaskItems &items);
 
 private:
     void buildLayout();
     void wireSignals();
     void startAutoReceive();
 
+    // 任务执行器（E3.4 的临时实现：顺序逐个发，日志反馈进度；
+    // E3.5 的 RelayTask 表单会接管展示与控制）。
+    void startNextTaskItem();
+
     Ui::MainWindow *ui_;
     relayer::app::CoreService *core_;
     ConnectorControl *connector_;
     LogControl *log_;
     ExplorerControl *explorer_ = nullptr;
+    ComparisonControl *comparison_ = nullptr;
 
     // 自动接收状态。发送操作进行中暂停挂起（CoreService 一次只跑一个
     // 操作）；receiveWanted_ 表达"用户想要自动接收"，与"此刻在收"分开。
     bool receiveWanted_ = false;
     bool receiveActive_ = false;
     QString receiveDir_;
+
+    // 任务队列：配置表"发送到对端"展开后的文件序列（目录行已展开为文件）。
+    relayer::app::RelayTaskItems taskQueue_;
+    int taskIndex_ = 0;
+    bool taskRunning_ = false;
 
     // 最近一次探测的连接参数（ConnectorControl::probeRequested 记录）。
     // 每个操作一条连接，之后的所有操作都复用这一组值。

@@ -51,6 +51,12 @@ public:
         return table_;
     }
 
+    // 外部导航入口（配置表"访问本地目录"等）。进入失败经 notice 上报。
+    void navigateTo(const QString &path)
+    {
+        enterPath(path);
+    }
+
 signals:
     // 目录浏览失败的提示（进入失败、删除失败等）。MainWindow 转发到日志。
     void notice(const QString &msg);

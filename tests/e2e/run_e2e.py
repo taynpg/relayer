@@ -508,6 +508,64 @@ def empty_file(workdir: Path, bin_dir: Path) -> None:
     _transfer_roundtrip(workdir, bin_dir, 0)
 
 
+@scenario("relative-subdir", "发送方指定相对子目录：接收端自动建中间目录后落盘")
+def relative_subdir(workdir: Path, bin_dir: Path) -> None:
+    """"把固定文件发到对方某个目录"的核心场景（PROTOCOL.md §9.4 的 root
+    带目录段语义）。三个断言缺一不可：
+
+      - 文件落在 dst/sub/dir/payload.bin（中间目录是接收端建出来的）
+      - 内容一致
+      - 残片不留在根目录也不留在子目录（收尾走完）
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        src = c.src / "payload.bin"
+        want = make_file(src, 2_000_000)
+
+        recv, rid = c.start_receiver(idle_timeout=120)
+        sender = c.send(src, rid, extra=["--as", "sub/dir/payload.bin", "--idle-timeout", "120"])
+        rc = c.wait_all([sender, recv], 600)
+        expect_eq(rc[0], 0, "发送端退出码")
+        expect_eq(rc[1], 0, "接收端退出码")
+
+        got = c.dst / "sub" / "dir" / "payload.bin"
+        expect(got.exists(), f"子目录落点不存在：{got}")
+        expect_eq(got.stat().st_size, 2_000_000, "子目录落点文件大小")
+        expect_eq(sha256_of(got), want, "子目录落点内容哈希")
+        expect_no_fragment(c.dst / "sub" / "dir", "payload.bin")
+    finally:
+        c.shutdown()
+
+
+@scenario("relative-subdir-traversal", "发送方试图用 .. 逃出接收根目录：被拒绝且什么都不落盘")
+def relative_subdir_traversal(workdir: Path, bin_dir: Path) -> None:
+    """root 带 `..` 的安全性：resolveWithin 必须拒绝，接收端回 kBadDesc，
+    发送端以非零退出。这是"发送方可指定相对目录"不会退化成"可写对方任意
+    路径"的看门测试。
+
+    接收端在拒绝之后**继续等下一个传输**（空闲超时只在传输开始后计时，
+    被拒的请求不算开始——这是 GUI 自动接收挂起的同一语义），所以这里
+    等发送端退出即可，接收端随后强杀，只断言盘上状态。
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        src = c.src / "evil.bin"
+        make_file(src, 128_000)
+
+        recv, rid = c.start_receiver(idle_timeout=30)
+        sender = c.send(src, rid, extra=["--as", "../outside.bin", "--idle-timeout", "30"])
+        expect(sender.wait_exit(120) != 0, "发送端竟然报告成功——路径穿越被放行了")
+        expect("escapes" in sender.tail(), "发送端的结论没说清是路径穿越")
+        recv.kill()
+
+        expect(not (c.dst / "outside.bin").exists(), "文件落在了接收根目录之外（上层目录）")
+        expect(not (c.dst / "evil.bin").exists(), "文件落在了接收根目录")
+    finally:
+        c.shutdown()
+
+
 @scenario("one-byte", "1 字节文件正常完成")
 def one_byte(workdir: Path, bin_dir: Path) -> None:
     _transfer_roundtrip(workdir, bin_dir, 1)

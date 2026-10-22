@@ -2,6 +2,7 @@
 
 #include <QCloseEvent>
 #include <QDir>
+#include <QDirIterator>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QSettings>
@@ -11,6 +12,7 @@
 #include <QVBoxLayout>
 
 #include "ui/ConnectorControl.h"
+#include "ui/Control/ComparisonControl.h"
 #include "ui/Control/ExplorerControl.h"
 #include "ui/LogControl.h"
 #include "ui_MainWindow.h"
@@ -69,8 +71,10 @@ void MainWindow::buildLayout()
 {
     // 镜像 v1 relayFile.cpp initLayout：上（连接面板 + 选项卡）/ 下（文件浏览）。
     // 垂直 splitter 让下半部的浏览区可拖大——大目录浏览时这是高频操作。
+    comparison_ = new ComparisonControl(this);
     auto *tabWidget = new QTabWidget(this);
     tabWidget->addTab(log_, QStringLiteral("日志"));
+    tabWidget->addTab(comparison_, QStringLiteral("对照表"));
 
     auto *sTop = new QSplitter(Qt::Horizontal, this);
     sTop->setHandleWidth(0);
@@ -99,6 +103,15 @@ void MainWindow::wireSignals()
     connect(connector_, &ConnectorControl::sendToPeerRequested, this, &MainWindow::onSendToPeer);
     connect(connector_, &ConnectorControl::logMessage, log_, &LogControl::appendLog);
     connect(connector_, &ConnectorControl::probeRequested, this, &MainWindow::onProbeRequested);
+
+    connect(comparison_, &ComparisonControl::logMessage, log_, &LogControl::appendLog);
+    connect(comparison_, &ComparisonControl::exploreLocalRequested, explorer_,
+            [this](const QString &path)
+            {
+                explorer_->navigateTo(path);
+                log_->appendLog(QStringLiteral("[浏览] 已跳转 %1\n").arg(path));
+            });
+    connect(comparison_, &ComparisonControl::transTaskRun, this, &MainWindow::onTransTaskRun);
     connect(log_, &LogControl::receiveDirChanged, this,
             [this](const QString &dir)
             {
@@ -205,6 +218,24 @@ void MainWindow::onOperationFinished(bool ok, const QString &summary, const QStr
         receiveActive_ = false;
     }
 
+    // 任务链的推进在这里接管：一步的结束就是下一步的开始信号。
+    if (taskRunning_)
+    {
+        if (!ok)
+        {
+            log_->appendLog(
+                QStringLiteral("[任务] 第 %1/%2 项失败，剩余项中止\n").arg(taskIndex_ + 1).arg(taskQueue_.size()));
+            taskQueue_.clear();
+            taskRunning_ = false;
+        }
+        else
+        {
+            ++taskIndex_;
+            startNextTaskItem();
+        }
+        return;  // 任务进行中不恢复自动接收，通道让给任务
+    }
+
     // 一次接收结束后立刻重新挂起，维持"在线"。
     if (receiveWanted_ && !core_->busy())
     {
@@ -212,9 +243,96 @@ void MainWindow::onOperationFinished(bool ok, const QString &summary, const QStr
     }
 }
 
+// ---------------------------------------------------------------------------
+// 配置表任务执行器（E3.4 临时实现）
+//
+// CoreService 一次只跑一个操作，所以顺序逐个发：每步 sendFile 后由
+// operationFinished 唤醒下一步。E3.5 的 RelayTask 表单会接管任务展示
+// 与控制（暂停/重传/逐行状态），这里只保证链路能跑通。
+// ---------------------------------------------------------------------------
+
+void MainWindow::onTransTaskRun(const relayer::app::RelayTaskItems &items)
+{
+    if (taskRunning_ || core_->busy())
+    {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有任务正在进行，请等它结束"));
+        return;
+    }
+    if (lastConn_.host.isEmpty())
+    {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请先在连接面板连接中继"));
+        return;
+    }
+
+    taskQueue_.clear();
+    taskIndex_ = 0;
+
+    // 目录行展开为文件序列：目录内容落到 relDir/name/ 之下（与 v1 的
+    // 发送语义一致）。文件行落 relDir/name。
+    for (const auto &item : items)
+    {
+        if (!item.isDir)
+        {
+            // 拖入的文件行 localDir 就是文件完整路径；手填行是"目录 + 名称"。
+            QString filePath = item.localDir;
+            if (QFileInfo(filePath).isDir())
+            {
+                filePath = QDir(filePath).filePath(item.name);
+            }
+            taskQueue_.push_back({item.name, false, filePath, item.peerId,
+                                  item.relDir.isEmpty() ? item.name : item.relDir + QStringLiteral("/") + item.name});
+            continue;
+        }
+
+        // 目录行：localDir 是目录完整路径（拖入语义），root = relDir/name。
+        const QString rootRel = item.relDir.isEmpty() ? item.name : item.relDir + QStringLiteral("/") + item.name;
+        QDirIterator it(item.localDir, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+        while (it.hasNext())
+        {
+            const QString abs = it.next();
+            const QString rel = QDir(item.localDir).relativeFilePath(abs);
+            taskQueue_.push_back(
+                {QFileInfo(abs).fileName(), false, abs, item.peerId, rootRel + QStringLiteral("/") + rel});
+        }
+    }
+
+    if (taskQueue_.isEmpty())
+    {
+        log_->appendLog(QStringLiteral("[任务] 没有可发送的文件（目录为空？）\n"));
+        return;
+    }
+    taskRunning_ = true;
+    log_->appendLog(QStringLiteral("[任务] 开始：%1 个文件\n").arg(taskQueue_.size()));
+    startNextTaskItem();
+}
+
+void MainWindow::startNextTaskItem()
+{
+    if (taskIndex_ >= taskQueue_.size())
+    {
+        log_->appendLog(QStringLiteral("[任务] 全部完成（%1 个文件）\n").arg(taskQueue_.size()));
+        taskQueue_.clear();
+        taskRunning_ = false;
+        if (receiveWanted_)
+        {
+            startAutoReceive();
+        }
+        return;
+    }
+
+    const auto &t = taskQueue_.at(taskIndex_);
+    log_->appendLog(QStringLiteral("[任务] %1/%2  %3 → %4:%5\n")
+                        .arg(taskIndex_ + 1)
+                        .arg(taskQueue_.size())
+                        .arg(QFileInfo(t.localDir).fileName(), t.peerId, t.relDir));
+    core_->sendFile(t.localDir, t.relDir, t.peerId, lastConn_);
+}
+
 void MainWindow::closeEvent(QCloseEvent *event)
 {
     receiveWanted_ = false;
+    taskQueue_.clear();
+    taskRunning_ = false;
     core_->cancelCurrent();
     event->accept();
 }

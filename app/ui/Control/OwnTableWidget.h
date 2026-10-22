@@ -9,14 +9,19 @@ struct InfoDrop;
 // ComparisonControl 动作表的列语义。v1 里列号 0-5 以裸数字散落在拖拽、
 // 补列、读写各处（清单 #2 的病灶）；v2 全部收敛到这个 enum，落点判定用
 // isPathColumn()，可编辑性用 isReadOnlyColumn()，不再逐处传布尔。
+//
+// v2 的行语义是「把本地目录里的 name 发给 peer，落到对方接收根目录下的
+// relDir」——对应用户认可的核心场景"频繁把固定文件发到对方某个目录"。
+// v1 的「本地目录 ↔ 远程目录」映射需要远端目录浏览协议，属阶段 F。
 enum class ComColumn
 {
-    Id = 0,         // 行标识（保存配置用，用户不可见地维护）
-    Name = 1,       // 文件/目录名
-    Type = 2,       // "Dir" / "File"
-    Mark = 3,       // 后缀标记（目录为 "Dir"）
-    LocalDir = 4,   // 本地路径（拖拽目标之一）
-    RemoteDir = 5,  // 远端语义列（v2 中暂存对端相对目录，见 E3.5）
+    Id = 0,        // 行标识（保存配置用，用户不可见地维护）
+    Name = 1,      // 文件/目录名
+    Type = 2,      // "Dir" / "File"
+    Mark = 3,      // 后缀标记（目录为 "Dir"）
+    LocalDir = 4,  // 本地根目录（拖拽目标）
+    Peer = 5,      // 目标对端 id（发送用）
+    RelDir = 6,    // 对方接收根目录之下的相对目录（可空 = 落根）
 };
 
 template <typename E> constexpr int toInt(E e)
@@ -36,7 +41,7 @@ enum class ExpColumn
     Size = 4,
 };
 
-// ComparisonControl 的拖拽表：接受 InfoDrop 拖入本地/远端路径列，
+// ComparisonControl 的拖拽表：接受 InfoDrop 拖入本地目录列，
 // 逐行落格子。可编辑性由 isReadOnlyColumn 统一定义（清单 #1）。
 class ComDropTable : public QTableWidget
 {

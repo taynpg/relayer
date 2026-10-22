@@ -470,6 +470,25 @@ void TransferPeer::handleRequestSend(const Frame &frame)
         if (treatAsDir)
         {
             target = resolved;
+
+            // desc.root 允许带目录段（"sub/name.txt"）——这是"发送方指定
+            // 相对目录"的正式语义：落点 = 接收根目录/相对目录/文件名，且
+            // 已经 resolveWithin 挡住路径穿越。中间目录不存在时在这里建齐，
+            // 否则 openWrite 会因 ENOENT 失败，报错位置离根因很远。
+            //
+            // 只在目录形态下建：用户指定完整文件路径时不代表他同意凭空
+            // 多出一串目录，那种 ENOENT 应当如实报错。
+            const auto sep = target.find_last_of("/\\");
+            if (sep != std::string::npos)
+            {
+                if (const auto mk = store_.mkdirs(target.substr(0, sep)); !mk.ok())
+                {
+                    sendAnswerSend(AnswerStatus::kNotWritable, 0, mk.message);
+                    ++stats_.protocolErrors;
+                    finish(TransferOutcome::kFailed, mk, target);
+                    return;
+                }
+            }
         }
     }
 

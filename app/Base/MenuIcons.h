@@ -474,7 +474,6 @@ inline QIcon check()
     auto pm = makePixmap();
     QPainter p(&pm);
     p.setRenderHint(QPainter::Antialiasing, true);
-    auto c = cCheck();
     // 文档（带折角）
     p.setPen(QPen(cInfo(), 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     p.setBrush(QColor("#F8FAFC"));

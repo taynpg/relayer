@@ -22,7 +22,9 @@ ComDropTable::ComDropTable(QWidget *parent)
 
 bool ComDropTable::isPathColumn(int col)
 {
-    return col == toInt(ComColumn::LocalDir) || col == toInt(ComColumn::RemoteDir);
+    // v2 只有一个拖拽路径列：本地目录。对端与相对目录是打字填的，
+    // 从资源管理器拖不出这两个值。
+    return col == toInt(ComColumn::LocalDir);
 }
 
 bool ComDropTable::isReadOnlyColumn(int col)
@@ -130,12 +132,7 @@ void ComDropTable::dropEvent(QDropEvent *event)
 
         // 目录落的是"源目录/名字"，文件直接落拖拽来源的完整路径（v1 语义）。
         const QString pathContent = isDir ? QDir(infoDrop.from).filePath(dropped.fileName) : infoDrop.from;
-        // 落在哪个路径列，另一个路径列清空——一行只描述一个方向。
-        const int targetCol = isPathColumn(startCol) ? startCol : toInt(ComColumn::LocalDir);
-        const int otherCol =
-            targetCol == toInt(ComColumn::LocalDir) ? toInt(ComColumn::RemoteDir) : toInt(ComColumn::LocalDir);
-        setText(curRow, targetCol, pathContent);
-        setText(curRow, otherCol, QString());
+        setText(curRow, toInt(ComColumn::LocalDir), pathContent);
 
         ++curRow;
     }

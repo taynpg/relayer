@@ -41,6 +41,7 @@ void printUsage()
                 "\n"
                 "子命令:\n"
                 "  send <本地文件> --to <对端id>   把文件发给在线的对端\n"
+                "        [--as <相对名>]           对端落点名，可带目录段（如 docs/a.bin）\n"
                 "  recv --to-dir <目录>            等待别人发来文件，落到目录里\n"
                 "  list                            只连上去列出在线对端\n"
                 "\n"
@@ -96,6 +97,12 @@ struct Args
     std::string file;
     std::string to;
     std::string toDir;
+
+    // send 的 --as：对端落点的相对名（可带目录段，如 "docs/a.bin"）。
+    // 空则用本地文件名。安全性由接收方负责（路径校验 + 中间目录建齐，
+    // 见 PROTOCOL.md §9.4 的 root 说明）。
+    std::string asName;
+
     relayer::cli::ClientConfig config;
     bool quiet = false;
 
@@ -301,6 +308,13 @@ ParseResult parseArgs(int argc, char **argv)
                 return r;
             }
         }
+        else if (a == "--as")
+        {
+            if (!takeValue(a, r.args.asName))
+            {
+                return r;
+            }
+        }
         else
         {
             r.error = "未知选项: " + std::string(a);
@@ -386,7 +400,7 @@ int main(int argc, char **argv)
 
     if (a.command == "send")
     {
-        client->sendFile(a.file, {}, a.to);
+        client->sendFile(a.file, a.asName, a.to);
     }
     else if (a.command == "recv")
     {
