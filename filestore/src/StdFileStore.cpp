@@ -1,6 +1,7 @@
 #include "relayer/filestore/StdFileStore.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -169,6 +170,41 @@ FileStat StdFileStore::stat(std::string_view path) const
             out.mtime = std::chrono::system_clock::to_time_t(sysTime);
         }
     }
+
+    // 权限位：POSIX 上按位取，Windows 上给一组合理默认。
+    // 默认值不是随便拍的——打包后解到 Linux 上，0644/0755 是最不会
+    // 出问题的组合（可执行位只给确实需要执行的扩展名）。
+    out.mode = static_cast<std::uint16_t>(out.isDir ? 0755 : 0644);
+#if defined(_WIN32)
+    if (!out.isDir)
+    {
+        // 扩展名判断，大小写不敏感
+        const std::string ext = [&]
+        {
+            const std::size_t dot = std::string_view(path).find_last_of('.');
+            if (dot == std::string_view::npos)
+            {
+                return std::string{};
+            }
+            std::string e(path.substr(dot));
+            for (char &c : e)
+            {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            return e;
+        }();
+        if (ext == ".exe" || ext == ".bat" || ext == ".cmd" || ext == ".dll" || ext == ".com")
+        {
+            out.mode = 0755;
+        }
+    }
+#else
+    if (!ec)
+    {
+        const auto raw = static_cast<unsigned>(target.permissions());
+        out.mode = static_cast<std::uint16_t>(raw & 07777U);
+    }
+#endif
     return out;
 }
 

@@ -17,6 +17,10 @@ add_library(relayer_filestore STATIC
     src/StdStream.cpp
     src/StdFileStore.cpp
     src/MemFileStore.cpp
+    src/XzCodec.cpp
+    src/TarCodec.cpp
+    src/Archive.cpp
+    src/TarXzArchiver.cpp
 )
 
 target_include_directories(relayer_filestore
@@ -24,6 +28,6 @@ target_include_directories(relayer_filestore
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_link_libraries(relayer_filestore PRIVATE relayer_platform)
+target_link_libraries(relayer_filestore PRIVATE relayer_platform liblzma)
 
 relayer_set_warnings(relayer_filestore)

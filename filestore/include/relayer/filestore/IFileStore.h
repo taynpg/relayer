@@ -96,6 +96,13 @@ struct FileStat
     bool readable{};
     bool writable{};
     bool executable{};
+    // POSIX 权限位（低 12 位：rwxrwxrwx + setuid/setgid/sticky）。
+    //
+    // 为什么存原始位而不是三个 bool：打包时要把权限原样写进 tar 头，
+    // 用 readable/writable/executable 反推重建会丢掉 setgid 之类的位
+    // （解出来是 0755 而不是 2755）。Windows 上取不到时填 0644/0755 的
+    // 合理默认：普通文件 0644、目录 0755、.exe/.bat/.cmd/.dll 0755。
+    std::uint16_t mode{};
 };
 
 struct DirEntry

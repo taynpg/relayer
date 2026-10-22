@@ -332,6 +332,9 @@ FileStat MemFileStore::stat(std::string_view path) const
     out.readable = true;
     out.writable = true;
     out.executable = false;
+    // 内存实现不建模权限，给一组固定值——测试里归档往返时
+    // 读侧能看到 0644/0755，与真实实现的 Windows 分支一致。
+    out.mode = static_cast<std::uint16_t>(out.isDir ? 0755 : 0644);
     return out;
 }
 

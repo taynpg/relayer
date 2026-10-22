@@ -222,9 +222,46 @@ public:
 
 #### 3.1.4 归档
 
-`archive/` 下：`ZipArchiver`（miniz）、`TarXzPacker`（liblzma）。从 v1 迁移，但**重写
-路径校验**：v1 曾因 `startsWith` 无分隔符边界被 `../` 绕过，v2 统一要求
-「等于根目录或以 `root/` 开头」，并拒绝绝对路径条目，配 zig-slip 测试。
+**状态：tar.xz 已实现并测；zip 未实现。**
+
+层级（全部在 `filestore/` 内，不单独立 `archive/` 目录——它和文件子系统
+共用 `IFileStore`，分成两个库反而要多一层依赖）：
+
+| 文件 | 职责 |
+| --- | --- |
+| `detail/XzCodec.{h,cpp}` | 包装 liblzma 的流式 LZMA2 编解码 |
+| `detail/TarCodec.{h,cpp}` | ustar 头读写 + PAX/GNU 长名字 |
+| `IArchive.h` | 归档接口 + `sanitizeEntryName` |
+| `TarXzArchiver.{h,cpp}` | tar + xz，接 `IFileStore` |
+
+**路径校验**（v1 的 zip-slip 防线在这里重写）：
+
+- 打包侧：`sanitizeEntryName` 逐段检查。含 `..` / 带盘符（`C:` 和 `C:x`
+  两种形式）/ 清洗后为空 → 拒绝，记进 `skipped`。**前导斜杠不拒绝**，
+  而是收成相对路径——`IArchive.h` 第 3 条的既定语义。
+- 解包侧：每个条目走 `store.resolveWithin(destRoot, name)`，返回空串则跳过
+  （记 `skipped`），不整体失败。防线用**段比较**而非字符串前缀，所以
+  `/data/foo2` 不会被判成在 `/data/foo` 之内。
+- 符号链接条目一律跳过：Windows 上建链接要额外权限，而且链接目标本身
+  也是逃逸点。
+
+**三处刻意的取舍**：
+
+1. **不支持 zip 的随机访问**，`list` 会完整解压一遍。传输场景里列目录是
+   低频操作，而 zip 的中央目录一旦损坏整包报废；tar 能救回前面的条目。
+2. **PAX 和 GNU `'L'` 两种长名字都认**。我们写包用 PAX，但 GNU tar 默认
+   写 `'L'`——只认一种的话，用户拿系统 tar 打的包在我们这里长路径会被
+   静默截断到 100 字节，两个深路径塌成同一个名字互相覆盖。
+3. **流式落盘，不写临时 tar**。先打 tar 再压要把整包数据走两遍盘；
+   而且这种实现在内存文件系统里测试时反而"能用"，到真机上才发现慢。
+
+**与系统 tar 的双向互操作**已手工验证（GNU tar 1.35）：我们打的包能被
+`tar tvJf` / `tar xJf` 完整识别（含 PAX 长路径与中文路径），系统打的包
+我们也能完整列出与解出。
+
+**zip**：miniz 已在 `third_party/miniz`，但传输场景用不上随机访问，
+优先级放在 tar.xz 之后。需要时按同一套 `IArchive` 实现即可，路径校验
+复用 `sanitizeEntryName` 与 `resolveWithin`。
 
 ---
 
@@ -406,7 +443,7 @@ client                                 server
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
 | **A 地基** | 仓库骨架、CMake、vendored 三方库、CI、`.clang-format`、LICENSE、CONTRIBUTING | 空仓库 CI 绿；`cmake && cmake --build` 通过 |
-| **B filestore** | `IFileStore` + `StdFileStore` + `MemFileStore` + archive，测试齐全 | 文件/路径/归档测试全过；含异常与中文路径 |
+| **B filestore** | `IFileStore` + `StdFileStore` + `MemFileStore` + `PathPolicy` + `tar.xz` 归档 | ✅ 已完成：117 用例 / 1718 断言，Release `-Werror` 下 ctest 全绿；与 GNU tar 双向互操作已验证。zip 未做（见 3.1.4） |
 | **C protocol + crypto** | 帧编解码、消息、PBKDF2/HMAC、握手状态机，`PROTOCOL.md` | 半包/粘包/重同步/CRC/重放测试全过 |
 | **D transport + transfer** | asio 连接、传输引擎接入 `IFileStore` | 三进程集成测试覆盖第 3.5.3 表全部场景 |
 | **E app** | 搬 `.ui`、控件逻辑按 3.7.2 重写、bridge 接线 | GUI 可完成一次完整传输；控件逻辑问题清单逐条关闭 |
