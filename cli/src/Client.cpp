@@ -502,8 +502,16 @@ struct Client::Impl
         // 空闲超时接进传输层：让 TransferPeer 自己也会因为"等不到应答"
         // 而失败，而不是只靠外面的看门狗。两层都设不是重复——外层的
         // 看门狗看整体有没有字节进展，能覆盖"连 peer 都没建起来"的阶段。
-        c.answerTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(config.idleTimeout);
         c.finalizeTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(config.idleTimeout);
+
+        // answerTimeout 与 idleTimeout 解耦：它只管"请求帧发出后等
+        // AnswerSend"这一段（见 TransferPeer pump 里 started_ 之前的分支）。
+        // 目标不在线时中继静默丢帧（协议没有投递失败帧，§9 靠超时发现），
+        // 用 60s 的 idleTimeout 意味着"发错 id 要干等一分钟才报错"。
+        // AnswerSend 在对端在线时是毫秒级（收到请求即回），10s 已经很宽裕；
+        // 传输开始后的超时仍由 finalizeTimeout/重传逻辑负责，不受影响。
+        c.answerTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::min(config.idleTimeout, std::chrono::seconds(10)));
         return c;
     }
 
@@ -540,8 +548,6 @@ struct Client::Impl
 
     void startReceiving()
     {
-        auto cfg = peerConfig();
-
         // 接收方用自己的 sessionId 是错的——sessionId 是**发送方**选的，
         // 接收方要接受任意一个。这里传 0 并依赖 TransferPeer 的
         // "接收方以收到的帧里的 sessionId 为准"的语义。
@@ -549,6 +555,7 @@ struct Client::Impl
         // 但当前实现里 onFrame 会按 sessionId 过滤（!= sessionId_ 就丢），
         // 所以接收方的 sessionId 必须与发送方一致。命令行工具没法协商，
         // 于是接收方采用 **0 表示通配**——见下面对 dispatch 的处理。
+        auto cfg = peerConfig();
         peer = core::transfer::TransferPeer::createReceiver(ctx, session, store, pool, targetPath, 0, std::move(cfg),
                                                             [this](const core::transfer::TransferResult &r)
                                                             { onTransferDone(r); });
@@ -584,6 +591,29 @@ struct Client::Impl
 
             if (action == Action::kReceive)
             {
+                if (config.keepReceiving)
+                {
+                    // 常驻接收：**不 finish**。报完成回调后原地重建
+                    // receiver，继续在同一条连接上等下一个请求——服务端
+                    // 分配的 id 因此保持不变（见 ClientConfig::keepReceiving
+                    // 的注释，这是"发送方表格里的对端 id 不过期"的关键）。
+                    // 重建走 post：此刻在 TransferPeer 的完成回调栈上，
+                    // 直接替换 peer 成员是回调栈析构的老坑。
+                    if (config.onFileReceived)
+                    {
+                        config.onFileReceived(r.targetPath);
+                    }
+                    asio::post(ctx,
+                               [this]
+                               {
+                                   if (finished)
+                                   {
+                                       return;
+                                   }
+                                   startReceiving();
+                               });
+                    return;
+                }
                 finish(true, "接收完成：" + r.targetPath);
             }
             else

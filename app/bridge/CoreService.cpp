@@ -82,6 +82,12 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
     cfg.password = fromQt(conn.password);
     cfg.serverAllowNoAuth = conn.noAuth;
 
+    // GUI 的自动接收必须常驻（收完不断开）：每操作一条连接 + 服务端递增
+    // 分配 id，"收完就重挂"会让接收方每收一个文件就换一次 id，发送方
+    // 表格里的对端 id 立刻过期——再发就发进虚空，等满 answerTimeout 才报错。
+    cfg.keepReceiving = true;
+    cfg.onFileReceived = [this](const std::string &targetPath) { emit fileReceived(toQt(targetPath)); };
+
     cfg.onIdAssigned = [this](const std::string &id)
     {
         // io 线程。同一个 id 只发一次：服务端重复通知不该让界面闪两下。
@@ -121,9 +127,13 @@ bool CoreService::runOrAfterReceive(std::function<void()> beginOp)
         [this, act = std::move(beginOp)]() mutable
         {
             queuedWork_ = true;
+            // 被抢占接收的 abort 也会走 onDone（"中止"），但那不是用户
+            // 操作的结束，是内部让位——不发 finished，否则任务链会把它
+            // 误判成"第一项失败"（实测如此），自动接收逻辑也会被搅乱。
+            suppressNextFinished_ = true;
             if (client_)
             {
-                client_->abort();  // 同步走 onDone：emit finished、busy 翻 false
+                client_->abort();  // 同步走 onDone：finishOperation 消费标记
             }
             // act 里会重新占 busy。post 而不是直接调：此刻仍在 abort 的
             // 调用链上，直接建新 Client 替换 client_ 又是回调栈析构的老坑。
@@ -134,7 +144,18 @@ bool CoreService::runOrAfterReceive(std::function<void()> beginOp)
 
 void CoreService::finishOperation(const cli::Outcome &o, bool withPeerList)
 {
-    // io 线程。先发列表（list 的惯例顺序：先数据后结论），再发结论与
+    // io 线程。被抢占接收的"中止"属于内部机制（见 runOrAfterReceive）：
+    // 翻转内部状态但不发信号——busy 会被紧接着的排队动作重新占上，
+    // 中间发 false 再发 true 只会让按钮闪一下、让上层误推进。
+    if (suppressNextFinished_)
+    {
+        suppressNextFinished_ = false;
+        busy_ = false;
+        receivePending_ = false;
+        return;
+    }
+
+    // 先发列表（list 的惯例顺序：先数据后结论），再发结论与
     // busy 翻转——GUI 侧依赖"收到 finished 时 busy 已可用"来解锁按钮。
     if (withPeerList && !o.peerList.empty())
     {

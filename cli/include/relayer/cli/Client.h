@@ -119,6 +119,23 @@ struct ClientConfig
     // 与 onDone 不同，回调之后操作还会继续。
     std::function<void(const std::string &)> onIdAssigned;
 
+    // 常驻接收：接收完成一个文件后**不断开**，原地重建 receiver 继续等
+    // 下一个请求。整个会话期间服务端分配的 id 保持不变。
+    //
+    // 为什么必须有：v2 每操作一条连接、id 由服务端递增分配，GUI 的自动
+    // 接收如果"收完就结束再重挂"，每收一个文件 id 就变一次——发送方
+    // 表格里存的对端 id 立刻过期，再发就发进虚空（服务端对不存在的
+    // 目标静默丢帧，发送方要等满 answerTimeout 才知道失败）。核心场景
+    // "频繁把固定文件发给同一个对端"要求接收方 id 稳定，这是正解。
+    //
+    // 只对 kReceive 有意义。CLI 的 recv 保持默认（false）：一次一收的
+    // 语义是它的契约，e2e 靠它判定进程退出。
+    bool keepReceiving = false;
+
+    // 常驻接收模式下每收完一个文件的回调（kCompleted 时触发）。操作本身
+    // 不结束，onDone 不会来；GUI 靠它把"接收完成：路径"写进日志。
+    std::function<void(const std::string &targetPath)> onFileReceived;
+
     // 传输参数。chunkSize 在命令行可调，主要用于把"小文件测不出多块"
     // 这条路堵上（见 TransferPeer::Config 的注释）。
     std::uint32_t chunkSize = 0;  // 0 = 用协议默认值（4 MiB）

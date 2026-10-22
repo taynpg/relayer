@@ -9,6 +9,7 @@
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QTabWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include "ui/ConnectorControl.h"
@@ -122,6 +123,14 @@ void MainWindow::wireSignals()
     connect(core_, &relayer::app::CoreService::progressChanged, this, &MainWindow::onProgress);
     connect(core_, &relayer::app::CoreService::operationFinished, this, &MainWindow::onOperationFinished);
     connect(core_, &relayer::app::CoreService::assignedIdChanged, this, &MainWindow::onAssignedIdChanged);
+    connect(core_, &relayer::app::CoreService::fileReceived, this,
+            [this](const QString &targetPath)
+            {
+                log_->appendLog(QStringLiteral("[接收完成] %1\n").arg(targetPath));
+                // 常驻接收继续等下一个文件；重置空闲提示，让"等待文件……"
+                // 再出现一次，用户才知道会话还活着。
+                idleProgressLogged_ = false;
+            });
 }
 
 void MainWindow::onProbeRequested(const relayer::app::ConnInfo &conn)
@@ -134,8 +143,10 @@ void MainWindow::onAssignedIdChanged(const QString &id)
     log_->appendLog(QStringLiteral("[身份] 本机 id = %1\n").arg(id));
 
     // 拿到身份即开始自动接收。v1 是常驻连接天然在线；v2 的"在线"由
-    // 自动接收循环维持——这是 GUI 用户能被别人发文件的前提。
+    // 常驻接收会话维持（keepReceiving：收完文件不断开，id 保持稳定）——
+    // 这是 GUI 用户能被别人发文件、且发送方的对端表不过期的前提。
     receiveWanted_ = true;
+    receiveRetries_ = 0;
     startAutoReceive();
 }
 
@@ -216,13 +227,15 @@ void MainWindow::onProgress(quint64 bytesDone, quint64 bytesTotal, double bytesP
 
 void MainWindow::onOperationFinished(bool ok, const QString &summary, const QString &detail)
 {
-    log_->appendLog(QStringLiteral("%1%2\n").arg(
-        summary, (!ok && !detail.isEmpty()) ? QStringLiteral("（%1）").arg(detail) : QString()));
-
+    // wasReceiving：结束的是不是接收会话本身（失败重试只对它计数）。
+    const bool wasReceiving = receiveActive_;
     if (receiveActive_)
     {
         receiveActive_ = false;
     }
+
+    log_->appendLog(QStringLiteral("%1%2\n").arg(
+        summary, (!ok && !detail.isEmpty()) ? QStringLiteral("（%1）").arg(detail) : QString()));
 
     // 任务链的推进在这里接管：一步的结束就是下一步的开始信号。
     if (taskRunning_)
@@ -242,12 +255,33 @@ void MainWindow::onOperationFinished(bool ok, const QString &summary, const QStr
         return;  // 任务进行中不恢复自动接收，通道让给任务
     }
 
-    // 重挂接收要等两件事都落地：busy 翻回 false，且没有"被抢占排队、
-    // 马上要开跑"的操作（hasQueuedWork）——否则接收会跟它抢通道。
-    if (receiveWanted_ && !core_->busy() && !core_->hasQueuedWork())
+    // 常驻接收收完文件**不会** finished；能到这里且接收没挂着，说明会话
+    // 被抢占让位或失败断开——只要用户还想要接收、通道空闲，就重挂。
+    if (!receiveWanted_ || receiveActive_ || core_->busy() || core_->hasQueuedWork())
     {
-        startAutoReceive();
+        return;
     }
+    if (wasReceiving && !ok)
+    {
+        // 接收会话自身失败（中继没了、认证被拒……）：延迟有限重试，
+        // 不限次的话中继一停日志就无限刷。
+        if (++receiveRetries_ <= 3)
+        {
+            log_->appendLog(QStringLiteral("[接收] 3 秒后重试（第 %1/3 次）\n").arg(receiveRetries_));
+            QTimer::singleShot(3000, this, &MainWindow::startAutoReceive);
+        }
+        else
+        {
+            receiveRetries_ = 0;
+            log_->appendLog(QStringLiteral("[接收] 连续失败已停止重试，请检查中继后点「连接」恢复\n"));
+        }
+        return;
+    }
+    if (ok)
+    {
+        receiveRetries_ = 0;
+    }
+    startAutoReceive();
 }
 
 // ---------------------------------------------------------------------------

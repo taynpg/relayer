@@ -66,11 +66,15 @@ private:
     ExplorerControl *explorer_ = nullptr;
     ComparisonControl *comparison_ = nullptr;
 
-    // 自动接收状态。发送操作进行中暂停挂起（CoreService 一次只跑一个
-    // 操作）；receiveWanted_ 表达"用户想要自动接收"，与"此刻在收"分开。
+    // 自动接收状态。receiveActive_ 表达"此刻有常驻接收会话挂着"
+    // （keepReceiving：收完文件不断开）；receiveWanted_ 表达"用户想要
+    // 自动接收"。被抢占/失败后由 onOperationFinished 恢复。
     bool receiveWanted_ = false;
     bool receiveActive_ = false;
     QString receiveDir_;
+
+    // 接收会话失败重试计数（成功连接/成功操作即清零）。
+    int receiveRetries_ = 0;
 
     // 任务队列：配置表"发送到对端"展开后的文件序列（目录行已展开为文件）。
     relayer::app::RelayTaskItems taskQueue_;

@@ -105,6 +105,10 @@ signals:
     // 自己被分配的身份。可能多次发出（见 ClientConfig::onIdAssigned 注释）。
     void assignedIdChanged(const QString &id);
 
+    // 常驻接收收完一个文件。操作本身不结束（busy 不翻转），会话继续
+    // 等下一个文件——id 因此保持稳定，发送方的对端表不会过期。
+    void fileReceived(const QString &targetPath);
+
     // 传输进度。bytesPerSecond 是瞬时速率，可能为 0（尚未有两次采样）。
     void progressChanged(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond);
 
@@ -151,6 +155,10 @@ private:
     // 以及 CoreService 析构（此时 io 线程已 join）。
     std::shared_ptr<cli::Client> client_;
     std::string lastId_;  // 去重：同一个 id 不重复发 assignedIdChanged
+
+    // 只属于 io 线程：被抢占接收的下一个 onDone 不发信号（见
+    // runOrAfterReceive）。
+    bool suppressNextFinished_ = false;
 
     // busy_ / receivePending_ / queuedWork_ 是 atomic：GUI 线程读它们做
     // 闸门判断，io 线程写。receivePending_ 只在 beginReceive 置 true、
