@@ -493,11 +493,31 @@ void TransferPeer::handleRequestSend(const Frame &frame)
     }
 
     std::uint32_t resumeFrom = 0;
-    const auto openSt = receiver_->open(desc, target, resumeFrom);
+    auto openSt = receiver_->open(desc, target, resumeFrom);
+
+    if (openSt.code == ErrorCode::kAlreadyExists && config_.overwriteExisting)
+    {
+        // 覆盖策略（调用方显式开启，见 Config::overwriteExisting）：
+        // 删掉已存在的目标后重开一次。receiver 尚未 open 成功（opened_
+        // 只在 open 全部通过后才置位），重复调用 open 是安全的——它会
+        // 重设 desc/partPath/位图，等价于一次全新的接收。
+        //
+        // 删除失败不静默：文件被另一个程序占用（Windows 共享冲突）是
+        // 常见情况，必须把 kNotWritable 报给发送方，而不是让它对着一个
+        // 删不掉的目标干等超时。
+        if (const auto rm = store_.remove(target); !rm.ok())
+        {
+            sendAnswerSend(AnswerStatus::kNotWritable, 0,
+                           "overwrite requested but target cannot be removed: " + rm.message);
+            finish(TransferOutcome::kFailed, rm, target);
+            return;
+        }
+        openSt = receiver_->open(desc, target, resumeFrom);
+    }
 
     if (openSt.code == ErrorCode::kAlreadyExists)
     {
-        // 目标已存在且长度一致。这不是错误，是"本端已经有了"。
+        // 目标已存在且（调用方未要求）覆盖。这不是错误，是"本端已经有了"。
         sendAnswerSend(AnswerStatus::kTargetExists, 0, "target already exists");
         finish(TransferOutcome::kFailed, openSt, target);
         return;

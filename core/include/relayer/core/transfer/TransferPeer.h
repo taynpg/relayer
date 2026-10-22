@@ -112,6 +112,19 @@ public:
         // 收尾握手的超时。对端算 Merkle 根可能较慢（要整读一遍文件）。
         std::chrono::milliseconds finalizeTimeout{60000};
 
+        // 接收方覆盖策略：目标已存在时先删掉再收（而不是拒绝）。
+        //
+        // 为什么默认关：TransferReceiver::open 拒绝覆盖是刻意的——"要不要
+        // 覆盖用户的文件"是上层策略，本层默认只做不会错的事。但默认拒绝
+        // 在"反复把同一个文件发到对方同一个目录"这个核心场景下会变成
+        // 死局：第二次发送永远失败，除非用户手动清落点目录。
+        //
+        // 所以开关交到调用方手上：CLI 用 --overwrite 显式给，GUI 由界面
+        // 开关决定。打开之后"先删目标"是**调用方授权过的显式动作**，
+        // 与"传输过程中的静默副作用"是两回事；删除失败（文件被占用等）
+        // 照常报 kNotWritable，不会吞错误。
+        bool overwriteExisting = false;
+
         TransferSender::Config sender;
         TransferReceiver::Config receiver;
     };

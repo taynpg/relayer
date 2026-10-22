@@ -600,6 +600,56 @@ TEST_CASE("peer reports an existing target instead of hanging", "[peer][integrat
     h.requireEveryFrameAddressed();
 }
 
+TEST_CASE("peer overwrites an existing target when the policy allows it", "[peer][integration]")
+{
+    test::TempDir srcDir;
+    test::TempDir dstDir;
+    Harness h;
+
+    const auto content = makeContent(8 * kChunk + 123);
+    const auto srcPath = srcDir.utf8() + "/dup.bin";
+    const auto dstPath = dstDir.utf8() + "/dup.out";
+
+    REQUIRE(writeAllStore(h.storeA, srcPath, content));
+    // 目标已存在且内容不同。overwriteExisting 开着：应当删旧收新，
+    // 而不是像上一条用例那样拒绝。"反复把固定文件发到对方同一目录"
+    // 的核心场景靠这条行为活着。
+    REQUIRE(writeAllStore(h.storeB, dstPath, "stale content"));
+
+    auto cfg = peerConfig();
+    cfg.overwriteExisting = true;
+
+    connectPair(h,
+                [&]
+                {
+                    h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 8, cfg,
+                                                              [sink = h.receiverSink](const TransferResult &r)
+                                                              {
+                                                                  ++sink->calls;
+                                                                  sink->result = r;
+                                                              });
+                    h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "dup.bin",
+                                                          "client-1", 8, peerConfig(),
+                                                          [sink = h.senderSink](const TransferResult &r)
+                                                          {
+                                                              ++sink->calls;
+                                                              sink->result = r;
+                                                          });
+                });
+
+    REQUIRE(driveUntil(h, [&] { return h.senderSink->calls > 0 && h.receiverSink->calls > 0; }));
+
+    REQUIRE(h.receiverSink->result.outcome == TransferOutcome::kCompleted);
+    REQUIRE(h.senderSink->result.outcome == TransferOutcome::kCompleted);
+
+    // 旧内容必须被完整替换成新内容——删了但没收到、收到一半改名失败，
+    // 都会在这里露馅。
+    REQUIRE(readAllStore(h.storeB, dstPath) == content);
+    REQUIRE_FALSE(h.storeB.stat(dstPath + ".relaypart").exists);
+
+    h.requireEveryFrameAddressed();
+}
+
 // ===========================================================================
 // 取消
 // ===========================================================================

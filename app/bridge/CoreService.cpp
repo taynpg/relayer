@@ -1,6 +1,7 @@
 #include "CoreService.h"
 
 #include <QMetaObject>
+#include <QSettings>
 #include <utility>
 
 #include <asio/executor_work_guard.hpp>
@@ -87,6 +88,15 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
     // 表格里的对端 id 立刻过期——再发就发进虚空，等满 answerTimeout 才报错。
     cfg.keepReceiving = true;
     cfg.onFileReceived = [this](const std::string &targetPath) { emit fileReceived(toQt(targetPath)); };
+    cfg.onReceiveFailed = [this](const std::string &message) { emit receiveFailed(toQt(message)); };
+
+    // 接收覆盖：GUI 的落点是用户自己选的接收目录，"同一个文件反复发到
+    // 同一个目录"是核心场景——默认拒绝覆盖会让第二次发送起永远失败，
+    // 还会诱发接收端反复重试换 id（两者实测都发生过）。CLI 侧保持默认
+    // 拒绝、由 --overwrite 显式打开；GUI 侧默认打开，用户可在日志菜单
+    // 里关掉（设置持久化，见 LogControl 的菜单项）。
+    const QSettings settings;
+    cfg.overwriteExisting = settings.value("receiver/overwrite", true).toBool();
 
     cfg.onIdAssigned = [this](const std::string &id)
     {

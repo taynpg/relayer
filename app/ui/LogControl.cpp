@@ -54,6 +54,22 @@ void LogControl::initMenu()
                 emit receiveDirChanged(dir);
             });
 
+    // 接收覆盖开关。默认开：反复把同一个文件发到对方同一目录是核心
+    // 场景，拒绝覆盖会让第二次发送起永远失败。关掉则恢复"目标已存在
+    // 就拒绝"的保护行为。与 CoreService::makeConfig 读的是同一个键。
+    QSettings settings;
+    auto *acOverwrite = menu->addAction(QStringLiteral("覆盖已存在的文件"));
+    acOverwrite->setCheckable(true);
+    acOverwrite->setChecked(settings.value("receiver/overwrite", true).toBool());
+    connect(acOverwrite, &QAction::toggled, this,
+            [this](bool checked)
+            {
+                QSettings s;
+                s.setValue("receiver/overwrite", checked);
+                appendLog(checked ? QStringLiteral("[接收] 已开启覆盖：目标已存在时删旧收新\n")
+                                  : QStringLiteral("[接收] 已关闭覆盖：目标已存在时拒绝接收\n"));
+            });
+
     auto *acClear = menu->addAction(QStringLiteral("清空"));
     connect(acClear, &QAction::triggered, this, [this]() { ui_->pedLog->clear(); });
 

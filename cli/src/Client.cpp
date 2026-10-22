@@ -512,6 +512,10 @@ struct Client::Impl
         // 传输开始后的超时仍由 finalizeTimeout/重传逻辑负责，不受影响。
         c.answerTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::min(config.idleTimeout, std::chrono::seconds(10)));
+
+        // 覆盖策略透传。默认 false（拒绝覆盖）是 core 层的设计；CLI 的
+        // --overwrite 与 GUI 的接收开关在这里汇入。
+        c.overwriteExisting = config.overwriteExisting;
         return c;
     }
 
@@ -566,6 +570,24 @@ struct Client::Impl
     std::string peerPathSource;
     std::string peerPathRemoteName;
 
+    // 原地重建 receiver（仅当当前 peer 已经结束）。两个触发点共用：
+    //   - onTransferDone 里的 post：完成/失败后的常规重建；
+    //   - dispatch 里请求帧先到时的同步重建。
+    // 后者先发生时，前者**不能**再建第二个把正等数据的 receiver 顶掉
+    // （顶掉的后果是发送方发块没人收，等满 answerTimeout 才报错）。
+    void rebuildReceiver()
+    {
+        if (finished)
+        {
+            return;
+        }
+        if (peer && !peer->finished())
+        {
+            return;
+        }
+        startReceiving();
+    }
+
     void onTransferDone(const core::transfer::TransferResult &r)
     {
         if (finished)
@@ -603,15 +625,7 @@ struct Client::Impl
                     {
                         config.onFileReceived(r.targetPath);
                     }
-                    asio::post(ctx,
-                               [this]
-                               {
-                                   if (finished)
-                                   {
-                                       return;
-                                   }
-                                   startReceiving();
-                               });
+                    asio::post(ctx, [this] { rebuildReceiver(); });
                     return;
                 }
                 finish(true, "接收完成：" + r.targetPath);
@@ -624,6 +638,18 @@ struct Client::Impl
         }
 
         case core::transfer::TransferOutcome::kPeerCancelled:
+            if (action == Action::kReceive && config.keepReceiving)
+            {
+                // 对端中途取消：连接还活着，同 kFailed 的理由原地重建
+                // （见下面 kFailed 分支的注释），否则一次取消就会让本端
+                // 换 id，发送方下次就找不到我们了。
+                if (config.onReceiveFailed)
+                {
+                    config.onReceiveFailed("对端取消了传输：" + r.status.message);
+                }
+                asio::post(ctx, [this] { rebuildReceiver(); });
+                return;
+            }
             finish(false, "对端取消了传输", r.status);
             return;
 
@@ -640,6 +666,25 @@ struct Client::Impl
 
         case core::transfer::TransferOutcome::kFailed:
         default:
+            if (action == Action::kReceive && config.keepReceiving)
+            {
+                // 常驻接收下的**局部失败**：这一次没收到，但到中继的连接
+                // 还活着（目标已存在、写盘失败、根校验不过、对端中途取消）。
+                // 此时不能 finish——finish 意味着断开重连，服务端会分配
+                // 新 id，发送方表格里的对端 id 立刻过期（实测：一次失败
+                // 重试 id 就从 client-17 漂到 client-23）。正确动作与收完
+                // 一个文件一样：报失败、原地重建 receiver 继续等。
+                //
+                // 连接已死（kPeerGone）和本端主动取消（kLocalCancelled，
+                // GUI 抢占/关窗走的 abort）不在这里——前者重建也没用，
+                // 后者重建会顶掉用户的取消意图，两者都走 finish。
+                if (config.onReceiveFailed)
+                {
+                    config.onReceiveFailed("传输失败：" + r.status.message);
+                }
+                asio::post(ctx, [this] { rebuildReceiver(); });
+                return;
+            }
             finish(false, "传输失败：" + r.status.message, r.status);
             return;
         }
@@ -651,6 +696,18 @@ struct Client::Impl
 
     void dispatch(const Frame &f)
     {
+        // 常驻接收的重建窗口：上一次接收刚结束（成功或失败），post 的
+        // 重建还排在事件队列里，而发送方的下一个请求已经到了。此刻 peer
+        // 是 finished 状态，onFrame 必然不认；把帧丢掉的话发送方要等满
+        // answerTimeout 才知道失败。同步重建 receiver，让下面的 onFrame
+        // 能接住这个请求（rebuildReceiver 有"不顶掉活着的 receiver"的
+        // 防护，两路触发不会打架）。
+        if (action == Action::kReceive && config.keepReceiving && f.type == FrameType::kFileRequestSend &&
+            (!peer || peer->finished()))
+        {
+            rebuildReceiver();
+        }
+
         // 先给 peer。它认不认是它的事（sessionId 不符会返回 false）。
         if (peer && peer->onFrame(f))
         {

@@ -136,6 +136,19 @@ struct ClientConfig
     // 不结束，onDone 不会来；GUI 靠它把"接收完成：路径"写进日志。
     std::function<void(const std::string &targetPath)> onFileReceived;
 
+    // 常驻接收模式下某次接收**失败**的回调。与 onFileReceived 对称：
+    // 失败同样不会结束操作（连接还活着就原地重建 receiver 继续等），
+    // 上层只能靠它把失败写进日志。连接已死（kPeerGone）或本端主动取消
+    // 时走 onDone，不走这里。
+    std::function<void(const std::string &message)> onReceiveFailed;
+
+    // 接收方覆盖策略：目标已存在时删掉旧文件再收。透传给
+    // TransferPeer::Config::overwriteExisting（见那里的注释——默认拒绝
+    // 覆盖是 core 层的刻意设计，打开它等于调用方显式授权"先删目标"）。
+    // "反复把固定文件发给对方同一目录"的场景需要它，否则第二次发送起
+    // 永远失败。
+    bool overwriteExisting = false;
+
     // 传输参数。chunkSize 在命令行可调，主要用于把"小文件测不出多块"
     // 这条路堵上（见 TransferPeer::Config 的注释）。
     std::uint32_t chunkSize = 0;  // 0 = 用协议默认值（4 MiB）

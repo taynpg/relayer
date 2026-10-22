@@ -131,6 +131,15 @@ void MainWindow::wireSignals()
                 // 再出现一次，用户才知道会话还活着。
                 idleProgressLogged_ = false;
             });
+    connect(core_, &relayer::app::CoreService::receiveFailed, this,
+            [this](const QString &message)
+            {
+                // 常驻接收下的单次失败：会话还活着（id 不变），原地继续等。
+                // 这不是操作结束，只记一条日志；操作结束（要重连、换 id）
+                // 走 operationFinished 那条路。
+                log_->appendLog(QStringLiteral("%1（会话保持，继续等待下一个文件）\n").arg(message));
+                idleProgressLogged_ = false;
+            });
 }
 
 void MainWindow::onProbeRequested(const relayer::app::ConnInfo &conn)

@@ -43,6 +43,7 @@ void printUsage()
                 "  send <本地文件> --to <对端id>   把文件发给在线的对端\n"
                 "        [--as <相对名>]           对端落点名，可带目录段（如 docs/a.bin）\n"
                 "  recv --to-dir <目录>            等待别人发来文件，落到目录里\n"
+                "        [--overwrite]            目标已存在时覆盖（默认拒绝，保护已有文件）\n"
                 "  list                            只连上去列出在线对端\n"
                 "\n"
                 "通用选项:\n"
@@ -314,6 +315,12 @@ ParseResult parseArgs(int argc, char **argv)
             {
                 return r;
             }
+        }
+        else if (a == "--overwrite")
+        {
+            // 接收目标已存在时删旧收新。默认拒绝覆盖（保护用户文件），
+            // "反复发同一个文件到同一目录"的场景需要显式打开。
+            r.args.config.overwriteExisting = true;
         }
         else
         {

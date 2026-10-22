@@ -109,6 +109,10 @@ signals:
     // 等下一个文件——id 因此保持稳定，发送方的对端表不会过期。
     void fileReceived(const QString &targetPath);
 
+    // 常驻接收下某一次接收失败（连接还活着，会话原地重建继续等）。
+    // 与 fileReceived 对称：busy 不翻转、id 不变，GUI 只需要记日志。
+    void receiveFailed(const QString &message);
+
     // 传输进度。bytesPerSecond 是瞬时速率，可能为 0（尚未有两次采样）。
     void progressChanged(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond);
 
