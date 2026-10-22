@@ -173,6 +173,11 @@ bool CoreService::runOrAfterReceive(std::function<void()> beginOp)
 
 void CoreService::finishOperation(const cli::Outcome &o, bool withPeerList)
 {
+    // 会话级结论：正在进行的搭车发送到此为止（Client 那边也不会再回调
+    // 它了，见 Client::Impl::finish）。清掉标记，让 onSendFinished 的
+    // 迟到回调被静默丢弃。
+    sendActive_ = false;
+
     // io 线程。被抢占接收的"中止"属于内部机制（见 runOrAfterReceive）：
     // 翻转内部状态但不发信号——busy 会被紧接着的排队动作重新占上，
     // 中间发 false 再发 true 只会让按钮闪一下、让上层误推进。
@@ -206,20 +211,54 @@ void CoreService::finishOperation(const cli::Outcome &o, bool withPeerList)
     emit busyChanged(false);
 }
 
+bool CoreService::canSendOnSession(const ConnInfo &conn) const
+{
+    if (!busy_.load() || !receivePending_.load() || queuedWork_.load() || sendActive_.load())
+    {
+        return false;
+    }
+    const QString key = conn.host + QStringLiteral(":") + QString::number(conn.port) + QStringLiteral(":") +
+                        (conn.noAuth ? QStringLiteral("N") : QStringLiteral("P")) + QStringLiteral(":") + conn.password;
+    return key == activeConnKey_;
+}
+
 bool CoreService::sendFile(const QString &localPath, const QString &remoteName, const QString &toPeerId,
                            const ConnInfo &conn)
 {
+    // 常驻会话活着：直接在**这条连接**上发。不新建连接 → 服务端不会重新
+    // 分配 id；接收也不受影响（两边靠 sessionId 区分各自的帧）。这是
+    // "点一次发送自己的 id 就涨一号"的根治点。
+    if (canSendOnSession(conn))
+    {
+        sendActive_ = true;
+        runOnIo(
+            [this, path = fromQt(localPath), name = fromQt(remoteName), peer = fromQt(toPeerId)]
+            {
+                const bool started = client_ && client_->sendOnSession(path, name, peer, [this](const cli::Outcome &o)
+                                                                       { onSendFinished(o); });
+                if (started)
+                {
+                    return;
+                }
+                // 会话在 GUI 判断与 post 落地之间结束了（比如中继刚断）：
+                // 如实报一次结论，别让调用方等一个永远不来的回调。
+                if (sendActive_.exchange(false))
+                {
+                    emit sendFinished(false, QStringLiteral("当前会话不可用，请重新连接后再发"), QString());
+                }
+            });
+        return true;
+    }
+
+    // 会话不在（还没连过 / 接收已停）：回落到一次性连接。这一次仍会换 id，
+    // 但没有在线会话时别无选择——GUI 连上之后走不到这条路。
     return runOrAfterReceive(
         [this, localPath, remoteName, toPeerId, cfg = makeConfig(conn)]() mutable
         {
-            // 上一个 Client 结束后残留的 timer cancel 需要一轮 run 才落地，
-            // 这里的 post 天然排在它们之后，直接替换是安全的。
-            //
-            // **不要**在 onDone 回调里 reset client_：finish 的调用点
-            // （pump 定时器回调、checkIdle 等）在自己返回后还会访问 Impl
-            // 的成员，那时析构 Client 就是 use-after-free。CLI 的 main
-            // 从不中途释放，所以那条路没暴露过；这里改成"留着到下一次
-            // 操作再替换"，替换点在本 lambda 里，不在任何回调栈上。
+            // 一次性连接的 id 不往界面报：那是用完即弃的身份，显示出去
+            // 就成了"发送一次 id 变一次"。
+            cfg.onIdAssigned = nullptr;
+
             busy_ = true;
             receivePending_ = false;
             queuedWork_ = false;
@@ -227,9 +266,33 @@ bool CoreService::sendFile(const QString &localPath, const QString &remoteName, 
             client_ = std::make_shared<cli::Client>(
                 ctx_, std::move(cfg), [this](const cli::ProgressReport &p)
                 { emit progressChanged(p.bytesDone, p.bytesTotal, p.bytesPerSecond); },
-                [this](const cli::Outcome &o) { finishOperation(o, true); });
+                [this](const cli::Outcome &o) { finishSendOperation(o); });
             client_->sendFile(fromQt(localPath), fromQt(remoteName), fromQt(toPeerId));
         });
+}
+
+void CoreService::finishSendOperation(const cli::Outcome &o)
+{
+    // 一次性连接的发送：这次结论同时也是操作结论（busy 要翻），但只发
+    // sendFinished——operationFinished 的消费方（接收状态机）不该被一次
+    // 发送推动。busy 翻转放在后面，与 operationFinished 的约定一致。
+    lastConnectionLost_.store(o.connectionLost, std::memory_order_release);
+    emit sendFinished(o.ok, toQt(o.summary), toQt(o.status.message));
+    busy_ = false;
+    receivePending_ = false;
+    emit busyChanged(false);
+}
+
+void CoreService::onSendFinished(const cli::Outcome &o)
+{
+    // 会话级结论先到时（finishOperation 已把 sendActive_ 清掉），这里不能
+    // 再发一次：一次发送只能有一个结论。
+    if (!sendActive_.exchange(false))
+    {
+        return;
+    }
+    lastConnectionLost_.store(o.connectionLost, std::memory_order_release);
+    emit sendFinished(o.ok, toQt(o.summary), toQt(o.status.message));
 }
 
 void CoreService::startReceive(const QString &targetDir, const ConnInfo &conn)
@@ -260,6 +323,10 @@ bool CoreService::listPeers(const ConnInfo &conn)
     return runOrAfterReceive(
         [this, cfg = makeConfig(conn)]() mutable
         {
+            // 临时连接的 id 不往界面报（同 sendFile 的道理）：刷新列表
+            // 不该让"本机 id"跳动，界面上那个 id 只属于常驻接收会话。
+            cfg.onIdAssigned = nullptr;
+
             busy_ = true;
             receivePending_ = false;
             queuedWork_ = false;
@@ -313,6 +380,20 @@ void CoreService::cancelCurrent()
     // 单线程契约一致。
     if (!busy_)
     {
+        return;
+    }
+    if (sendActive_)
+    {
+        // 有搭车发送在跑：只取消这一次发送，会话（和本机 id）保持不动。
+        // 结论由 sendFinished 带回，busy 不翻转。
+        runOnIo(
+            [this]
+            {
+                if (client_)
+                {
+                    client_->cancelSend();
+                }
+            });
         return;
     }
     runOnIo(

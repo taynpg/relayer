@@ -233,6 +233,23 @@ public:
     // 补回来。结果经 ClientConfig::onPeerList 回报，操作不结束。
     void refreshPeers();
 
+    // 在**现有常驻接收会话**上直接发一个文件：不新建连接，服务端不会
+    // 重新分配本机 id，接收也照常进行（两者靠 sessionId 区分各自的帧）。
+    //
+    // 返回 false = 当前没有可用的常驻会话（没连上/已结束），调用方应回落
+    // 到 sendFile 的一次性连接。done 在**这一次发送**结束时调用，会话本身
+    // 继续存活（成功、失败、取消都不会结束 Client）。
+    //
+    // 为什么必须这样做：sendFile 每次新建连接，服务端给新连接分配新 id，
+    // GUI 里"点一次发送，自己的 id 就涨一号"，发送方自己也因此从对端表里
+    // 消失。v1 是常驻连接天然没这问题，v2 用这个方法补回来。
+    bool sendOnSession(std::string sourcePath, std::string remoteName, std::string toPeerId,
+                       std::function<void(const Outcome &)> done);
+
+    // 取消正在进行的"会话内发送"（对端的收尾会看到 kLocalCancelled）。
+    // 会话本身不受影响——接收继续等下一个文件。
+    void cancelSend();
+
     // 主动停下。不发 cancel 帧：取消一个正在跑的传输时对端的收尾逻辑
     // 依赖它，但本工具在 Ctrl-C 场景下更应该**硬停**——那才是要测的
     // "发送方突然消失"。正常退出走 finishIdle()。

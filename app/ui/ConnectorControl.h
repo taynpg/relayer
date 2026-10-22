@@ -2,6 +2,7 @@
 
 #include <QDialog>
 #include <QString>
+#include <QStringList>
 
 #include "bridge/CoreService.h"
 
@@ -39,6 +40,13 @@ public:
     QString currentPeerId() const
     {
         return currentPeerId_;
+    }
+
+    // 最近一次在线列表里有没有这个 id。列表为空（还没刷新过）时返回
+    // false——调用方据此区分"确定不在线"与"不知道"，别把后者当错误拦下。
+    bool isPeerOnline(const QString &id) const
+    {
+        return onlineIds_.contains(id);
     }
 
 signals:
@@ -80,4 +88,8 @@ private:
     Ui::ConnectorControl *ui_;
     relayer::app::CoreService *core_;
     QString currentPeerId_;
+
+    // 最近一次 kAnswerClientList 的 id 集合（含自己）。任务入口用它做
+    // "填了对端但它不在线"的提示。
+    QStringList onlineIds_;
 };

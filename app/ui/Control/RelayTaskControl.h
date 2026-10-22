@@ -67,7 +67,11 @@ signals:
     void batchFinished(bool allOk);
 
 private slots:
-    void onOperationFinished(bool ok, const QString &summary, const QString &detail);
+    // 单个文件的发送结论（CoreService::sendFinished）。批次逐行推进靠它。
+    void onSendFinished(bool ok, const QString &summary, const QString &detail);
+    // 会话级结论（CoreService::operationFinished）：中继断开/认证失败等，
+    // 当前项不会再有 sendFinished，批次就此中止。
+    void onSessionEnded(bool ok, const QString &summary, const QString &detail);
     void onProgress(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond);
     void onRetryFailed();
     void onStopClicked();

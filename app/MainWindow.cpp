@@ -137,6 +137,7 @@ void MainWindow::wireSignals()
 
     connect(core_, &relayer::app::CoreService::progressChanged, this, &MainWindow::onProgress);
     connect(core_, &relayer::app::CoreService::operationFinished, this, &MainWindow::onOperationFinished);
+    connect(core_, &relayer::app::CoreService::sendFinished, this, &MainWindow::onSendFinished);
     connect(core_, &relayer::app::CoreService::assignedIdChanged, this, &MainWindow::onAssignedIdChanged);
     connect(core_, &relayer::app::CoreService::fileReceived, this,
             [this](const QString &targetPath)
@@ -219,11 +220,12 @@ void MainWindow::onSendToPeer(const QString &peerId, const QString &peerName)
         return;
     }
 
-    // 挂起的接收让位给发送（CoreService 抢占），发送结束自动重挂——
-    // 否则"等文件"这个永不结束的操作会把发送通道永久堵死。
-    if (core_->busy() && core_->canPreempt())
+    // 常驻会话活着时发送直接搭在那条连接上（不换 id，也不打断接收），
+    // 所以这里不再需要"接收让位"；没有会话时会回落一次性连接。
+    if (core_->sendInFlight())
     {
-        log_->appendLog(QStringLiteral("[接收] 让位于发送，结束后自动恢复\n"));
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有文件正在发送，请等它结束"));
+        return;
     }
     if (!core_->sendFile(file, QString(), peerId, lastConn_))
     {
@@ -268,6 +270,23 @@ void MainWindow::onProgress(quint64 bytesDone, quint64 bytesTotal, double bytesP
         QStringLiteral("  进度 %1  %2 / %3  %4/s\n")
             .arg(pct, humanBytes(bytesDone), humanBytes(bytesTotal),
                  bytesPerSecond > 0 ? humanBytes(static_cast<quint64>(bytesPerSecond)) : QStringLiteral("-")));
+}
+
+void MainWindow::onSendFinished(bool ok, const QString &summary, const QString &detail)
+{
+    // 批次进行中：结论由任务表单按行消费并记日志，这里不重复打。
+    if (!taskControl_->isRunning())
+    {
+        log_->appendLog(QStringLiteral("%1%2\n").arg(
+            summary, (!ok && !detail.isEmpty()) ? QStringLiteral("（%1）").arg(detail) : QString()));
+    }
+
+    // 常驻会话上的发送不会翻 busy（会话还在收）；只有回落的一次性连接
+    // 发送结束后通道才空出来，那时按需重挂自动接收。
+    if (receiveWanted_ && !core_->busy())
+    {
+        startAutoReceive();
+    }
 }
 
 void MainWindow::onOperationFinished(bool ok, const QString &summary, const QString &detail)
@@ -336,6 +355,11 @@ void MainWindow::onTransTaskRun(const relayer::app::RelayTaskItems &items)
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有传输正在进行，请等它结束"));
         return;
     }
+    if (core_->sendInFlight())
+    {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有文件正在发送，请等它结束"));
+        return;
+    }
     if (lastConn_.host.isEmpty())
     {
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请先在连接面板连接中继"));
@@ -345,6 +369,36 @@ void MainWindow::onTransTaskRun(const relayer::app::RelayTaskItems &items)
     // 整批都没填对端、也没设当前通信对象：没有任何收件人，早说比让任务
     // 表刷一排"已跳过"好。只有部分行空的情况交给任务表单按行处理。
     const QString defaultPeer = connector_->currentPeerId();
+
+    // 填了对端的行要校验（"只有填了才验证"）：
+    //   - 与"当前通信对象"不一致 → 直接拦下。这两个值同时存在时代表两种
+    //     意图，用户明确要求拦住而不是猜他要发哪个；
+    //   - 不在最新在线列表里 → 只提示。列表可能是旧的（对端刚上线还没
+    //     刷新），硬拦会误伤，发送本身会在 10 秒应答超时后给出结论。
+    for (int i = 0; i < items.size(); ++i)
+    {
+        const QString &peer = items.at(i).peerId;
+        if (peer.isEmpty())
+        {
+            continue;
+        }
+        if (!defaultPeer.isEmpty() && peer != defaultPeer)
+        {
+            QMessageBox::warning(this, QStringLiteral("提示"),
+                                 QStringLiteral("第 %1 行对端 %2 与当前通信对象 %3 不一致。\n"
+                                                "要发当前通信对象就把该行对端留空；要发别处请先在连接面板"
+                                                "把它设为通信对象。")
+                                     .arg(i + 1)
+                                     .arg(peer, defaultPeer));
+            return;
+        }
+        if (!connector_->isPeerOnline(peer))
+        {
+            log_->appendLog(
+                QStringLiteral("[任务] 对端 %1 不在最新在线列表里，仍会尝试发送（可先点「刷新」）\n").arg(peer));
+        }
+    }
+
     if (defaultPeer.isEmpty())
     {
         bool allEmpty = true;
@@ -365,11 +419,8 @@ void MainWindow::onTransTaskRun(const relayer::app::RelayTaskItems &items)
         }
     }
 
-    if (core_->busy() && core_->canPreempt())
-    {
-        log_->appendLog(QStringLiteral("[接收] 让位于任务，结束后自动恢复\n"));
-    }
-    // 对端列留空的行由任务表单默认发给连接面板右键选定的"当前通信对象"。
+    // 批次直接搭在常驻会话上发（不新建连接 → id 不变，接收也不中断），
+    // 所以不再需要"接收让位"。
     taskControl_->startTasks(items, lastConn_, defaultPeer);
 }
 

@@ -76,6 +76,23 @@ struct Client::Impl
     std::shared_ptr<core::session::Session> session;
     std::shared_ptr<core::transfer::TransferPeer> peer;
 
+    // ---- 常驻会话上的"搭车发送" ----
+    //
+    // 常驻接收会话（keepReceiving）活着时，发送**不新建连接**，而是把第二个
+    // TransferPeer 挂到同一条 session 上。两边的帧靠 sessionId 区分：接收方
+    // 空闲时以 0 通配、只认领 kFileRequestSend；发送方的应答/ACK 帧类型
+    // 不同，不会被接收 peer 误吞（见 TransferPeer::onFrame 的 sessionMismatch
+    // 判定）。服务端只按 to 字段转发，不关心一条连接上跑几个传输。
+    //
+    // 这样做的根因：每新建一条连接，服务端就分配一个新 id —— GUI"点一次
+    // 发送，自己的 id 就涨一号"，对方表里的我们也随之过期。
+    std::shared_ptr<core::transfer::TransferPeer> sendPeer;
+    std::string sendSourcePath;
+    std::string sendRemoteName;
+    std::string sendToPeerId;
+    std::function<void(const Outcome &)> onSendDone;
+    bool sendActive = false;
+
     asio::steady_timer pumpTimer;
     asio::steady_timer watchdog;  // 空闲 / 总时长
     asio::steady_timer progressTimer;
@@ -124,6 +141,12 @@ struct Client::Impl
         pumpTimer.cancel();
         watchdog.cancel();
         progressTimer.cancel();
+
+        // 会话要结束了：正在搭车发送的那一次不再单独回调——上层能收到的
+        // 结论只能有一个，就是本次 onDone（会话级）。sendPeer 随后随
+        // Impl 一起释放。
+        sendActive = false;
+        onSendDone = nullptr;
 
         if (!ok)
         {
@@ -179,6 +202,10 @@ struct Client::Impl
                 if (ec || finished)
                 {
                     return;
+                }
+                if (sendPeer)
+                {
+                    sendPeer->pump();
                 }
                 if (peer)
                 {
@@ -248,9 +275,13 @@ struct Client::Impl
             return;
         }
 
-        if (peer)
+        // 看门狗盯"当前在动的那件事"：有会话内发送时看发送，否则看接收。
+        // 两者同时在跑时只看发送——接收那边的沉默由它自己的收尾/空闲
+        // 判定负责，而批次场景下用户关心的是发送是否卡住。
+        auto *active = (sendActive && sendPeer) ? sendPeer.get() : peer.get();
+        if (active)
         {
-            const auto p = peer->progress();
+            const auto p = active->progress();
             if (p.bytesDone != lastActivityBytes)
             {
                 lastActivityBytes = p.bytesDone;
@@ -275,7 +306,7 @@ struct Client::Impl
             //
             // 真正的兜底是 hardTimeout（如果调用方给了）——那是另一个语义：
             // 不管有没有进展，总共只许花这么久。
-            if (!peer->started())
+            if (!active->started())
             {
                 lastActivity = std::chrono::steady_clock::now();
                 return;
@@ -308,11 +339,12 @@ struct Client::Impl
 
     void reportProgress()
     {
-        if (!onProgress || !peer)
+        auto *active = (sendActive && sendPeer) ? sendPeer.get() : peer.get();
+        if (!onProgress || !active)
         {
             return;
         }
-        const auto p = peer->progress();
+        const auto p = active->progress();
 
         const auto now = std::chrono::steady_clock::now();
         const auto dt = std::chrono::duration<double>(now - lastReportAt).count();
@@ -595,6 +627,130 @@ struct Client::Impl
     std::string peerPathSource;
     std::string peerPathRemoteName;
 
+    // ---------------------------------------------------------------------
+    // 常驻会话上的发送
+    // ---------------------------------------------------------------------
+
+    // 只有"常驻接收会话活着"时才能搭车发送：别的 action 是一次性操作，
+    // 连接生命周期与操作绑定，发完就该结束。
+    bool canSendOnSession() const noexcept
+    {
+        return !finished && authenticated && session && action == Action::kReceive;
+    }
+
+    bool startSendOnSession(std::string source, std::string remoteName, std::string targetPeerId,
+                            std::function<void(const Outcome &)> done)
+    {
+        if (!canSendOnSession() || sendActive)
+        {
+            return false;
+        }
+        sendActive = true;
+        onSendDone = std::move(done);
+        sendSourcePath = std::move(source);
+        sendRemoteName = remoteName.empty() ? fileNameOf(sendSourcePath) : std::move(remoteName);
+        sendToPeerId = std::move(targetPeerId);
+
+        auto cfg = peerConfig();
+        const auto sid =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+
+        auto created = core::transfer::TransferPeer::createSender(
+            ctx, session, store, pool, sendSourcePath, sendRemoteName, sendToPeerId, sid, std::move(cfg),
+            [this](const core::transfer::TransferResult &r) { onSendResult(r); });
+        sendPeer = std::move(created);
+
+        // 源文件打不开时 createSender 会同步回调 onSendResult（sendActive
+        // 已被清、结论已上报），这里的 touch 无害。
+        touch();
+        return true;
+    }
+
+    // 一次"会话内发送"的结论。**不是**整条会话的结论：会话继续活着。
+    void finishSend(bool ok, std::string summary, Status status = Status{}, bool connectionLost = false)
+    {
+        if (!sendActive)
+        {
+            return;
+        }
+        sendActive = false;
+
+        Outcome o;
+        o.ok = ok;
+        o.summary = std::move(summary);
+        o.status = std::move(status);
+        o.connectionLost = connectionLost;
+        if (sendPeer)
+        {
+            const auto s = sendPeer->stats();
+            o.stats.chunksSent = s.chunksSent;
+            o.stats.chunksReceived = s.chunksReceived;
+            o.stats.chunksRetransmitted = s.chunksRetransmitted;
+            o.stats.duplicateChunks = s.duplicateChunks;
+            o.stats.acksSent = s.acksSent;
+            o.stats.acksReceived = s.acksReceived;
+        }
+
+        auto cb = std::move(onSendDone);
+        onSendDone = nullptr;
+        // 不在 TransferPeer 的完成回调栈上释放它（use-after-free 老坑），
+        // 交给下一轮事件循环。
+        asio::post(ctx,
+                   [this]
+                   {
+                       if (!sendActive)
+                       {
+                           sendPeer.reset();
+                       }
+                   });
+        if (cb)
+        {
+            cb(o);
+        }
+    }
+
+    void onSendResult(const core::transfer::TransferResult &r)
+    {
+        switch (r.outcome)
+        {
+        case core::transfer::TransferOutcome::kCompleted:
+            finishSend(true, "发送完成");
+            return;
+
+        case core::transfer::TransferOutcome::kPeerCancelled:
+            finishSend(false, "对端取消了传输", r.status);
+            return;
+
+        case core::transfer::TransferOutcome::kLocalCancelled:
+            finishSend(false, "已取消", r.status);
+            return;
+
+        case core::transfer::TransferOutcome::kPeerGone:
+            // 发送方看到"对端长时间没动静/连接断了"：这条会话还能不能继续
+            // 收文件由 Session 自己判（真正断开时 onClosed 会结束整个 Client），
+            // 这里只把结论上报，让上层决定要不要中止批次。
+            finishSend(false, "对端已断开（传输未完成）", r.status, true);
+            return;
+
+        case core::transfer::TransferOutcome::kFailed:
+        default:
+            finishSend(false, "传输失败：" + r.status.message, r.status);
+            return;
+        }
+    }
+
+    void cancelSendNow()
+    {
+        if (!sendActive || !sendPeer || sendPeer->finished())
+        {
+            return;
+        }
+        // cancel 会同步走 onSendResult → finishSend（kLocalCancelled），
+        // 会话本身不动。
+        sendPeer->cancel("cancelled by user");
+    }
+
     // 原地重建 receiver（仅当当前 peer 已经结束）。两个触发点共用：
     //   - onTransferDone 里的 post：完成/失败后的常规重建；
     //   - dispatch 里请求帧先到时的同步重建。
@@ -733,7 +889,15 @@ struct Client::Impl
             rebuildReceiver();
         }
 
-        // 先给 peer。它认不认是它的事（sessionId 不符会返回 false）。
+        // 发送 peer 先认：它只认自己 sessionId 的应答/ACK 帧，接收 peer
+        // 空闲时虽然 sessionId=0，但只对 kFileRequestSend 认领（见
+        // TransferPeer::onFrame），两者不会互相吞帧。
+        if (sendActive && sendPeer && sendPeer->onFrame(f))
+        {
+            return;
+        }
+
+        // 再给接收 peer。它认不认是它的事（sessionId 不符会返回 false）。
         if (peer && peer->onFrame(f))
         {
             return;
@@ -792,6 +956,10 @@ struct Client::Impl
         pumpTimer.cancel();
         watchdog.cancel();
         progressTimer.cancel();
+        // 同 finish()：会话级结论统一由下面这次 onDone 发出，正在进行的
+        // 搭车发送不再单独回调（避免上层收到两个结论）。
+        sendActive = false;
+        onSendDone = nullptr;
         if (session)
         {
             session->close();
@@ -853,6 +1021,18 @@ void Client::refreshPeers()
     // （CoreService）只会在会话活着时走到这里，多余的错误路径只会诱导
     // 上层做无意义的分支。
     impl_->refreshPeers();
+}
+
+bool Client::sendOnSession(std::string sourcePath, std::string remoteName, std::string toPeerId,
+                           std::function<void(const Outcome &)> done)
+{
+    return impl_->startSendOnSession(std::move(sourcePath), std::move(remoteName), std::move(toPeerId),
+                                     std::move(done));
+}
+
+void Client::cancelSend()
+{
+    impl_->cancelSendNow();
 }
 
 void Client::abort()

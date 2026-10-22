@@ -129,7 +129,8 @@ void RelayTaskControl::buildLayout()
 void RelayTaskControl::attachCoreService(relayer::app::CoreService *core)
 {
     core_ = core;
-    connect(core_, &CoreService::operationFinished, this, &RelayTaskControl::onOperationFinished);
+    connect(core_, &CoreService::sendFinished, this, &RelayTaskControl::onSendFinished);
+    connect(core_, &CoreService::operationFinished, this, &RelayTaskControl::onSessionEnded);
     connect(core_, &CoreService::progressChanged, this, &RelayTaskControl::onProgress);
 }
 
@@ -285,7 +286,7 @@ void RelayTaskControl::startNext()
     }
 }
 
-void RelayTaskControl::onOperationFinished(bool ok, const QString &summary, const QString &detail)
+void RelayTaskControl::onSendFinished(bool ok, const QString &summary, const QString &detail)
 {
     if (!running_ || current_ < 0 || current_ >= rows_.size())
     {
@@ -330,6 +331,31 @@ void RelayTaskControl::onOperationFinished(bool ok, const QString &summary, cons
     startNext();
 }
 
+void RelayTaskControl::onSessionEnded(bool ok, const QString &summary, const QString &detail)
+{
+    // 只有批次进行中才关心：空闲时的会话失败由 MainWindow 处理（重连/换 id）。
+    if (!running_)
+    {
+        return;
+    }
+    Q_UNUSED(ok);
+
+    if (current_ >= 0 && current_ < rows_.size())
+    {
+        setStatus(current_, kFailed);
+    }
+    emit logMessage(QStringLiteral("[任务] 会话已结束（%1%2），批次中止\n")
+                        .arg(summary, detail.isEmpty() ? QString() : QStringLiteral("：") + detail));
+    for (int i = current_ + 1; i < rows_.size(); ++i)
+    {
+        if (rows_[i].status == kWait)
+        {
+            setStatus(i, kSkipped);
+        }
+    }
+    finishBatch(false);
+}
+
 void RelayTaskControl::onProgress(quint64 bytesDone, quint64 bytesTotal, double /*bytesPerSecond*/)
 {
     if (!running_ || current_ < 0 || current_ >= rows_.size())
@@ -350,7 +376,12 @@ void RelayTaskControl::onRetryFailed()
     {
         return;
     }
-    if (core_ && core_->busy())
+    if (core_ && core_->sendInFlight())
+    {
+        emit logMessage(QStringLiteral("[任务] 有文件正在发送，稍后再试\n"));
+        return;
+    }
+    if (core_ && core_->busy() && !core_->canPreempt())
     {
         emit logMessage(QStringLiteral("[任务] 通道被占用，稍后再试\n"));
         return;

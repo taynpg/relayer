@@ -178,6 +178,7 @@ void ConnectorControl::onClearClicked()
     ui_->edCurrentClient->setText(QString());
     ui_->lineEdit->setText(QString());
     currentPeerId_.clear();
+    onlineIds_.clear();
 }
 
 void ConnectorControl::onRefreshClicked()
@@ -204,6 +205,12 @@ void ConnectorControl::onAssignedIdChanged(const QString &id)
 
 void ConnectorControl::onPeerListReceived(const QList<PeerRow> &rows)
 {
+    onlineIds_.clear();
+    for (const auto &r : rows)
+    {
+        onlineIds_.append(r.id);
+    }
+
     QTableWidget *table = ui_->tableClients;
     table->clearContents();
     table->setRowCount(static_cast<int>(rows.size()));

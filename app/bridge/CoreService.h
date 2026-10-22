@@ -95,8 +95,17 @@ public:
 
     // 把本地文件发给对端。remoteName 为空时用本地文件名。
     // 返回 false = 真忙（传输中），本次请求被拒绝；true = 已开始或已排队。
+    //
+    // 常驻会话活着时在**那条连接上**发（不新建连接、不换本机 id、
+    // 不打断接收）；会话不在时回落到一次性连接。
     bool sendFile(const QString &localPath, const QString &remoteName, const QString &toPeerId,
                   const relayer::app::ConnInfo &conn);
+
+    // 有"搭车发送"正在进行（会话内发送）。GUI 用它挡重复点击。
+    bool sendInFlight() const noexcept
+    {
+        return sendActive_;
+    }
 
     // 挂起等待别人发文件，落到 targetDir 目录。
     void startReceive(const QString &targetDir, const relayer::app::ConnInfo &conn);
@@ -134,6 +143,12 @@ signals:
     // technicalDetail 失败时可能非空（Status 的 message）。
     void operationFinished(bool ok, const QString &summary, const QString &technicalDetail);
 
+    // 一次**发送**的结论（每个文件一次）。与 operationFinished 的区别是
+    // 语义层级：operationFinished 表达"会话/操作结束"（busy 翻转、可能要
+    // 重连换 id），sendFinished 只表达"这个文件发完了"，常驻会话照旧
+    // 活着——GUI 的接收状态机绝不能被它推动。
+    void sendFinished(bool ok, const QString &summary, const QString &technicalDetail);
+
     // list 的结果。与 operationFinished 同批到达（先列表后结论）。
     void peerListReceived(const QList<relayer::app::PeerRow> &rows);
 
@@ -161,6 +176,15 @@ private:
 
     // 一次操作的公共收尾（io 线程，onDone 回调里调）。
     void finishOperation(const cli::Outcome &o, bool withPeerList);
+
+    // 会话内发送的结论（io 线程，Client 的 sendOnSession 回调里调）。
+    void onSendFinished(const cli::Outcome &o);
+
+    // 一次性连接上的发送收尾：发 sendFinished 并翻转 busy（io 线程）。
+    void finishSendOperation(const cli::Outcome &o);
+
+    // 常驻会话 + 表单参数一致 + 当前没有发送在跑 → 可以搭车发送。
+    bool canSendOnSession(const relayer::app::ConnInfo &conn) const;
 
     asio::io_context ctx_;
 
@@ -191,6 +215,10 @@ private:
     std::atomic<bool> busy_{false};
     std::atomic<bool> receivePending_{false};
     std::atomic<bool> queuedWork_{false};
+
+    // 有"搭车发送"在常驻会话上进行。GUI 线程读写（挡重复发送）、
+    // io 线程在结论回调里清。
+    std::atomic<bool> sendActive_{false};
 
     // 最近一次结论的连接级失败标记（io 线程写、GUI 线程读，见
     // lastFailureConnectionLost() 的注释）。

@@ -51,6 +51,8 @@ private slots:
     void onSendToPeer(const QString &peerId, const QString &peerName);
     void onProgress(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond);
     void onOperationFinished(bool ok, const QString &summary, const QString &detail);
+    // 单次发送的结论（常驻会话上进行，会话不结束、id 不变）。
+    void onSendFinished(bool ok, const QString &summary, const QString &detail);
     void onAssignedIdChanged(const QString &id);
     void onProbeRequested(const relayer::app::ConnInfo &conn);
     void onTransTaskRun(const relayer::app::RelayTaskItems &items);
