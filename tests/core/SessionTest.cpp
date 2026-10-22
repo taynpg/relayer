@@ -13,6 +13,7 @@
 
 #include "relayer/core/auth/Handshake.h"
 #include "relayer/core/protocol/Frame.h"
+#include "relayer/core/session/PeerTable.h"
 
 using namespace relayer::core::session;
 using namespace relayer::protocol;
@@ -163,13 +164,18 @@ TEST_CASE("handshake succeeds over loopback", "[session][integration]")
     REQUIRE(server->authenticated());
     REQUIRE(client->authenticated());
 
-    // onAuthenticated 只该来一次。来两次会让上层把对端重复登记到 peer 表。
+    // 服务端只通知一次：它的身份在认证那一刻就定了。
     REQUIRE(serverObs->authenticated == 1);
-    REQUIRE(clientObs->authenticated == 1);
-
-    // 服务端用配置里的 id；客户端还不知道自己的 id，此时为空。
     REQUIRE(serverObs->assignedId == "client-1");
-    REQUIRE(clientObs->assignedId.empty());
+
+    // 客户端会通知**两次**：第一次是"连接可用了，但你还不知道自己叫什么"，
+    // 第二次是收到 kAnswerId、身份到位之后。这是刻意的——若只在身份到位
+    // 时通知，一旦服务端不答 kAskId，客户端就永远收不到"可以使用"的信号。
+    REQUIRE(clientObs->authenticated == 2);
+    REQUIRE(clientObs->assignedId == "client-1");
+
+    // 两面看到的 id 必须一致，否则转发会投到不存在的目标上。
+    REQUIRE(client->assignedId() == server->assignedId());
 
     REQUIRE(serverObs->closed == 0);
     REQUIRE(clientObs->closed == 0);
@@ -223,6 +229,160 @@ TEST_CASE("wrong password fails fast with auth error", "[session][integration]")
     REQUIRE(server->handshakeTimeouts() == 0);
 }
 
+TEST_CASE("server allocates a fresh id through the allocator", "[session][integration][id]")
+{
+    // allocator 优先于 initialPeerId：两者都配时用 allocator 的结果。
+    //
+    // 理由：配了 allocator 就意味着"上层知道谁该叫什么"，它看到的是整张
+    // peer 表；initialPeerId 只是一个静态字符串。两者都配时若让静态值赢，
+    // 动态分配就永远不会发生，而"配了不生效"是比"按文档规则生效"更难
+    // 排查的一类问题。
+    //
+    // 注意这里是**在 accept 之前**把 allocator 塞进配置，而不是 accept 之后
+    // 调 setPeerIdAllocator()。这不是测试的省事写法：accept() 内部已经向
+    // 事件循环投递了 onEstablished，而 onEstablished 触发时就会做 id 分配。
+    // 若等 accept 返回再设置，分配早就完成了。
+    asio::io_context ctx;
+
+    asio::ip::tcp::acceptor acc(ctx);
+    acc.open(asio::ip::tcp::v4());
+    acc.set_option(asio::ip::tcp::acceptor::reuse_address(true));
+    acc.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0));
+    acc.listen();
+    const auto port = acc.local_endpoint().port();
+
+    auto serverObs = std::make_shared<Observation>();
+    auto clientObs = std::make_shared<Observation>();
+
+    PeerTable table;
+    std::uint64_t hint = 1;
+    int allocCalls = 0;
+
+    std::shared_ptr<Session> server;
+    acc.async_accept(
+        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
+        {
+            if (ec)
+            {
+                return;
+            }
+            auto cfg = serverConfig();
+            cfg.initialPeerId = "should-be-ignored";
+            cfg.allocatePeerId = [&table, &hint, &allocCalls]
+            {
+                ++allocCalls;
+                auto id = allocateId(table, hint);
+                // 真实服务端分配完立刻登记，否则下一条连接会拿到同一个号。
+                (void)table.add(PeerInfo{id, "127.0.0.1:0"});
+                return id;
+            };
+            server = Session::accept(ctx, std::move(sock), cfg, makeHandler(serverObs));
+        });
+
+    auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
+    pump(ctx, std::chrono::seconds(2));
+
+    REQUIRE(server != nullptr);
+    REQUIRE(server->authenticated());
+    REQUIRE(allocCalls == 1);
+    REQUIRE(server->assignedId() == "client-1");
+    REQUIRE_FALSE(table.contains("should-be-ignored"));
+    REQUIRE(table.contains("client-1"));
+    REQUIRE(client->assignedId() == "client-1");
+}
+
+TEST_CASE("failed allocation falls back and still announces", "[session][integration][id]")
+{
+    // allocator 返回空（比如表满）时退回 initialPeerId 兜底。绝不能
+    // "分配失败就不发 kAnswerId"——那样客户端会一直不知道自己叫什么，
+    // 而它其实已经能正常干活了。
+    asio::io_context ctx;
+
+    asio::ip::tcp::acceptor acc(ctx);
+    acc.open(asio::ip::tcp::v4());
+    acc.set_option(asio::ip::tcp::acceptor::reuse_address(true));
+    acc.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0));
+    acc.listen();
+    const auto port = acc.local_endpoint().port();
+
+    auto serverObs = std::make_shared<Observation>();
+    auto clientObs = std::make_shared<Observation>();
+
+    std::shared_ptr<Session> server;
+    acc.async_accept(
+        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
+        {
+            if (ec)
+            {
+                return;
+            }
+            auto cfg = serverConfig(false, "fallback-id");
+            // 同样是构造前配置：accept 返回时分配可能已经发生过了。
+            cfg.allocatePeerId = [] { return std::string{}; };
+            server = Session::accept(ctx, std::move(sock), cfg, makeHandler(serverObs));
+        });
+
+    auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
+    pump(ctx, std::chrono::seconds(2));
+
+    REQUIRE(server->authenticated());
+    REQUIRE(server->assignedId() == "fallback-id");
+    REQUIRE(client->assignedId() == "fallback-id");
+    REQUIRE(clientObs->authenticated == 2);  // 匿名一次 + 身份到位一次
+}
+
+TEST_CASE("late allocator install is rejected after auth", "[session][integration][id]")
+{
+    // setPeerIdAllocator() 在认证完成之后调用必须返回 false 并且不生效。
+    //
+    // 为什么要有这条：id 一旦 announce 给对端、（可能）已登记进 peer 表，
+    // 再改就得通知所有人——那是"注销后重新注册"，属于上层显式动作，不该
+    // 由一次静默的 setter 做到。返回 false 让调用方能立刻发现自己写错了
+    // 时序，而不是以为设置成功了。
+    asio::io_context ctx;
+
+    asio::ip::tcp::acceptor acc(ctx);
+    acc.open(asio::ip::tcp::v4());
+    acc.set_option(asio::ip::tcp::acceptor::reuse_address(true));
+    acc.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0));
+    acc.listen();
+    const auto port = acc.local_endpoint().port();
+
+    auto serverObs = std::make_shared<Observation>();
+    auto clientObs = std::make_shared<Observation>();
+
+    std::shared_ptr<Session> server;
+    acc.async_accept(
+        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
+        {
+            if (ec)
+            {
+                return;
+            }
+            server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
+        });
+
+    auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
+    pump(ctx, std::chrono::seconds(2));
+    REQUIRE(server->authenticated());
+
+    bool called = false;
+    const bool accepted = server->setPeerIdAllocator(
+        [&called]
+        {
+            called = true;
+            return std::string{"too-late"};
+        });
+    REQUIRE_FALSE(accepted);
+    REQUIRE_FALSE(called);
+    REQUIRE(server->assignedId() == "client-1");
+
+    // 再给事件循环一点时间：即使内核里排着下一轮认证相关的回调，也不该
+    // 突然跑一次 allocator（比如某处误把它当成"认证时调用"）。
+    pump(ctx, std::chrono::milliseconds(200));
+    REQUIRE_FALSE(called);
+}
+
 // ===========================================================================
 // 业务帧
 // ===========================================================================
@@ -264,10 +424,14 @@ TEST_CASE("business frames pass in both directions after auth", "[session][integ
     REQUIRE(serverObs->frames[0].type == FrameType::kAskId);
 
     // 服务端 -> 客户端
-    REQUIRE(server->send(makeFrame(FrameType::kAnswerId, {}, "client-1")).ok());
+    //
+    // 用 kAnswerHome 而不是 kAnswerId：后者是**会话层**自己消费的身份
+    // 协商帧（见 Session::handleInbound），不会转发到上层。用它会把这个
+    // 测试变成"验证 Session 拦截了什么"，而不是"业务帧能过"。
+    REQUIRE(server->send(makeFrame(FrameType::kAnswerHome, {}, "client-1")).ok());
     pump(ctx, std::chrono::milliseconds(500));
     REQUIRE(clientObs->frames.size() == 1);
-    REQUIRE(clientObs->frames[0].type == FrameType::kAnswerId);
+    REQUIRE(clientObs->frames[0].type == FrameType::kAnswerHome);
 }
 
 TEST_CASE("send before auth is refused locally", "[session][integration]")

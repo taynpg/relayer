@@ -4,6 +4,8 @@
 
 #include <asio/post.hpp>
 
+#include "relayer/core/session/PeerTable.h"
+
 namespace relayer::core::session
 {
 
@@ -94,6 +96,7 @@ Session::Session(asio::io_context &ctx, SessionConfig config, SessionHandler han
     , config_(std::move(config))
     , handler_(std::move(handler))
     , handshakeTimer_(ctx)
+    , heartbeatTimer_(ctx)
     , selfId_(config_.serverId)
 {
 }
@@ -137,10 +140,18 @@ std::shared_ptr<Session> Session::accept(asio::io_context &ctx, asio::ip::tcp::s
 
     session->serverAuth_ = std::make_unique<auth::ServerHandshake>(session->config_.server);
 
-    // 对端 id 由配置给（上层可以预分配）。空串表示"认证完再定"，此时
-    // identityToBind 返回空 → 转发会被拒。这是安全的默认值：忘了配 id 的
-    // 部署不会静默变成"可以任意冒充"。
-    session->assignedId_ = session->config_.initialPeerId;
+    // 注意这里**不**预置 assignedId_。
+    //
+    // 之前写过 `session->assignedId_ = config.initialPeerId;`，那是个 bug：
+    // enterAuthenticatedServer() 用"assignedId_ 为空"判断该不该调
+    // allocatePeerId，一旦这里先填了，allocator 就永远不会被调用——而它的
+    // 存在恰恰说明上层想动态分配。现在把"从哪个来源取 id"的优先级集中在
+    // enterAuthenticatedServer() 一处：
+    //
+    //     initialPeerId（显式指定） > allocatePeerId（动态分配） > 空
+    //
+    // 空身份是安全的默认值：identityToBind 返回空 → 转发被拒。忘了配 id
+    // 的部署不会静默变成"可以任意冒充他人"。
 
     session->conn_ = Connection::adopt(ctx, std::move(socket), makeHandler(std::weak_ptr<Session>(session)),
                                        session->config_.connection);
@@ -204,6 +215,10 @@ void Session::notifyEstablished()
         }
         ++framesOut_;
     }
+
+    // 心跳从"连接可用"这一刻才开始。放在 notifyEstablished 的末尾而不是
+    // 开头：上面若握手启动失败会走 finish()，之后不该再排定时器。
+    startHeartbeatTimer();
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +334,34 @@ void Session::handleInbound(const Frame &frame)
         return;
     }
 
+    // 客户端的 id 应答：服务端在认证后主动告诉我们叫什么。
+    //
+    // 在这里拦下来而不是交给上层，是因为 assignedId() 是 Session 自己的
+    // 状态；让上层去调 setAssignedId 就等于把"谁维护这个字段"搞成两处。
+    if (config_.role == Role::kClient && frame.type == FrameType::kAnswerId)
+    {
+        std::uint8_t status = 1;
+        std::string id;
+        std::string err;
+        if (!decodeAnswerId(frame.body, status, id, err))
+        {
+            ++framesRejected_;
+            finish(failStatus(ErrorCode::kProtocol, "malformed answer_id: " + err), true);
+            return;
+        }
+        if (status == 0 && assignedId_ != id)
+        {
+            assignedId_ = id;
+            // 身份变了要再通知一次：上层可能要在 UI 上显示它，或者
+            // 用它做路由。只在真的变化时通知，避免重复回调。
+            if (handler_.onAuthenticated)
+            {
+                handler_.onAuthenticated(assignedId_);
+            }
+        }
+        return;
+    }
+
     if (handler_.onFrame)
     {
         handler_.onFrame(frame);
@@ -340,9 +383,62 @@ void Session::enterAuthenticated()
     // 30 秒的测试里永远不会出现。
     handshakeTimer_.cancel();
 
-    if (config_.role == Role::kServer && assignedId_.empty())
+    if (config_.role == Role::kServer)
+    {
+        enterAuthenticatedServer();
+        return;
+    }
+
+    // 客户端：认证刚通过，此时**还不知道**自己的 id。服务端会在收到
+    // kAskId 之后回 kAnswerId。这里先把相位切好，让业务帧可以流动，
+    // 身份在 handleInbound 里收到应答时补上。
+    //
+    // 顺序很重要：先 anonymous 通知一次（让上层知道"这条连接可用了"），
+    // 而不是等 id 到位再通知。否则"服务端被配置成不回答 kAskId"这种
+    // 情况下，客户端会永远收不到认证通知。
+    if (handler_.onAuthenticated)
+    {
+        handler_.onAuthenticated(assignedId_);
+    }
+}
+
+void Session::enterAuthenticatedServer()
+{
+    // 身份来源的优先级，只在这一处决定
+    // （PROTOCOL.md §11.6）：
+    //
+    //     1. allocatePeerId —— 动态分配，返回非空即采用。
+    //     2. initialPeerId —— allocator 没配、或返回空时的兜底。
+    //     3. 空 —— 安全默认值：identityToBind 返回空，转发一律被拒。
+    //
+    // 为什么 allocator 优先：配了它就意味着"上层知道谁该叫什么"，它看到
+    // 的是整张 peer 表，而 initialPeerId 只是一个静态字符串。两者都配时
+    // 若让静态值赢，动态分配就永远不会发生，而"配了不生效"是比"按文档
+    // 规则生效"更难排查的一类问题。
+    //
+    // 分配发生在这个时点（认证成功之后）而不是更早，是因为分配意味着
+    // "占了 peer 表里的一个号"，而握手失败的连接不该占号。之前放在
+    // constructor 里试过：失败路径要额外补一次"还号"，那条路径一旦
+    // 漏掉就是号段泄漏。现在只有一条入口。
+    if (config_.allocatePeerId)
+    {
+        assignedId_ = config_.allocatePeerId();
+    }
+    if (assignedId_.empty() && !config_.initialPeerId.empty())
     {
         assignedId_ = config_.initialPeerId;
+    }
+
+    // 把 id 告诉对端（PROTOCOL.md §11.6）。
+    //
+    // 这一步失败不该断开：身份没送达时对端只是不知道自己叫什么，
+    // 而"它能做什么"由服务端的绑定决定。让它继续跑，上层可以选择
+    // 在一次往返之后再检查一遍。
+    Frame answer;
+    answer.type = FrameType::kAnswerId;
+    if (encodeAnswerId(assignedId_, answer.body).ok())
+    {
+        (void)deliver(answer);
     }
 
     if (handler_.onAuthenticated)
@@ -376,6 +472,47 @@ void Session::startHandshakeTimer()
 
             ++self->handshakeTimeouts_;
             self->finish(failStatus(ErrorCode::kTimeout, "handshake did not complete in time"), true);
+        });
+}
+
+void Session::startHeartbeatTimer()
+{
+    if (heartbeatTimerStarted_ || finished_)
+    {
+        return;
+    }
+    heartbeatTimerStarted_ = true;
+    scheduleNextHeartbeat();
+}
+
+void Session::scheduleNextHeartbeat()
+{
+    if (finished_)
+    {
+        return;
+    }
+
+    heartbeatTimer_.expires_after(transport::heartbeat::kTickInterval);
+    heartbeatTimer_.async_wait(
+        [weak = weak_from_this()](const asio::error_code &ec)
+        {
+            if (ec)
+            {
+                // operation_aborted：会话已结束，定时器被 cancel。正常退出。
+                return;
+            }
+            auto self = weak.lock();
+            if (!self || self->finished_)
+            {
+                return;
+            }
+
+            self->pollHeartbeatNow();
+
+            // 必须先判 finished_ 再排下一轮：pollHeartbeatNow() 可能已经
+            // 因为超时把会话关掉了。不判的话，已结束的会话会继续留一个
+            // 每秒唤醒的定时器，进程里所有连接都这么泄漏的话空转开销很可观。
+            self->scheduleNextHeartbeat();
         });
 }
 
@@ -541,6 +678,7 @@ void Session::finish(Status status, bool closeTransport)
     finished_ = true;
 
     handshakeTimer_.cancel();
+    heartbeatTimer_.cancel();
 
     if (closeTransport && conn_)
     {

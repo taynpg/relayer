@@ -569,7 +569,7 @@ socket 回调里写就没法把每种组合都测到。
 #### 3.4.6 会话组装（`Session`，已完成）
 
 `core/include/relayer/core/session/Session.h` + `tests/core/SessionTest.cpp`
-（36 用例 / 841 断言）。
+（39 用例 / 858 断言）。
 
 本层**不写新规则**：所有"该不该"的判断都已在前三层做完，这里只按顺序调用
 它们并把结论翻译成动作。这条边界是刻意的——组装层最容易变成"顺手加个 if"
@@ -617,13 +617,37 @@ socket 回调里写就没法把每种组合都测到。
 `from="client-1"` 分别调 send（拒）和 forward（收），防止后人"顺手合并
 两个入口"。
 
-#### 3.4.7 未做
+#### 3.4.7 peer 表、id 分配与心跳定时器（已完成）
 
-- 服务端 peer 表：`id → Session` 的映射，让 `planRoute()` 的
-  `kForward` 真正有地方投递（现在 `Session` 只会发给它直连的那个对端）
-- `kAskId` / `kAnswerId` 的业务实现（id 现在只能从配置注入）
-- 心跳的 asio 定时器接线（`pollHeartbeatNow()` 已有，缺一个每
-  `kTickInterval` 调它的 `steady_timer`）
+**状态：已完成（peer → 会话的编排层除外）**。要点：
+
+- `core/include/relayer/core/session/PeerTable.h`：`id → 在线连接信息` 的
+  表，纯数据、不认识 `Session` 也不认识 asio，所以边界情况（重名、注销
+  顺序、容量上限、列表顺序）全都能用纯数据测——`PeerTableTest.cpp` 24 个
+  用例，不用起端口。
+- 三条刻意的取舍：重名**不顶掉**先到者（顶掉等于允许后来者踢人）；注销
+  **不做静默幂等**（调用方要知道这次是不是真的删了，否则会广播重复的
+  下线通知）；底层用 `std::map` 而不是 `unordered_map`（迭代顺序稳定，
+  客户端列表不会因重哈希乱跳）。
+- `allocateId()` 递增跳号，而不是 `size()+1`：后者在"有客户端下线"之后
+  会发出一个仍在使用的 id。
+- `kAnswerId` / `kAnswerClientList` 载荷编解码，与路由字段统一用 `u8`
+  长度前缀。
+- 服务端在认证成功后**主动**发 `kAnswerId`，不等客户端 `kAskId`。请求-
+  应答会让"客户端能不能干活"多依赖一次往返，而服务端那边其实已经登记
+  完了。
+- id 来源优先级：`allocatePeerId` 回调 > `initialPeerId` 配置 > 空。
+  allocator 优先，因为这时代码里"配了却永不生效"是最难排查的一类问题。
+  `Session::setPeerIdAllocator()` 在认证完成后调用会返回 `false`——id 已经
+  announce 出去了，再改就是"注销后重新注册"，必须由上层显式做。
+- 心跳 `steady_timer` 接线：固定 `kTickInterval` 轮询而不是"按到期时间设
+  一个长定时器"。后者要在每次收到数据时重置，漏掉任何一处就让空闲判定
+  失效；轮询的代价是每秒一次空转，相对 20 秒阈值可忽略。
+
+**已知缺口**：`PeerTable` 还没有和 `Session` 装到一起——`planRoute()` 判定
+`kForward` 之后，"从哪条连接发出去"目前仍由调用方自己持有引用完成。这层
+编排（`RelayServer`）留到 app 层做，因为"一个 id 对应哪条连接"的生命周期
+天然属于进程级，放进 core 只会让 core 反过来依赖"谁在管理这些会话"。
 
 ---
 
@@ -746,15 +770,15 @@ socket 回调里写就没法把每种组合都测到。
 | --- | --- | --- |
 | **A 地基** | 仓库骨架、CMake、vendored 三方库、CI、`.clang-format`、LICENSE、CONTRIBUTING | 空仓库 CI 绿；`cmake && cmake --build` 通过 |
 | **B filestore** | `IFileStore` + `StdFileStore` + `MemFileStore` + `PathPolicy` + `tar.xz` 归档 | ✅ 已完成：117 用例 / 1718 断言，Release `-Werror` 下 ctest 全绿；与 GNU tar 双向互操作已验证。zip 未做（见 3.1.4） |
-| **C protocol + crypto** | 帧编解码、消息、PBKDF2/HMAC、握手状态机，`PROTOCOL.md` | 🚧 部分完成：`common/` 基础层 + crypto 原语（16 用例 / 1111 断言）+ 帧编解码（26 用例 / 443 断言）+ `PROTOCOL.md` 已竣工；**握手状态机与传输状态机转移表未开始** |
+| **C protocol + crypto** | 帧编解码、消息、PBKDF2/HMAC、握手状态机，`PROTOCOL.md` | ✅ 已完成：认证握手（39 用例 / 291 断言）、帧编解码（26 / 443）、传输状态机（60 组合）、心跳策略（14 / 766）、会话策略（23 / 776）、`Session` 组装（39 / 858）、`PeerTable`（24 / 106）；`PROTOCOL.md` 竣工 |
 | **D transport + transfer** | asio 连接、传输引擎接入 `IFileStore` | 三进程集成测试覆盖第 3.5.3 表全部场景 |
 | **E app** | 搬 `.ui`、控件逻辑按 3.7.2 重写、bridge 接线 | GUI 可完成一次完整传输；控件逻辑问题清单逐条关闭 |
 | **F v2 功能** | 认证上线、多任务并行、P2P 直连 | 并行 3 任务互不干扰；直连成功率与回退日志可查 |
 | **G 发布** | 打包、安装包、版本号单一来源、CHANGELOG | 干净机器解压即用 |
 
-当前 CTest 共 5 项：`common`（16 用例 / 1111 断言）、`filestore`（117 / 1718）、
-`core`（26 / 443）、`arch`（架构规则 R1-R6）、`protocol_doc`（文档与代码一致性）。
-合计 159 用例 / 3272 断言。
+当前 CTest 共 6 项：`common`（16 用例 / 1111 断言）、`filestore`（117 / 1718）、
+`core`（200 / 3853）、`arch`（架构规则 R1-R6）、`protocol_doc` 与 `transition_doc`
+（文档与代码一致性）。合计 333 用例 / 6682 断言。
 
 ---
 

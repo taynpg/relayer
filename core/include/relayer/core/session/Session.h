@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include <asio/io_context.hpp>
 #include <asio/steady_timer.hpp>
@@ -71,9 +72,27 @@ struct SessionConfig
     // 客户端留空。
     std::string serverId;
 
-    // 服务端分配给对端的 id。留空表示"认证完成后由上层通过
-    // onAuthenticated 回调注入"——core 不认识 id 怎么生成。
+    // 服务端分配给对端的 id。留空表示"认证完成后由上层的 allocatePeerId
+    // 分配"——core 不认识 id 怎么生成。
+    //
+    // 与 allocatePeerId 的关系：allocator 优先，它返回空串时才用这里的值。
+    // 也就是说本字段是**兜底**，不是"显式指定就绝对赢"。理由见
+    // enterAuthenticatedServer() 里的注释。
     std::string initialPeerId;
+
+    // 认证通过后给对端分配 id 的回调（PROTOCOL.md §11.6）。
+    //
+    // 为什么是回调而不是让 Session 认识 PeerTable：Session 只该知道
+    // "我有个对端、它叫什么"，而"表里谁占了哪个号"是服务端编排层的事。
+    // 直接依赖会让 Session 无法在单条连接的测试里使用（每个测试都得
+    // 先建一张表）。
+    //
+    // 返回空串表示"分配失败"——此时退回 initialPeerId；若它也空，就用
+    // 空身份继续（客户端拿不到 id，服务端侧转发会被拒，但连接还能用）。
+    // 上层可以选择直接断开而不是让它继续。
+    //
+    // 与 initialPeerId 的关系：本回调优先，返回空串时退回那个字段。
+    std::function<std::string()> allocatePeerId;
 
     // 底层连接参数透传
     ConnectionOptions connection;
@@ -139,6 +158,36 @@ public:
     [[nodiscard]] Status forward(Frame frame, std::string_view authenticatedId);
 
     void close();
+
+    // 让服务端在认证完成后为对端分配 id。
+    //
+    // 时序上有个陷阱，必须写清楚：accept() 同步调用 Connection::adopt()，
+    // 而 adopt() 已经向事件循环投递了 onEstablished。也就是说，如果调用方
+    // 在 `Session::accept(...)` **返回之后**才调这个函数、而此前的调用栈
+    // 从未让出过（例如在一次同步 accept 循环里连开多条连接），那么
+    // onEstablished 的回调还排在队列里，本次设置来得及生效；但只要
+    // 调用栈中途让出过一次——比如在 async_accept 回调里先 connect 一条
+    // 对端会话——排队中的回调就可能先跑完，此时认证分配已经用旧的
+    // initialPeerId 完成了。
+    //
+    // 正因为"来得及"完全取决于调度顺序，**正确的用法是在构造前配置**：
+    //
+    //     cfg.allocatePeerId = [this] { return allocateId(table_, hint_); };
+    //     auto s = Session::accept(ctx, std::move(sock), std::move(cfg), h);
+    //
+    // 这个方法只保留给"会话已经建好但我确实想在认证前补一个分配器"的
+    // 场景，且只在 assignedId_ 尚未落定时才接受新值——认证一旦完成，
+    // id 已经announce 出去了，再改就得通知所有人（那是注销后重新注册，
+    // 应当由上层显式做）。设置被忽略时返回 false。
+    [[nodiscard]] bool setPeerIdAllocator(std::function<std::string()> alloc)
+    {
+        if (authenticated_)
+        {
+            return false;
+        }
+        config_.allocatePeerId = std::move(alloc);
+        return true;
+    }
 
     // 握手完成后的身份。未完成时为空。
     [[nodiscard]] const std::string &assignedId() const noexcept
@@ -219,10 +268,27 @@ private:
     // 返回握手状态机自己的 Status（失败意味着这条连接不能再用了）。
     [[nodiscard]] Status stepHandshake(const Frame &in);
 
-    // 认证成功后进入业务相位：初始化心跳基线、取消握手超时、通知上层。
+    // 认证成功后进入业务相位：取消握手超时、通知上层。
     void enterAuthenticated();
 
+    // 服务端侧的后半段：分配（或取用配置的）对端 id、把 id 告诉对端。
+    //
+    // 与 enterAuthenticated 分开是因为客户端没有"分配"这一步——它的
+    // id 是**被告知**的。合成一个函数就得靠 role 分支区分，而那个分支
+    // 会让"客户端误走了分配路径"这种错误变得不易察觉。
+    void enterAuthenticatedServer();
+
     void startHandshakeTimer();
+
+    // 心跳轮询。固定在 kTickInterval 触发一次，检查完再排下一次。
+    //
+    // 用"固定间隔轮询 + 时间戳比较"而不是"按到期时间设一个长定时器"：
+    // 后者要在每次收到数据时重置，频繁 cancel/expires 本身有成本，而且
+    // 漏掉任何一处重置就会让空闲判定失效。轮询的代价是每秒一次空转，
+    // 相对于 20 秒的阈值可以忽略。
+    void startHeartbeatTimer();
+    void scheduleNextHeartbeat();
+
     void finish(Status status, bool closeTransport);
     void sendHeartbeatAnswer();
 
@@ -236,9 +302,11 @@ private:
 
     HeartbeatPolicy heartbeat_;
     asio::steady_timer handshakeTimer_;
+    asio::steady_timer heartbeatTimer_;
 
     bool authenticated_ = false;
     bool finished_ = false;
+    bool heartbeatTimerStarted_ = false;
     std::string assignedId_;
     std::string selfId_;  // 服务端自己的 id，来自配置
 
