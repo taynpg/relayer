@@ -761,3 +761,79 @@ TEST_CASE("peer disconnect surfaces as a closed session", "[session][integration
     // 对端正常关闭（EOF）不是错误
     REQUIRE(obs->closeStatus.ok());
 }
+
+// ===========================================================================
+// onAuthenticated 的调用次数
+// ===========================================================================
+
+TEST_CASE("client onAuthenticated fires twice, once empty then with the real id",
+          "[session][integration][id]")
+{
+    // 这条用例不是在"验证一个特性"，而是把**已知的行为**钉死，因为上层
+    // 很容易在它上面栽跟头。
+    //
+    // Session 在客户端侧会在两处回调 onAuthenticated：
+    //   1. 握手刚过（enterAuthenticated 的客户端分支），此时还不知道
+    //      自己叫什么——id 是空串。服务端的 kAnswerId 还没到。
+    //   2. 收到 kAnswerId 之后，带着真实 id 再回调一次。
+    //
+    // 为什么第一次要回调：上层需要知道"可以发业务帧了"。若等到有 id 才
+    // 通知，那些不关心 id 的动作（问在线列表、开始接收）就得多等一个
+    // 往返，而它们根本不需要等。
+    //
+    // 为什么这条必须被钉住：cli 那边踩过一次——把 onAuthenticated 当成
+    // "只触发一次"的钩子用，在里面建 TransferPeer。结果建了两个，第二个
+    // 换了新的 sessionId 把第一个覆盖掉，第一个发出的请求收到的应答无处
+    // 可去。真实现象是"服务端日志里请求与应答都正常，客户端却报对端没
+    // 应答"，而且只有跨进程才复现（单进程测试里 id 是配死的，不会触发
+    // 第二次回调）。
+    asio::io_context ctx;
+
+    asio::ip::tcp::acceptor acc(ctx);
+    acc.open(asio::ip::tcp::v4());
+    acc.set_option(asio::ip::tcp::acceptor::reuse_address(true));
+    acc.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0));
+    acc.listen();
+    const auto port = acc.local_endpoint().port();
+
+    auto serverObs = std::make_shared<Observation>();
+    auto clientObs = std::make_shared<Observation>();
+
+    // 单独记下客户端每次拿到的 id，而不只是最后一次。
+    std::vector<std::string> clientIds;
+    auto clientHandler = makeHandler(clientObs);
+    clientHandler.onAuthenticated = [clientObs, &clientIds](Session &, std::string id)
+    {
+        ++clientObs->authenticated;
+        clientObs->assignedId = id;
+        clientIds.push_back(std::move(id));
+    };
+
+    std::shared_ptr<Session> server;
+    acc.async_accept(
+        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
+        {
+            if (ec)
+            {
+                return;
+            }
+            server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
+        });
+
+    auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), clientHandler);
+    REQUIRE(pumpUntil(ctx, [&] { return client->authenticated() && !client->assignedId().empty(); },
+                      std::chrono::seconds(3)));
+    // 再跑一小段，把可能存在的多余回调也收进来。
+    pump(ctx, std::chrono::milliseconds(50));
+
+    REQUIRE(clientIds.size() == 2);
+    // 第一次是"认证完了但还没名字"。
+    REQUIRE(clientIds[0].empty());
+    // 第二次才是真实 id。
+    REQUIRE(clientIds[1] == "client-1");
+    REQUIRE(client->assignedId() == "client-1");
+
+    // 服务端只回调一次：它的 id 是自己在认证成功时分配的，不需要再等谁。
+    REQUIRE(serverObs->authenticated == 1);
+    REQUIRE(server->assignedId() == "client-1");
+}

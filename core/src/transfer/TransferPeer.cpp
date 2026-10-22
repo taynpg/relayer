@@ -91,13 +91,13 @@ TransferPeer::createReceiver(asio::io_context &ctx, std::shared_ptr<session::Ses
 
 void TransferPeer::startSending()
 {
-    if (requestSent_ || finished_)
+    if (digestStarted_ || finished_)
     {
         return;
     }
-    // 立刻置位，防止异步摘要还没回来时被重复调用一次（比如上层连着两次
-    // pump）。这不是"可以发块"的信号——那要等对端应答，见 started_。
-    requestSent_ = true;
+    // 防止异步摘要还没回来时被重复调用一次（比如上层连着两次 pump）。
+    // 这不是"请求已经发出"的信号——那要等摘要算完，见 requestSent_。
+    digestStarted_ = true;
 
     // 摘要必须异步算。它要**整读一遍文件**：1GB 在机械盘上是几十秒，
     // 在 strand 上同步做等于把这条连接的心跳、收帧、超时判定全部冻住
@@ -158,6 +158,18 @@ void TransferPeer::onDigestReady(TransferSender::DigestResult digest)
     f.to = toPeerId_;
     f.fuuid = remoteName_;
     f.body = std::move(body);
+
+    // 两个"已发出"的标记必须**同时**在这里置位，不能提前到 startSending。
+    //
+    // 踩过的坑：requestSent_ 原先在 startSending() 里就置了真，而
+    // requestSentAt_ 要到这里才赋值。于是摘要计算的那 100ms 里，pump 看到
+    // "已发出"就去算 now - requestSentAt_，而后者还是 epoch（1970 年），
+    // 差值必然超过 answerTimeout —— 传输在请求帧根本还没发出去的时候
+    // 就被判成"对端没应答"。
+    //
+    // 表现是"明明对端在线，却报对端失联"，而且报错时机与 answerTimeout
+    // 无关（因为它比的是 epoch），非常容易往网络方向查错。
+    requestSent_ = true;
     requestSentAt_ = std::chrono::steady_clock::now();
     sendFrame(std::move(f));
 }
@@ -385,6 +397,39 @@ void TransferPeer::sendCompleteRequest()
 
 void TransferPeer::handleRequestSend(const Frame &frame)
 {
+    // 记下发送方是谁。接收方之后发出的每一帧（应答、ACK、收尾应答）都要
+    // 填 to，否则中继会把它们当成"发给服务端自己"的本地帧吃掉——
+    // 表现形式是发送方一直等应答、接收方以为自己在正常回应，而中间那跳
+    // 静默丢弃。同一进程里两侧直连时不需要 to，所以这个缺失在单机测试里
+    // 看不出来。
+    //
+    // 优先用帧里的 from（中继转发时会做身份绑定，可信）；它为空时退回
+    // 会话身份。
+    //
+    // 为什么 from 会为空：发送方在 sendFrame 里**一律清空 from**（那是有意
+    // 为之，见那里的注释），本意是"让中继绑定成我的认证身份"。所以 from
+    // 只在经过中继之后才有值——两侧直连时它永远为空。
+    //
+    // 而直连恰恰是本仓库自己的测试和单机调试会走的路径，于是这条退路
+    // 不是"以防万一"，是**必须**：漏掉它时，接收方在直连下算不出 to，
+    // 后续每一帧都缺收件人。而单机直连不需要 to 也能跑通，所以症状
+    // 只会在跨中继时以超时的形式出现——正是这个缺陷藏了很久的原因。
+    toPeerId_ = frame.from;
+    if (toPeerId_.empty() && session_)
+    {
+        // 服务端会话上 assignedId() 是"我给对端分配的 id"，也就是发送方
+        // 的身份，正是这里要的。
+        //
+        // 客户端会话上 assignedId() 是**自己**的 id，不能当 to 用——但接收
+        // 方通常不是客户端会话；真到了这一步（接收方跑在客户端会话、
+        // 且对端没填 from），留空比猜错好：留空会让失败落在发送方的超时
+        // 判定上，猜错会把帧投给一个无关的对端。
+        if (session_->role() == session::Role::kServer)
+        {
+            toPeerId_ = session_->assignedId();
+        }
+    }
+
     TransferDesc desc;
     std::string err;
     if (!decodeDesc(frame.body, desc, err))
@@ -653,6 +698,7 @@ void TransferPeer::sendAnswerSend(AnswerStatus status, std::uint32_t resumeFrom,
     Frame f;
     f.type = FrameType::kFileAnswerSend;
     f.sessionId = sessionId_;
+    f.to = toPeerId_;
     f.body = std::move(body);
     sendFrame(std::move(f));
 }
@@ -667,7 +713,23 @@ bool TransferPeer::onFrame(const Frame &frame)
     {
         return false;
     }
-    if (frame.sessionId != sessionId_)
+
+    // 接收方的 sessionId 在收到第一个 kFileRequestSend 之前是**未知**的：
+    // 它由发送方选，而协议里没有任何一帧用来协商（§9.4 的请求帧自带
+    // sessionId，发送方只需自己知道它）。
+    //
+    // 所以接收方以 sessionId_ == 0 表示"通配"：收到第一个请求时把它认下来，
+    // 之后按它过滤。没有这条，两个独立进程就没法对接——接收方只能靠
+    // 外部约定（命令行参数、配置文件）猜出发送方用了什么数字，而那在
+    // 真实使用里根本无处可猜。
+    //
+    // 只在**接收方 + 未定 sessionId** 时放宽，且只对请求帧放宽：发送方
+    // 侧永远是严格比较（它的 sessionId 是自己选的），而不是两条宽松规则。
+    const bool sessionMismatch = frame.sessionId != sessionId_;
+    const bool canAdopt =
+        role_ == Role::kReceiver && sessionId_ == 0 && frame.type == FrameType::kFileRequestSend;
+
+    if (sessionMismatch && !canAdopt)
     {
         return false;
     }
@@ -701,6 +763,14 @@ bool TransferPeer::onFrame(const Frame &frame)
     case FrameType::kFileRequestSend:
         if (role_ == Role::kReceiver)
         {
+            // 认下发送方选的 sessionId。必须在 handleRequestSend 之前：
+            // 它的应答帧（kFileAnswerSend）要带上这个值，而应答是紧接着
+            // 发出去的——晚一步就会回一个 sessionId=0 的应答，发送方按
+            // 自己的号过滤，直接把它丢掉，传输停在"等应答"上。
+            if (sessionId_ == 0)
+            {
+                sessionId_ = frame.sessionId;
+            }
             handleRequestSend(frame);
             return true;
         }
@@ -879,9 +949,26 @@ void TransferPeer::sendFrame(protocol::Frame frame)
     // 于是服务端发出的帧自称 client-1 —— checkOutbound 正确地把这当成
     // "跳过身份绑定"的迹象拒掉了，整条传输在第一个应答帧就死了。
     //
-    // 空 from 的语义是"就是我发的"，接收方按连接身份认人。这是唯一
-    // 在两个角色下都成立的写法，所以放在这个统一出口，调用点不必再想。
+    // 空 from 的语义是"就是我发的"。中继在转发时会把它绑定成这条连接的
+    // 认证身份（Session::forward），所以对端仍然知道是谁发的。
     frame.from.clear();
+
+    // 接收方的帧必须带上 to，否则中继会当成"发给服务端自己"本地吃掉。
+    //
+    // 发送方的 to 由各调用点在构造时填（它一开始就知道对方是谁）；接收方
+    // 不知道——它的 toPeerId_ 是收到请求帧后才学到手的。放在这里统一补，
+    // 而不是在 sendAck / sendAnswerSend / 收尾应答三处各写一遍：
+    //
+    //   漏掉任何一处，症状都是同一个——那一类帧被中继静默丢掉，接收方
+    //   以为回应过了，发送方在原地等。同一进程里两侧直连时不需要 to，
+    //   所以单机测试看不出来；只有跨中继时才会暴露，而且表现为超时。
+    //
+    // 只补空值，不覆盖调用点已经填好的：发送方构造时填的 to 更精确
+    // （比如将来支持"一帧投给多个目标"时），不该被这里改掉。
+    if (frame.to.empty() && !toPeerId_.empty())
+    {
+        frame.to = toPeerId_;
+    }
 
     // 一律用 send()，不用 forward()：本层发出的帧**始终代表本端身份**。
     // forward() 的语义是"替别人转发"，那是服务端编排层（把 client-1 的

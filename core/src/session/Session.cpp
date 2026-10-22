@@ -389,13 +389,17 @@ void Session::enterAuthenticated()
         return;
     }
 
-    // 客户端：认证刚通过，此时**还不知道**自己的 id。服务端会在收到
-    // kAskId 之后回 kAnswerId。这里先把相位切好，让业务帧可以流动，
+    // 客户端：认证刚通过，此时**还不知道**自己的 id。服务端在
+    // enterAuthenticatedServer() 里认证一成功就主动推 kAnswerId
+    // （PROTOCOL.md §11.6），这里只需把相位切好，让业务帧可以流动，
     // 身份在 handleInbound 里收到应答时补上。
     //
-    // 顺序很重要：先 anonymous 通知一次（让上层知道"这条连接可用了"），
+    // 顺序很重要：这里先以空身份通知一次（让上层知道"这条连接可用了"），
     // 而不是等 id 到位再通知。否则"服务端被配置成不回答 kAskId"这种
     // 情况下，客户端会永远收不到认证通知。
+    //
+    // 上层因此可能连着收到两次 onAuthenticated：先空身份、后真实 id。
+    // 回调必须写成幂等的——Cli 那边靠"只在 id 变化时才做后续动作"来保证。
     if (handler_.onAuthenticated)
     {
         handler_.onAuthenticated(*this, assignedId_);

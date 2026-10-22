@@ -134,10 +134,26 @@ private:
 
     // 已 accept 但还没通过认证的会话。
     //
-    // 存 weak_ptr 不存 shared_ptr：这些连接可能永远不认证（口令错、扫描
-    // 端口）。用强引用会让一个不认证的连接被服务端一直保活——最坏情况下
-    // 每 30 秒的握手超时才回收，而扫描器每秒能建几十条。
-    std::vector<std::weak_ptr<session::Session>> pending_;
+    // **必须存强引用**。这一点我们踩过一次：早先存 weak_ptr，理由是"这些
+    // 连接可能永远不认证（口令错、扫描端口），强引用会让服务端保活它们"。
+    // 那个理由是错的，因为反方向的问题更严重——
+    //
+    //   Connection 的 handler 是通过 weak_ptr<Session> 回调 Session 的
+    //   （见 Session.cpp 的 makeHandler）。Session 一旦没有外部强引用，
+    //   它的析构会释放 Connection，于是所有异步回调都静默消失：socket
+    //   被关掉，但**没有任何人收到关闭通知**，客户端看到的只是"连上了，
+    //   然后什么都不发生"，直到自己的握手超时。
+    //
+    // 而 Connection 自己只持有自己（async_read_some 的 self=shared_from_this），
+    // 并不回指 Session——它不知道 Session 存在。所以"保活会话"这件事只能
+    // 由上层的这个容器负责。
+    //
+    // 那么"不认证的连接占资源"怎么办？答案是**握手超时**，不是弱引用：
+    // Session 在 accept 时就起了 handshakeTimeout（默认 30 秒），到点必定
+    // finish 并把连接关掉。扫描器每建一条连接，最多占它 30 秒，之后自动回收。
+    // 真有洪泛攻击的话，需要的是 accept 侧的速率限制，而不是让正常但慢的
+    // 客户端在握手途中莫名消失。
+    std::vector<std::shared_ptr<session::Session>> pending_;
 
     ServerStats stats_;
 };

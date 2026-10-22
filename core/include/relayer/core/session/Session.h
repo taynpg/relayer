@@ -220,6 +220,17 @@ public:
     {
         return authenticated_;
     }
+
+    // 会话是否已经结束（正常关闭、认证失败、超时都算）。
+    //
+    // 暴露它是因为上层需要一个**幂等的**判据来清理自己持有的会话集合：
+    // onClosed 是投递执行的，从"会话结束"到"回调执行"之间，上层手里的
+    // 指针指向的已经是一个死会话。没有这个访问器，上层就只能靠
+    // use_count 猜——而事件循环里的异步操作也在持有它，那个数永远大于 1。
+    [[nodiscard]] bool finished() const noexcept
+    {
+        return finished_;
+    }
     [[nodiscard]] Role role() const noexcept
     {
         return config_.role;

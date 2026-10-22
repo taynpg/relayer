@@ -131,6 +131,30 @@ struct Harness
     std::shared_ptr<Sink> senderSink = std::make_shared<Sink>();
     std::shared_ptr<Sink> receiverSink = std::make_shared<Sink>();
 
+    // 传输层发出的、没带 to 的业务帧。
+    //
+    // 两侧直连时 to 没用，漏填也一切正常——所以这些缺陷只有跨中继才暴露。
+    // 记下来并在用例末尾断言为空：断言成本几乎为零，而它能挡住"又有一类
+    // 帧忘了填收件人"这种回归（历史上出过两次：应答帧和 ACK 帧）。
+    std::vector<FrameType> framesWithoutTo;
+
+    // 用例末尾统一调用。失败时把帧类型打出来——Catch2 默认不展开枚举
+    // 容器，"哪个类型漏了"恰恰是唯一有用的信息。
+    void requireEveryFrameAddressed() const
+    {
+        if (framesWithoutTo.empty())
+        {
+            return;
+        }
+        std::string bad;
+        for (const auto t : framesWithoutTo)
+        {
+            bad += std::to_string(static_cast<unsigned>(t));
+            bad += ' ';
+        }
+        FAIL("有业务帧没填 to，类型: " << bad);
+    }
+
     // 两端的事件循环推进。Session 里每条连接的帧都要经过它。
     bool pumpUntil(const std::function<bool()> &pred, std::chrono::milliseconds timeout = kWait)
     {
@@ -170,9 +194,25 @@ template <typename Fn> void connectPair(Harness &h, Fn &&onReady)
 
     // 两侧的 onFrame 先占位，peer 建好后再改指它们。
     // std::function 可赋值，是这里最简单可靠的二次绑定方式。
-    auto serverHandler = std::make_shared<SessionHandler>();
-    serverHandler->onFrame = [&h](Session &, const Frame &f)
+    // 记录规则见 Harness::framesWithoutTo 的注释。
+    //
+    // 只检查**业务帧**：认证阶段的帧由 Session 层自己填 to（或者说，
+    // 那些帧本来就不该有 to——它们是发给服务端/对端的握手，语义由帧类型
+    // 决定），而 TransferPeer 只负责文件会话帧。把认证帧也算进去，
+    // 这个断言就永远不空，等于没写。
+    auto noteRecipient = [&h](const Frame &f)
     {
+        if (!relayer::protocol::isAuthType(f.type) && f.to.empty())
+        {
+            h.framesWithoutTo.push_back(f.type);
+        }
+    };
+
+    auto serverHandler = std::make_shared<SessionHandler>();
+    serverHandler->onFrame = [&h, noteRecipient](Session &, const Frame &f)
+    {
+        // 这一侧收到的是**发送方**发出的帧（request / chunk / finish）。
+        noteRecipient(f);
         if (h.receiver)
         {
             h.receiver->onFrame(f);
@@ -190,8 +230,12 @@ template <typename Fn> void connectPair(Harness &h, Fn &&onReady)
         });
 
     auto clientHandler = std::make_shared<SessionHandler>();
-    clientHandler->onFrame = [&h](Session &, const Frame &f)
+    clientHandler->onFrame = [&h, noteRecipient](Session &, const Frame &f)
     {
+        // 这一侧收到的是**接收方**发出的帧（answer / ack / 收尾应答）。
+        // 历史上漏填 to 的正是这一类——发送方的 to 在构造时就填了，
+        // 接收方的 to 要靠收到请求后才学到手，最容易忘。
+        noteRecipient(f);
         if (h.sender)
         {
             h.sender->onFrame(f);
@@ -295,6 +339,19 @@ TEST_CASE("peer transfers a file end to end", "[peer][integration]")
     REQUIRE(h.sender->stats().chunksSent >= h.sender->progress().chunksTotal);
     REQUIRE(h.sender->stats().duplicateChunks == 0);
     REQUIRE(h.sender->stats().protocolErrors == 0);
+
+    // 跨中继回归：任何业务帧漏填 to，中继都会把它当成"发给服务端自己"
+    // 本地吃掉，对端收不到、发起方在原地等超时。
+    //
+    // 这条断言在两侧直连的 Harness 里为什么还有效：Harness 虽然不走
+    // planRoute，但两侧的 onFrame 是**各自**收到的帧，检查的就是"发出去
+    // 的帧里有没有 to"。真正需要在意的只有收件人字段在不在，与中间那跳
+    // 走不走得通无关——所以这里能拦住，只是拦不住"to 填错了"。
+    //
+    // 它不是纸面条款：第一次加上时就抓到了真缺陷——接收方在直连下算不出
+    // 发送方是谁（帧的 from 被发送方有意清空，等中继绑定），于是它发出的
+    // 每一帧都缺 to。
+    h.requireEveryFrameAddressed();
 }
 
 TEST_CASE("peer handles an empty file", "[peer][integration]")
@@ -334,6 +391,8 @@ TEST_CASE("peer handles an empty file", "[peer][integration]")
 
     REQUIRE(h.storeB.stat(dstPath).exists);
     REQUIRE(h.storeB.stat(dstPath).size == 0);
+
+    h.requireEveryFrameAddressed();
 }
 
 TEST_CASE("peer handles a single byte file", "[peer][integration]")
@@ -369,6 +428,8 @@ TEST_CASE("peer handles a single byte file", "[peer][integration]")
     REQUIRE(driveUntil(h, [&] { return h.senderSink->calls > 0 && h.receiverSink->calls > 0; }));
     REQUIRE(h.receiverSink->result.outcome == TransferOutcome::kCompleted);
     REQUIRE(readAllStore(h.storeB, dstPath) == "x");
+
+    h.requireEveryFrameAddressed();
 }
 
 // ===========================================================================
@@ -431,6 +492,8 @@ TEST_CASE("peer resumes from a valid partial file", "[peer][integration]")
     REQUIRE(h.receiverSink->result.outcome == TransferOutcome::kCompleted);
     REQUIRE(readAllStore(h.storeB, dstPath) == content);
     REQUIRE(h.sender->stats().chunksSent < h.sender->progress().chunksTotal);
+
+    h.requireEveryFrameAddressed();
 }
 
 TEST_CASE("peer rejects a forged partial file and refetches everything", "[peer][integration]")
@@ -483,6 +546,8 @@ TEST_CASE("peer rejects a forged partial file and refetches everything", "[peer]
         // 但不该留下一个"看起来完成"的目标文件。
         REQUIRE_FALSE(h.storeB.stat(dstPath).exists);
     }
+
+    h.requireEveryFrameAddressed();
 }
 
 // ===========================================================================
@@ -531,6 +596,8 @@ TEST_CASE("peer reports an existing target instead of hanging", "[peer][integrat
 
     // 原文件不能被碰过。
     REQUIRE(readAllStore(h.storeB, dstPath) == "something else entirely");
+
+    h.requireEveryFrameAddressed();
 }
 
 // ===========================================================================
@@ -581,6 +648,8 @@ TEST_CASE("local cancel notifies the peer", "[peer][integration]")
 
     // 取消不该留下一个"看起来完整"的目标文件。
     REQUIRE_FALSE(h.storeB.stat(dstPath).exists);
+
+    h.requireEveryFrameAddressed();
 }
 
 // ===========================================================================
@@ -649,6 +718,8 @@ TEST_CASE("peer ignores frames from another session", "[peer]")
     wrongType.type = FrameType::kChunkRequestAck;
     wrongType.sessionId = 100;
     REQUIRE_FALSE(h.receiver->onFrame(wrongType));
+
+    h.requireEveryFrameAddressed();
 }
 
 TEST_CASE("sender fails instead of waiting forever on a silent peer", "[peer][integration]")
@@ -691,4 +762,6 @@ TEST_CASE("sender fails instead of waiting forever on a silent peer", "[peer][in
     REQUIRE(h.senderSink->result.outcome != TransferOutcome::kCompleted);
     REQUIRE_FALSE(h.senderSink->result.status.ok());
     REQUIRE(h.sender->finished());
+
+    h.requireEveryFrameAddressed();
 }

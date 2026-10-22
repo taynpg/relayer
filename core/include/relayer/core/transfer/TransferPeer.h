@@ -123,6 +123,16 @@ public:
                  std::int64_t sessionId, Config config, std::function<void(const TransferResult &)> onDone);
 
     // 接收方：登记要收的目标路径并等对端发描述。
+    //
+    // sessionId 传 0 表示**通配**：本端接受第一个 kFileRequestSend 带来的
+    // sessionId，之后按它过滤。
+    //
+    // 为什么需要这个：sessionId 由发送方选，而协议里没有任何一帧用于协商
+    // （请求帧自带它，发送方不需要别人告诉）。两个独立进程要对接时，
+    // 接收方**无从知道**对方用了什么数字——传 0 是唯一的可行约定。
+    //
+    // 传非 0 则严格按它过滤，与发送方一侧对称。已有调用点（测试、同进程
+    // 双方）都显式给出同一个号，行为不变。
     [[nodiscard]] static std::shared_ptr<TransferPeer>
     createReceiver(asio::io_context &ctx, std::shared_ptr<session::Session> session, filestore::IFileStore &store,
                    WorkerPool &pool, std::string targetPath, std::int64_t sessionId, Config config,
@@ -149,6 +159,19 @@ public:
     void cancel(std::string_view reason);
 
     [[nodiscard]] TransferProgress progress() const;
+
+    // 传输真正跑起来了（可以收发数据块）。
+    //
+    // 发送方：收到对端的 kFileAnswerSend 之后才为真，在此之前它可能在
+    // **算摘要**——那段时间网络上是完全沉默的，看门狗不该把它当成
+    // "对端失联"。接收方：open 成功之后为真。
+    //
+    // 上层需要这个信号来判断"沉默是不是正常"，见 cli/Client.cpp 的
+    // checkIdle。
+    [[nodiscard]] bool started() const noexcept
+    {
+        return started_;
+    }
 
     [[nodiscard]] std::int64_t sessionId() const noexcept
     {
@@ -248,6 +271,16 @@ private:
     //
     // 接收方：open 成功（或确认可续传）后置位。
     bool started_ = false;
+
+    // 发送方：摘要计算已经启动。
+    //
+    // 与 requestSent_ 严格区分。摘要是异步的（要整读一遍文件），期间
+    // 请求帧**还没发出去**，对端什么都收不到。用一个标记表示"已经安排
+    // 好了、别重复安排"，另一个表示"真的发出去了、可以开始等应答"。
+    //
+    // 合成一个标记的后果我们踩过：pump 里按"已发出"去算等待时长，
+    // 而计时起点还没被赋值（epoch），于是摘要阶段就被判成对端超时。
+    bool digestStarted_ = false;
 
     // 发送方的描述帧已发出（摘要算完、kFileRequestSend 已投递）。
     //

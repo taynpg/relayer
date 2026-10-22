@@ -200,10 +200,10 @@ void Server::registerPeer(session::Session &self, const std::string &id, const s
     auto sp = self.shared_from_this();
     sessions_[id] = sp;
 
-    // 从待定列表里摘掉。
+    // 从待定列表里摘掉。比较的是对象地址而不是 shared_ptr 本身：同一个
+    // 对象只可能有一条控制块，但这里比地址更直白地表达"就是这条会话"。
     pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
-                                  [&](const std::weak_ptr<session::Session> &w)
-                                  { return w.lock().get() == &self; }),
+                                  [&](const std::shared_ptr<session::Session> &p) { return p.get() == &self; }),
                    pending_.end());
 }
 
@@ -215,6 +215,7 @@ void Server::onFrame(session::Session &self, const Frame &frame)
     rc.serverId = config_.serverId;
 
     const auto plan = planRoute(session::Role::kServer, true, rc, self.assignedId(), frame);
+
 
     switch (plan.action)
     {
@@ -282,8 +283,14 @@ void Server::onClosed(std::string id, Status status)
         //
         // 它们还留在 pending_ 里，要在这里清掉——不清的话 pending_ 会随
         // 每次失败的登录尝试长一点，一个扫描端口的脚本就能把它撑大。
+        //
+        // 这里找的是"已经 finish 的会话"。用 use_count 判不出来（本容器
+        // 与事件循环里的异步操作都在持有它），所以改成问会话自己：已经
+        // 结束的留下没有意义。注意 onClosed 是**投递**执行的，此刻调用
+        // 发生在事件循环上，会话状态已稳定，读 finished() 是安全的。
         pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
-                                      [](const std::weak_ptr<session::Session> &w) { return w.expired(); }),
+                                      [](const std::shared_ptr<session::Session> &p)
+                                      { return !p || p->finished(); }),
                        pending_.end());
         return;
     }
