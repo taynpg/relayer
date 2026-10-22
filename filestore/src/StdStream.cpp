@@ -157,6 +157,36 @@ Status StdWriteStream::write(const void *buf, std::size_t len)
     return Status::Ok();
 }
 
+Status StdWriteStream::seek(std::uint64_t offset)
+{
+    // 先 flush 再定位。
+    //
+    // 严格说 fseek 自己会把缓冲区同步到文件（C 标准要求），所以这一步在
+    // 多数平台上不是必需的。但"依赖标准保证的隐含动作"有个代价：错误会被
+    // 吞掉。fseek 的返回值只说"定位失败"，不告诉你"同步失败"——而同步
+    // 失败意味着之前写的字节可能根本没进文件。
+    //
+    // 显式 flush 之后，seek 之前的写入错误会在这里暴露，出错位置与原因对得上。
+    if (const auto st = flush(); !st)
+    {
+        return st;
+    }
+
+    // seekFile 自己接收 u64 并处理平台差异（见文件顶部的实现），这里不必
+    // 再做类型转换——转一道反而会在 32 位平台上引入截断。
+    if (seekFile(fp_, offset) != 0)
+    {
+        return ioFailure(errno, "fseek", path_);
+    }
+    return Status::Ok();
+}
+
+std::uint64_t StdWriteStream::tell() const
+{
+    const std::int64_t pos = tellFile(fp_);
+    return pos < 0 ? 0 : static_cast<std::uint64_t>(pos);
+}
+
 Status StdWriteStream::flush()
 {
     if (std::fflush(fp_) != 0)

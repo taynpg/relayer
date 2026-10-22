@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 #include "relayer/common/crypto/Sha256.h"
 
@@ -185,8 +186,17 @@ private:
 
 }  // namespace
 
-// 写流直接操作 Impl 里的节点，保证多次 openWrite 同一路径时行为一致
-// （真实文件系统上第二个写句柄会覆盖第一个的写入，这里也一样）。
+// 写流直接操作 Impl 里的节点。
+//
+// **为什么直接操作共享节点而不是各自持一份副本**：早期实现是构造时把
+// node.content 拷进 buffer_、commit() 时整份写回。顺序写没问题，但并发
+// 随机写会错得很隐蔽——4 个写流各持一份完整副本，最后 commit 的那个把
+// 别人的写入全部覆盖掉，结果"只留下一块数据、长度却正确"。真实文件系统
+// 上多个 FILE* 各自 fseek+fwrite 是能正确随机写的（由内核协调偏移），
+// 内存实现必须复刻这一点，否则"用 MemFileStore 跑通的并发测试"什么也
+// 证明不了。
+//
+// 代价是浮出了 Impl 的节点结构（本来就在同一个 .cpp 里，外部看不见）。
 class MemWriteStream final : public IWriteStream
 {
 public:
@@ -196,7 +206,14 @@ public:
     {
         auto &node = impl_->nodes[path_];
         node.isDir = false;
-        buffer_ = node.content;  // 追加模式的基础内容
+
+        // buffer_ 是"这次会话看到的文件内容"，必须以节点现有内容为底。
+        // 不复制的话写第一块时 buffer_ 是空的，replace(pos=kChunk,...) 越界。
+        buffer_ = node.content;
+
+        // 初值放在末尾：不 seek 直接连续 write 等价于 append，
+        // 这是既有调用方（TarXzArchiver 等）依赖的行为。
+        pos_ = buffer_.size();
     }
 
     ~MemWriteStream() override
@@ -221,9 +238,52 @@ public:
         {
             return st;
         }
-        const auto *p = static_cast<const char *>(buf);
-        buffer_.append(p, len);
+
+        // 写入缓冲，标记脏区间。**不直接改共享节点**——那会让
+        // setFlushOnClose(false) 的"未 flush 就崩溃"场景失去意义。
+        //
+        // 覆盖式写入，从 pos_ 开始。早先这里是 append()，即"只能追加"：
+        // 那对顺序写没问题，但乱序落盘（收到第 7 块时第 3 块还没到）需要
+        // "定位后覆盖"，追加语义会把第 7 块写到文件尾部——内容对、位置错，
+        // 只有最终哈希能发现。追加语义靠 pos_ 的初值保住（见构造函数）。
+        const auto end = static_cast<std::size_t>(pos_) + len;
+        if (end > buffer_.size())
+        {
+            // 中间可能有空洞（定位到末尾之后写）。空洞补零，与文件系统
+            // 对 lseek 越界后再写的处理一致。
+            buffer_.resize(end, '\0');
+        }
+        buffer_.replace(static_cast<std::size_t>(pos_), len, static_cast<const char *>(buf), len);
+
+        // 记录脏区间，flush 时只把这一段应用到共享节点。
+        //
+        // "只应用脏区间"是并发正确性的关键：整份写回会让后 flush 的流
+        // 覆盖掉别的流的写入，结果"只留下一块数据、长度却正确"。
+        if (dirtyBegin_ < 0)
+        {
+            dirtyBegin_ = static_cast<std::int64_t>(pos_);
+        }
+        dirtyEnd_ = std::max<std::int64_t>(dirtyEnd_, static_cast<std::int64_t>(end));
+
+        pos_ = end;
         return Status::Ok();
+    }
+
+    Status seek(std::uint64_t offset) override
+    {
+        // 与 fseek 一致：允许定位到文件末尾之后，后续写入时补零。
+        // 只挡"size_t 表示不下"的偏移，否则后续 resize 会静默截断。
+        if (offset > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+        {
+            return Status::Fail(ErrorCode::kInvalidPath, "seek offset out of range writing " + path_);
+        }
+        pos_ = offset;
+        return Status::Ok();
+    }
+
+    [[nodiscard]] std::uint64_t tell() const override
+    {
+        return pos_;
     }
 
     Status flush() override
@@ -243,12 +303,24 @@ public:
         {
             return st;
         }
+
         const auto target = static_cast<std::size_t>(size);
         if (const auto st = checkCapacity(target > buffer_.size() ? target - buffer_.size() : 0); !st)
         {
             return st;
         }
+
+        // resize 影响整个文件长度，所以它天然让整个文件变脏。
         buffer_.resize(target, '\0');
+        resizedTo_ = size;
+
+        // 截短之后 pos_ 可能落在末尾之外。夹回末尾：停在越界位置继续写
+        // 会补零，那对调用方来说更难理解。
+        if (pos_ > size)
+        {
+            pos_ = size;
+        }
+
         commit();
         return Status::Ok();
     }
@@ -260,27 +332,73 @@ private:
         {
             return Status::Ok();
         }
+
+        // "别的文件占了多少" + "本文件写完之后多大"。
+        //
+        // 本文件用 max(current, pos_+len) 而不是 current+len：覆盖写不会
+        // 让文件变大，简单相加会在反复重传同一块时误报 kNoSpace。
         const std::uint64_t used = impl_->usedBytesInternal();
-        const std::uint64_t mine = impl_->nodes.count(path_) != 0 ? impl_->nodes.at(path_).content.size() : 0;
-        const std::uint64_t base = used >= mine ? used - mine : 0;
-        if (base + buffer_.size() + len > impl_->capacity)
+        const std::uint64_t current = impl_->nodes.count(path_) != 0 ? impl_->nodes.at(path_).content.size() : 0;
+        const std::uint64_t others = used >= current ? used - current : 0;
+
+        const auto after = std::max<std::uint64_t>(current, pos_ + len);
+        if (others + after > impl_->capacity)
         {
             return Status::Fail(ErrorCode::kNoSpace, "capacity exceeded writing " + path_);
         }
         return Status::Ok();
     }
 
+    // 把缓冲里脏的那一段应用到共享节点。
     void commit()
     {
         auto &node = impl_->nodes[path_];
         node.isDir = false;
-        node.content = buffer_;
         node.mtime = 0;  // 内存实现不模拟时间，固定 0 让断言稳定
+        auto &content = node.content;
+
+        // resize 只影响长度，不该顺手覆盖别的流写的字节。
+        //
+        // 早先这里是"resize 时把整个 buffer_ 写回"，那会让一个只做了
+        // resize 的流把别的流的并发写入全部回退——症状是"文件长度对了
+        // 但内容缺一块"，比长度错误更难查。
+        if (resizedTo_ >= 0)
+        {
+            content.resize(static_cast<std::size_t>(resizedTo_), '\0');
+        }
+
+        if (dirtyBegin_ >= 0)
+        {
+            const auto begin = static_cast<std::size_t>(dirtyBegin_);
+            const auto end = static_cast<std::size_t>(dirtyEnd_);
+            if (end > content.size())
+            {
+                content.resize(end, '\0');
+            }
+            // 只覆盖 [begin, end) 这一段，别的流的写入原样保留。
+            content.replace(begin, end - begin, buffer_.data() + begin, end - begin);
+        }
+
+        dirtyBegin_ = -1;
+        dirtyEnd_ = -1;
+        resizedTo_ = -1;
     }
 
     MemFileStore::Impl *impl_;
     std::string path_;
+
+    // 完整内容镜像。写入进这里，flush 时把脏区间应用到共享节点。
     std::string buffer_;
+
+    // 下一次 write 的落点。初值是 buffer_.size()（追加语义）。
+    std::uint64_t pos_ = 0;
+
+    // 脏区间 [dirtyBegin_, dirtyEnd_)，-1 表示没有未提交的写入。
+    std::int64_t dirtyBegin_ = -1;
+    std::int64_t dirtyEnd_ = -1;
+
+    // resize 的目标长度，-1 表示没 resize 过。resize 会让整个文件变脏。
+    std::int64_t resizedTo_ = -1;
 };
 
 // ---------------------------------------------------------------------------

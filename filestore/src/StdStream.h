@@ -45,6 +45,8 @@ public:
     StdWriteStream &operator=(const StdWriteStream &) = delete;
 
     Status write(const void *buf, std::size_t len) override;
+    Status seek(std::uint64_t offset) override;
+    [[nodiscard]] std::uint64_t tell() const override;
     Status flush() override;
     Status sync() override;
     Status resize(std::uint64_t size) override;

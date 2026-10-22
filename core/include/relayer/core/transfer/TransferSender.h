@@ -11,6 +11,7 @@
 #include "relayer/common/Status.h"
 #include "relayer/core/transfer/SendWindow.h"
 #include "relayer/core/transfer/TransferPayload.h"
+#include "relayer/core/transfer/TransferPipeline.h"
 #include "relayer/core/transfer/WorkerPool.h"
 #include "relayer/filestore/IFileStore.h"
 
@@ -47,20 +48,8 @@ struct ReadChunk
     std::vector<char> data;
 };
 
-// 读盘完成后的投递函数。
-//
-// 签名是 `void(std::function<void()>)`：接一个回调，负责把它送到正确的
-// 执行上下文（通常是某个 strand）上。调用方一般这样给：
-//
-//   [&conn](std::function<void()> fn) { asio::post(conn.strand(), std::move(fn)); }
-//
-// 之所以做成回调参数而不是让本类持有 executor：
-//
-//   - 本类不必依赖 asio，单测不需要起 io_context；
-//   - "回到哪个 strand"只有调用方知道，本类猜不出来；
-//   - 忘绑 executor 的后果（回调并发跑，所有"不必加锁"的假设失效）只在
-//     多线程跑 io_context 时才暴露，把绑定变成显式参数能让人看见它。
-using PostFn = std::function<void(std::function<void()>)>;
+// PostFn（投递函数）定义在 TransferPipeline.h——它与接收侧共用，
+// 不该由本文件拥有，否则 TransferReceiver 要用它就得引入整个发送侧。
 
 class TransferSender
 {

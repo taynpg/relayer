@@ -104,6 +104,20 @@ public:
     // ——传输引擎依赖这一点来判断是否需要重传。
     virtual Status write(const void *buf, std::size_t len) = 0;
 
+    // 绝对定位到 offset（从文件头算），后续 write 从这里开始。
+    //
+    // 看起来"顺序写为什么需要定位"，理由是**乱序落盘**：接收方收到的块
+    // 顺序由网络决定，第 7 块可能比第 3 块先到。共用一条流的当前偏移会
+    // 让并发写任务互相踩乱——写进去的是别人的数据、长度却完全正确，
+    // 只有最终哈希能发现。
+    //
+    // 语义与 fseek(fp, offset, SEEK_SET) 一致：可以定位到文件末尾之后，
+    // 中间的空洞由文件系统补零。接收方不依赖这一点（它按块顺序覆盖），
+    // 但实现不必刻意禁止。
+    virtual Status seek(std::uint64_t offset) = 0;
+
+    [[nodiscard]] virtual std::uint64_t tell() const = 0;
+
     // 把用户态缓冲交给操作系统。不保证落盘。
     virtual Status flush() = 0;
 
