@@ -24,8 +24,10 @@
 
 ## 结构说明
 
-- **asio**：头文件扁平放在 `asio/` 下（`#include <asio.hpp>` 可用），
-  属于上游 `asio/include/asio/` 的内容被上提了一层，与 v1 的布局一致。
+- **asio**：上游 `asio/include/asio/` 的内容被上提了一层，直接放在 `asio/` 下
+  （与 v1 的布局一致）。因此 include 根目录是 `third_party/` 本身，
+  代码里写 `#include <asio/io_context.hpp>`。
+  **没有** `asio.hpp` 这个总头文件——上游本来也没有，不要写成 `<asio.hpp>`。
 - **xz**：仅保留 `src/liblzma` 与顶层 CMake 脚本，构建选项在
   `cmake/Dependencies.cmake` 里统一关闭命令行工具、文档、NLS、测试。
 - **miniz**：单文件 C 实现（`miniz.c` / `miniz.h`）。

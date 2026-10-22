@@ -31,11 +31,19 @@ add_executable(core_test
     core/FrameTest.cpp
     core/AuthTest.cpp
     core/StateMachineTest.cpp
+    core/FrameReaderTest.cpp
+    core/ConnectionTest.cpp
 )
-target_link_libraries(core_test PRIVATE relayer_core Catch2::Catch2WithMain)
+# relayer_asio 是 relayer_core 的 PRIVATE 依赖（本模块内部用），所以测试
+# 需要自己显式链接——ConnectionTest 直接 include <asio/...> 并用 io_context。
+# relayer_platform 提供 ws2_32 / mswsock 等 socket 库。
+target_link_libraries(core_test PRIVATE relayer_core relayer_asio relayer_platform Catch2::Catch2WithMain)
 target_include_directories(core_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 relayer_set_warnings(core_test)
 add_test(NAME core COMMAND core_test)
+
+# 集成测试（需要真实 socket、耗时较长）单独登记，可以用 -L integration 选跑。
+set_tests_properties(core PROPERTIES LABELS "unit")
 
 # 文档与代码的一致性检查。
 #

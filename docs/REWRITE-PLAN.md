@@ -468,6 +468,62 @@ nonce 重放被拒、两个 proof 恒不相等、乱序帧被拒、失败终态�
 - 关闭流程显式：`shutdown(fd) → 等待在读回调返回 → 释放`，杜绝 v1 里的"对象析构时还在收帧"。
 - 心跳与超时统一由 `transport` 层提供，不散落在业务层。
 
+**状态：部分完成**（帧切分 + 连接；心跳与超时未做）。
+
+#### 3.4.1 帧切分（`FrameReader`，已完成）
+
+把"字节流 → 帧"从 socket 里剥出来，零 I/O、可纯字节测试（`tests/core/FrameReaderTest.cpp`，
+18 用例 / 678 断言）。要处理的情况：半包、粘包、垃圾重同步、超长帧。
+
+关键实现细节（写的时候踩到过，值得记）：
+
+- **`next()` 必须内循环**。`unpackFrame` 丢掉前导垃圾时返回 `kNeedMoreData`
+  且 `consumed` 非零——此时帧就在后面，只是还没被解析。若 `next()` 直接返回
+  false，调用方会以为"还差字节"，而对端可能已经发完了最后一帧，那一帧就
+  永远卡在缓冲里。循环终止条件是 `consumed == 0`。
+- 缓冲用 `std::deque<char>`：粘包场景要从头部消费，`vector::erase(begin())`
+  是 O(n) 搬移，会退化成二次复杂度。
+- 每次解帧前拷到连续内存：`unpackFrame` 只接受 `(const char*, len)`，为它改
+  成迭代器接口会让一个很简单的函数变复杂，不值得。
+- 缓冲有硬上限 `kMaxBufferedBytes`（2× 最大帧）。恶意对端可以永远不发完整帧
+  来撑爆内存，超限即判协议错误。
+
+#### 3.4.2 连接（`Connection`，已完成）
+
+`tests/core/ConnectionTest.cpp`，13 用例 / 152 断言，跑真实回环 socket。
+
+- `io_context` 由调用方注入，本层无全局状态。
+- 每连接一个 `asio::strand`，回调串行化——不用自己加锁，因为锁的粒度几乎必然错。
+- **关闭流程**：`close()` 只 shutdown + close + 清队列，不等回调返回（在 strand
+  上等待 strand 会死锁）。`onClosed` 通过 `asio::post` 投递，且先把
+  `std::function` 拷出来再投——上层很可能在回调里丢掉最后一个
+  `shared_ptr<Connection>`，若 lambda 还捕着 `this` 就是 use-after-free。
+- **`onClosed` 只通知一次**：对端 RST 时读和写会各自报错，两条路径都会走到
+  `doClose`，没有幂等保护就会通知两次，上层释放两次。
+- **发送按帧排队**，一次 `async_write` 只发队首一帧。并发 `async_write` 会让
+  字节流交错，对端看到畸形帧——这是 TCP 上最容易犯的错之一。
+- 发送队列有上限，对端不读时断开而不是无限增长。
+- `connect()` 返回 `shared_ptr`，且允许在 `kConnecting` 阶段 `send()` 入队：
+  握手第一帧不该等"连上了"再发。
+
+#### 3.4.3 依赖修正
+
+`relayer_asio` 的 include 路径由 `third_party/asio` 改为 `third_party`，并标记
+`SYSTEM`：
+
+- vendored asio 的头文件用 `#include "asio/detail/config.hpp"` 互引，必须让
+  `<asio/...>` 能解析，所以 include 根目录要比 asio 目录高一层。原配置下
+  `<asio.hpp>` 和 `<asio/io_context.hpp>` 都编译不过。
+- asio 是 header-only，实现会在我们的编译单元里展开；上游代码不满足本项目的
+  `-Werror -Wsign-conversion -Wold-style-cast`，不加 `SYSTEM` 会有几十个来自
+  三方代码的报错。`SYSTEM` 只抑制警告，不改语义。
+
+#### 3.4.4 未做
+
+- 心跳与超时（`kAskHeart` / `kAnswerHeart` 的定时器）
+- 连接建立后的认证接线（`ServerHandshake` / `ClientHandshake` 挂到
+  `onFrame` 上）——属于 3.4.5 的"服务端会话"，随转发路径一起做
+
 ---
 
 ### 3.5 core/transfer：传输引擎

@@ -19,6 +19,8 @@ add_library(relayer_core STATIC
     src/auth/HandshakeServer.cpp
     src/auth/Random.cpp
     src/transfer/StateMachine.cpp
+    src/transport/FrameReader.cpp
+    src/transport/Connection.cpp
 )
 
 target_include_directories(relayer_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -28,6 +30,13 @@ target_include_directories(relayer_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 #
 # relayer_platform 是 PRIVATE 但必须显式列出：Random.cpp 用到 BCryptGenRandom
 # （Windows）和 getrandom（Linux），这些系统库通过它链接。
-target_link_libraries(relayer_core PUBLIC relayer_filestore PRIVATE relayer_platform)
+#
+# relayer_asio 也是 PRIVATE：Connection.h 会 include <asio/...>，但那是本模块
+# 的实现细节。上层（server/cli/app）若需要 asio 类型（比如自己持有 io_context），
+# 应当显式链接 relayer_asio，而不是依赖传递——传递来的 include 路径会掩盖
+# "这个模块其实没打算暴露 asio"这个事实。
+target_link_libraries(relayer_core
+    PUBLIC relayer_filestore
+    PRIVATE relayer_platform relayer_asio)
 
 relayer_set_warnings(relayer_core)

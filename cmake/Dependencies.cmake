@@ -14,7 +14,20 @@ set(RELAYER_THIRD_PARTY_DIR ${PROJECT_SOURCE_DIR}/third_party)
 # header-only 库：只加 include 路径
 # ---------------------------------------------------------------------------
 add_library(relayer_asio INTERFACE)
-target_include_directories(relayer_asio INTERFACE ${RELAYER_THIRD_PARTY_DIR}/asio)
+# include 路径是 third_party 而不是 third_party/asio：
+# vendored 的 asio 头文件本身用 `#include "asio/detail/config.hpp"` 这种带
+# 前缀的形式互相引用，所以必须让 <asio/...> 能解析，即 include 根目录要
+# 比 asio 目录高一层。
+#
+# SYSTEM 是必须的：asio 是 header-only，它的实现（如 win_iocp_io_context.ipp）
+# 会在我们的编译单元里展开。本项目的 -Werror 开着 -Wsign-conversion /
+# -Wold-style-cast 等，而 asio 上游代码并不满足这些规则——不加 SYSTEM 就
+# 会得到几十个来自三方代码的报错。SYSTEM 只影响警告抑制，不影响语义。
+target_include_directories(relayer_asio SYSTEM INTERFACE ${RELAYER_THIRD_PARTY_DIR})
+target_compile_definitions(relayer_asio INTERFACE
+    ASIO_STANDALONE          # 不依赖 Boost
+    ASIO_NO_DEPRECATED       # 禁用已弃用接口，避免误用
+)
 
 add_library(relayer_cereal INTERFACE)
 target_include_directories(relayer_cereal INTERFACE ${RELAYER_THIRD_PARTY_DIR}/cereal)
