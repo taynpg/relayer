@@ -468,7 +468,7 @@ nonce 重放被拒、两个 proof 恒不相等、乱序帧被拒、失败终态�
 - 关闭流程显式：`shutdown(fd) → 等待在读回调返回 → 释放`，杜绝 v1 里的"对象析构时还在收帧"。
 - 心跳与超时统一由 `transport` 层提供，不散落在业务层。
 
-**状态：部分完成**（帧切分 + 连接 + 心跳；认证接线与转发未做）。
+**状态：部分完成**（帧切分 + 连接 + 心跳 + 会话策略；组装与转发未做）。
 
 #### 3.4.1 帧切分（`FrameReader`，已完成）
 
@@ -540,12 +540,39 @@ nonce 重放被拒、两个 proof 恒不相等、乱序帧被拒、失败终态�
   把问题掩盖成"在重试"。
 - 边界一律用 `>=`。用 `>` 会出现"周期恰好等于阈值时永远不触发"。
 
-#### 3.4.5 未做
+#### 3.4.5 会话策略（已完成，纯逻辑部分）
 
-- 连接建立后的认证接线（`ServerHandshake` / `ClientHandshake` 挂到
-  `onFrame` 上）——属于"服务端会话"，随转发路径一起做
-- 心跳定时器接线（`asio::steady_timer` 每 `kTickInterval` 调一次 `check()`）
-- 转发路径上调用 `bindSenderIdentity()`
+`core/include/relayer/core/session/SessionPolicy.h` + `tests/core/SessionPolicyTest.cpp`
+（23 用例 / 776 断言）。规则见 `PROTOCOL.md` §11。
+
+这一层回答四个问题，每个都是一个有名字的函数而不是塞进一个 if-else：
+`checkInbound()` / `identityToBind()` / `checkOutbound()` / `planRoute()`。
+理由和握手状态机一样——转发路径是"漏一个分支就是安全漏洞"的地方，混在
+socket 回调里写就没法把每种组合都测到。
+
+实现时踩到并修掉的两个真问题：
+
+- **`planRoute` 的 `selfId` 一度误传成 `f.from`**。`from` 是对端**自称**的
+  身份，拿它判断"是不是发给自己"，攻击者只要把 `from` 写成自己的名字，
+  就能让本该转发的帧被本地受理。现在 `selfId` 只能来自认证阶段分配的身份，
+  并有一条专门的测试钉住（`route self-check uses authenticated id, not
+  claimed from`）。
+- **"该不该绑"和"绑成谁"必须分开**。合成一个函数之后就再也测不了"未认证
+  时有没有偷偷绑"这类问题。现在 `identityToBind()` 只做判定，
+  `applyIdentityBinding()` 负责落笔，两者各有测试。
+
+另外补了 `Connection::onEstablished`。这不是可选项：客户端不能靠"send 第一帧"
+来启动会话——建连前 `send()` 只是入队，而握手的第一帧由**服务端**发起
+（§7.1），客户端手上根本没有帧可发。没有这条回调，客户端就只能在"我发了
+一帧"这个假事件上启动状态机，而那个假事件在网络失败时永远不会到来。
+
+#### 3.4.6 未做
+
+- 把 `Connection` + `HeartbeatPolicy` + `SessionPolicy` 组装起来的
+  `Session` 类（asio 定时器轮询 `check()`、`onEstablished` 里发 Challenge、
+  `onFrame` 里分派握手 / 转发 / 心跳应答）
+- 服务端 peer 表：`id → Connection` 的映射，转发时按 `to` 查表投递
+- 客户端 id 分配（`kAskId` / `kAnswerId` 的业务实现）
 
 ---
 

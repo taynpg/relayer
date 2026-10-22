@@ -445,6 +445,98 @@ TEST_CASE("resolving a bogus host reports failure", "[transport][connection][int
 }
 
 // ===========================================================================
+// 连接就绪通知
+// ===========================================================================
+
+TEST_CASE("adopt reports established before any frame", "[transport][connection][integration]")
+{
+    // 顺序断言是这条测试的重点。
+    //
+    // 会话层要靠 onEstablished 启动握手状态机（服务端发 Challenge）。
+    // 如果 onEstablished 来的比第一帧晚，服务端就会在"还没开始握手"的
+    // 状态里收到 Response，直接被判相位错误；如果干脆不来，握手永远不启动。
+    asio::io_context ctx;
+    auto pair = makeSocketPair(ctx);
+
+    std::vector<std::string> events;
+
+    ConnectionHandler hb;
+    hb.onEstablished = [&] { events.emplace_back("established"); };
+    hb.onFrame = [&](const Frame &) { events.emplace_back("frame"); };
+    hb.onClosed = [&](Status) { events.emplace_back("closed"); };
+
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame &) {}, [](Status) {}));
+    auto b = Connection::adopt(ctx, std::move(pair.b), hb);
+
+    // adopt 里投递的是异步通知，所以此刻还没跑过回调
+    REQUIRE(events.empty());
+
+    REQUIRE(a->send(makeFrame(FrameType::kAskId, "x")).ok());
+    pump(ctx, std::chrono::milliseconds(500));
+
+    REQUIRE(events.size() == 2);
+    REQUIRE(events[0] == "established");
+    REQUIRE(events[1] == "frame");
+}
+
+TEST_CASE("connect reports established once connect succeeds", "[transport][connection][integration]")
+{
+    // 客户端侧：建连是异步的，onEstablished 必须等真的连上才来。
+    // 而且它不能重复来——重复会让会话层启动两次握手。
+    asio::io_context ctx;
+
+    asio::ip::tcp::acceptor acc(ctx);
+    acc.open(asio::ip::tcp::v4());
+    acc.set_option(asio::ip::tcp::acceptor::reuse_address(true));
+    acc.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0));
+    acc.listen();
+    const auto port = acc.local_endpoint().port();
+
+    int establishedCount = 0;
+    bool closedCalled = false;
+
+    ConnectionHandler hc;
+    hc.onEstablished = [&] { ++establishedCount; };
+    hc.onClosed = [&](Status) { closedCalled = true; };
+
+    auto client = Connection::connect(ctx, "127.0.0.1", port, hc);
+    REQUIRE(client != nullptr);
+
+    // 建连还没完成时不该有任何通知
+    REQUIRE(establishedCount == 0);
+
+    // acceptor 侧必须真的 accept，否则三次握手只能走内核 backlog。
+    // 把 socket 移动进回调（asio 1.38 的定型签名要求）——留下一个已移动的
+    // 局部变量只会掩盖"accept 到底有没有成功"这件事。
+    //
+    // 连接要保留住不能析构：服务端 socket 一旦关闭，客户端立刻看到 EOF 并
+    // 正常关闭，我们就没法区分"连接健康"和"连接已经结束"了。
+    bool accepted = false;
+    std::shared_ptr<asio::ip::tcp::socket> serverSock;
+    acc.async_accept(
+        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
+        {
+            if (!ec && sock.is_open())
+            {
+                accepted = true;
+                serverSock = std::make_shared<asio::ip::tcp::socket>(std::move(sock));
+            }
+        });
+
+    pump(ctx, std::chrono::seconds(2));
+
+    REQUIRE(accepted);
+    REQUIRE(establishedCount == 1);
+    REQUIRE_FALSE(closedCalled);
+    REQUIRE(client->state() == ConnectionState::kOpen);
+
+    // 服务端主动断开，客户端才应该关闭
+    serverSock->close();
+    pump(ctx, std::chrono::seconds(1));
+    REQUIRE(closedCalled);
+}
+
+// ===========================================================================
 // 状态名称
 // ===========================================================================
 

@@ -104,6 +104,7 @@ std::shared_ptr<Connection> Connection::connect(asio::io_context &ctx, const std
                                                             // 连接建立前 send() 排进队列的帧，
                                                             // 这时候才能真的写出去
                                                             conn->startWrite();
+                                                            conn->notifyEstablished();
                                                         }));
                             }));
 
@@ -116,8 +117,31 @@ std::shared_ptr<Connection> Connection::adopt(asio::io_context &ctx, asio::ip::t
     auto conn = std::shared_ptr<Connection>(new Connection(ctx, std::move(socket), std::move(handler), options));
     conn->peer_ = formatPeer(conn->socket_);
     conn->state_ = ConnectionState::kOpen;
+
+    // startRead 会提交异步操作（持有 shared_from_this），所以对象在回到
+    // 事件循环之前不会死。onEstablished 因此可以安全地投递到 strand 上，
+    // 而不是在这里同步调用——同步调会让调用方在自己的构造函数里被回调。
     conn->startRead();
+    conn->notifyEstablished();
     return conn;
+}
+
+// ---------------------------------------------------------------------------
+// 连接就绪通知
+// ---------------------------------------------------------------------------
+
+void Connection::notifyEstablished()
+{
+    auto notify = handler_.onEstablished;
+    if (!notify)
+    {
+        return;
+    }
+    // 投递而不是直接调用。理由与 doClose 里那段一样：上层很可能在回调里
+    // 丢掉或替换自己持有的 shared_ptr，同步调用时 this 还处在"半初始化"的
+    // 调用栈里（比如 adopt 刚返回之前）。投递到 strand 之后，回调执行时
+    // 一切状态都已经稳定。
+    asio::post(strand_, [n = std::move(notify)]() mutable { n(); });
 }
 
 // ---------------------------------------------------------------------------

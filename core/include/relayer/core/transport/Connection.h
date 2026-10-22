@@ -57,6 +57,18 @@ enum class ConnectionState
 // 那会卡住整个 strand，让这条连接上的所有事件全部停摆。
 struct ConnectionHandler
 {
+    // 连接可用（已连上 / 已接受）。在 strand 上调用，**先于任何 onFrame**。
+    //
+    // 为什么必须有这条回调：客户端不能靠"send 第一帧"来启动会话。
+    // 建连前 send() 只是入队，而会话层要启动的是握手状态机——握手的第一帧
+    // 由服务端发起（PROTOCOL.md §7.1），客户端手上根本没有"第一帧"可发。
+    // 没有 onEstablished，客户端就只能在"我发了一帧"这个假事件上启动状态机，
+    // 而那个假事件在网络失败时永远不会到来。
+    //
+    // 顺带也让 counters 与 peer() 在此时才可信（peer_ 在 connect 成功前
+    // 只是调用方给的 host:port，之后才是真实对端地址）。
+    std::function<void()> onEstablished;
+
     // 收到一帧。frame 在下一次回调之前一直有效。
     std::function<void(const protocol::Frame &)> onFrame;
 
@@ -88,10 +100,9 @@ public:
     // 建连（客户端用）。
     //
     // 这是异步的：返回时还没连上。返回的指针立即可用于 send()——帧会先
-    // 排进队列，等连接建立后再发出去。这样调用方不必等"连上了"才开始发
-    // 第一个帧（握手的第一帧就是这么发的）。
+    // 排进队列，等连接建立后再发出去。
     //
-    // 连接成功/失败都通过 onClosed 通知，失败时 onClosed 收到带错误的状态。
+    // 连接成功会走 handler.onEstablished，失败会走 handler.onClosed（带错误）。
     // 上层只需要处理一种"结束"路径，不用同时维护"连接失败"和"连接断开"
     // 两套逻辑。
     [[nodiscard]] static std::shared_ptr<Connection> connect(asio::io_context &ctx, const std::string &host,
@@ -103,6 +114,10 @@ public:
     // 显式传 io_context 而不是从 socket 的 executor 里取：从 executor
     // 反查 context 需要 static_cast，一旦 executor 被包装过（比如加了
     // strand）就会取到错误的类型。调用方本来就知道用的是哪个 context。
+    //
+    // onEstablished 与连接实际可用的时机对齐：adopt 不做 I/O，返回前就该算
+    // "已连上"，所以这条回调是投递到 strand 上执行，而不是在 adopt 里同步调。
+    // 同步调会让调用方在自己的构造函数里就被回调，此时对象还没构造完。
     static std::shared_ptr<Connection> adopt(asio::io_context &ctx, asio::ip::tcp::socket socket,
                                              ConnectionHandler handler, ConnectionOptions options = {});
 
@@ -163,6 +178,7 @@ private:
 
     void startRead();
     void startWrite();
+    void notifyEstablished();
     void doClose(Status reason);
 
     [[nodiscard]] bool isActive() const noexcept
