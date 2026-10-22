@@ -67,6 +67,7 @@ private slots:
 private:
     void initTable();
     void initButtons();
+    void initAuth();
     void loadIpHistory();
     void saveIpHistory(const QString &ipPort);
     bool parseHostPort(const QString &text, QString &host, quint16 &port) const;

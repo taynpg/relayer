@@ -36,6 +36,38 @@
     </layout>
    </item>
    <item>
+    <layout class="QHBoxLayout" name="horizontalLayoutAuth">
+     <item>
+      <widget class="QLabel" name="labelAuth">
+       <property name="text">
+        <string>认证口令：</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="edPassword">
+       <property name="echoMode">
+        <enum>QLineEdit::EchoMode::Password</enum>
+       </property>
+       <property name="placeholderText">
+        <string>中继要求认证时必填</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QCheckBox" name="ckNoAuth">
+       <property name="toolTip">
+        <string>勾选表示中继以 --allow-no-auth 启动。
+不从空口令自动推断：漏填口令应当报错，而不是静默变成不认证。</string>
+       </property>
+       <property name="text">
+        <string>无认证</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
     <widget class="QTableWidget" name="tableClients"/>
    </item>
    <item>

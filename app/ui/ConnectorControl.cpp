@@ -3,8 +3,6 @@
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QHeaderView>
-#include <QInputDialog>
-#include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
 #include <QRegularExpression>
@@ -30,6 +28,7 @@ ConnectorControl::ConnectorControl(QWidget *parent)
     setMaximumWidth(350);
     initTable();
     initButtons();
+    initAuth();
     loadIpHistory();
 }
 
@@ -66,6 +65,24 @@ void ConnectorControl::initButtons()
     connect(ui_->btnDisconnect, &QPushButton::clicked, this, &ConnectorControl::onClearClicked);
     connect(ui_->btnRefresh, &QPushButton::clicked, this, &ConnectorControl::onRefreshClicked);
     connect(ui_->btnAboutQt, &QPushButton::clicked, this, []() { QApplication::aboutQt(); });
+}
+
+void ConnectorControl::initAuth()
+{
+    // "无认证"的勾选状态记忆下来（本地自测反复连同一个中继，每次重勾
+    // 很烦）；口令框绝不持久化。勾选无认证时口令框禁用，表达"这个值
+    // 不会被使用"，也防住"勾了无认证却填了口令"的歧义。
+    QSettings settings;
+    ui_->ckNoAuth->setChecked(settings.value("connector/noAuth", false).toBool());
+    ui_->edPassword->setEnabled(!ui_->ckNoAuth->isChecked());
+
+    connect(ui_->ckNoAuth, &QCheckBox::toggled, this,
+            [this](bool checked)
+            {
+                ui_->edPassword->setEnabled(!checked);
+                QSettings s;
+                s.setValue("connector/noAuth", checked);
+            });
 }
 
 void ConnectorControl::loadIpHistory()
@@ -130,29 +147,16 @@ void ConnectorControl::onConnectClicked()
         return;
     }
 
-    // 口令每次询问而不是持久化：持久化的口令等于把钥匙贴在锁上
-    // （v1 存在配置里，E3 全量迁移 Setting 时再决定是否沿用那个习惯）。
-    QString password =
-        QInputDialog::getText(this, QStringLiteral("认证"), QStringLiteral("认证口令："), QLineEdit::Password);
-    if (password.isNull())
+    // 口令与认证方式都在面板上（内联而非弹窗）：状态始终可见，也不存在
+    // "弹窗被主窗口挡住"这类无法自查的问题。口令不持久化——持久化的
+    // 口令等于把钥匙贴在锁上。
+    const bool noAuth = ui_->ckNoAuth->isChecked();
+    const QString password = ui_->edPassword->text();
+    if (!noAuth && password.isEmpty())
     {
-        return;  // 用户取消
-    }
-
-    // 口令为空不自动降级成无认证（服务端侧同一条原则的镜像）：漏填口令
-    // 该报错，而不是替用户决定"那就别认证了"。这里显式确认一次。
-    bool noAuth = false;
-    if (password.isEmpty())
-    {
-        const auto choice = QMessageBox::question(this, QStringLiteral("认证"),
-                                                  QStringLiteral("口令为空。中继是用 --allow-no-auth 启动的吗？\n\n"
-                                                                 "「Yes」以无认证方式连接；「No」返回重新填写口令。"),
-                                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-        if (choice != QMessageBox::Yes)
-        {
-            return;
-        }
-        noAuth = true;
+        QMessageBox::warning(this, QStringLiteral("提示"),
+                             QStringLiteral("请填写认证口令；若中继以 --allow-no-auth 启动，请勾选「无认证」"));
+        return;
     }
 
     relayer::app::ConnInfo conn;
