@@ -145,6 +145,27 @@ void MainWindow::wireSignals()
 void MainWindow::onProbeRequested(const relayer::app::ConnInfo &conn)
 {
     lastConn_ = conn;
+
+    // 连接/刷新都汇聚到这里（ConnectorControl 只做参数校验）：
+    //   - 常驻接收会话活着 → 在现有连接上刷列表（id 不变，会话不动）；
+    //   - 会话不在 → 建立常驻接收会话，认证拿到 id 后 Client 自动问
+    //     列表（askListOnStart）。整条链路一条连接、一个 id——早先
+    //     "先开临时列表连接再挂接收"的流程一次连接要消耗两个 id，
+    //     是"点一次刷新 id 涨一号"的另一半根因。
+    receiveWanted_ = true;
+    receiveRetries_ = 0;
+
+    if (core_->busy())
+    {
+        if (core_->canPreempt() && !core_->hasQueuedWork() && core_->refreshPeers(conn))
+        {
+            return;
+        }
+        // 传输中（或刚好有被抢占排队的动作）：不动会话，提示即可。
+        log_->appendLog(QStringLiteral("[连接] 有传输正在进行，本次连接/刷新已忽略\n"));
+        return;
+    }
+    startAutoReceive();
 }
 
 void MainWindow::onAssignedIdChanged(const QString &id)

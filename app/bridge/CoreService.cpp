@@ -113,8 +113,9 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
         emit assignedIdChanged(toQt(id));
     };
 
-    // 常驻接收会话上 refreshPeers 的回程。任何操作的 config 都带上它：
-    // 只有常驻接收会真的走到这里，挂着无害。
+    // 常驻接收会话上的列表刷新回程 + 认证后自动问列表。两者配合，
+    // GUI 的"连接/刷新"全程只有一条连接、一个 id（见 ClientConfig
+    // 两个成员的注释）。
     cfg.onPeerList = [this](const std::vector<cli::PeerEntry> &entries)
     {
         QList<PeerRow> rows;
@@ -125,6 +126,7 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
         }
         emit peerListReceived(rows);
     };
+    cfg.askListOnStart = true;
 
     return cfg;
 }

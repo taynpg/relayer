@@ -398,6 +398,15 @@ struct Client::Impl
                 {
                     config.onIdAssigned(assignedId);
                 }
+
+                // askListOnStart 放在"真实 id 到手"这一刻而不是 startReceiving：
+                // 首次 onAuthenticated 回调时身份还是空的，此刻问列表，服务端
+                // 返回的名单里未必有自己（id 都还没发），GUI 的自标红就会失效。
+                if (action == Action::kReceive && config.askListOnStart)
+                {
+                    touch();
+                    requestPeerList();
+                }
             }
 
             onAuthenticated();

@@ -146,6 +146,14 @@ struct ClientConfig
     // **结构化**的：GUI 要填表格，文本拼回去再拆开是往显示格式上挂逻辑。
     std::function<void(const std::vector<PeerEntry> &peers)> onPeerList;
 
+    // 认证拿到真实 id 后自动问一次在线列表（结果走 onPeerList）。
+    //
+    // 为什么 GUI 需要它：连接/刷新若先开一条临时列表连接再挂接收会话，
+    // 一次"连接"就要消耗两个 id（临时连接一个、接收会话一个），第一条
+    // 还立刻作废。合并进常驻会话后，从连上那一刻起只有一条连接、一个 id。
+    // CLI 的 recv/list 不用它（list 是独立操作；recv 没注册 onPeerList）。
+    bool askListOnStart = false;
+
     // 接收方覆盖策略：目标已存在时删掉旧文件再收。透传给
     // TransferPeer::Config::overwriteExisting（见那里的注释——默认拒绝
     // 覆盖是 core 层的刻意设计，打开它等于调用方显式授权"先删目标"）。
