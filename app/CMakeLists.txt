@@ -31,15 +31,22 @@ set(CMAKE_AUTOUIC_SEARCH_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/ui)
 add_executable(relayer WIN32
     main.cpp
     MainWindow.cpp
+    Base/InfoDrop.cpp
     bridge/CoreService.cpp
     ui/ConnectorControl.cpp
     ui/LogControl.cpp
+    ui/Control/CheckableComboBox.cpp
+    ui/Control/OwnTableWidget.cpp
     relayer.qrc
 )
 
 target_include_directories(relayer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}
+    # .ui 里的提升控件写的是 "Control/CheckableComboBox.h"（v1 的目录
+    # 结构），生成的 ui_XXX.h 会原样引用；把 ui/ 加进搜索路径让它在
+    # v2 的目录布局下也能解析，.ui 文件因而不必改动。
+    ${CMAKE_CURRENT_SOURCE_DIR}/ui
 )
 
 target_link_libraries(relayer PRIVATE
