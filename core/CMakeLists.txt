@@ -23,6 +23,7 @@ add_library(relayer_core STATIC
     src/transport/Connection.cpp
     src/transport/Heartbeat.cpp
     src/session/SessionPolicy.cpp
+    src/session/Session.cpp
 )
 
 target_include_directories(relayer_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
