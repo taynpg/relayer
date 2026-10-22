@@ -1,11 +1,107 @@
-# 当前交接：阶段 D（已收尾）
+# 当前交接：阶段 D 已结项，阶段 E 进行中
 
 > 写于 2026-10-22。这份文档的目的很窄：让接手的人**不读前面几万行对话**
 > 也能知道现在在哪、哪些是真的、哪些还悬着。
 >
-> 2026-10-22 的续接轮已经把上一版列的未完成项全部处理：`kill-sender`
-> 收口、乱序/丢包补齐、200MB/1GB 实测通过。**阶段 D 可以结项，下一步进
-> 阶段 E（Qt 前端）。**
+> **先读 §0**（阶段 E 现状，最后一次更新 2026-10-22 晚）；§1-§11 是阶段 D
+> 的结项记录，作为历史与踩坑库保留——里面的结论仍然有效，但"下一步"一节
+> 已经过期。
+
+---
+
+## 0. 阶段 E 现状（新会话从这里开始）
+
+### 0.1 一句话
+
+阶段 D 结项后进 `app/`（Qt 前端）。**GUI 的最小可用闭环已经跑通**：连接中继、
+拿到稳定 id、自动接收、对照表批量发送、任务选项卡看进度/停止/重传。
+`main` 干净，ctest 7/7（51 秒）。
+
+剩下的是**收尾性质**的活（Setting 对话框、替换作用域、速度显示）和 E4 的
+真实链路验收，不是架构问题。
+
+### 0.2 已落地（按依赖顺序）
+
+| 子项 | 内容 |
+| --- | --- |
+| E1 | `app/` 骨架；9 个 `.ui` 自 v1 原样搬迁（只改 `<class>` 名）；Qt6 缺库时给可照做的报错 |
+| E2 | `bridge/CoreService`：持有 io_context + io 线程，对 `cli::Client` 的调用全部 `asio::post`，回调 emit Qt 信号（跨线程 queued）。**不要在 onDone 回调栈里析构 Client**（见 0.6） |
+| E3.1 | `Base/InfoDrop`（拖拽载荷，格式即契约）、`Control/CheckableComboBox` |
+| E3.2 | `OwnTableWidget`：`ComColumn`/`ExpColumn` 枚举、列可编辑性收敛到 `isReadOnlyColumn()`、`ensureItem/setText/setReadOnly` 拆分、`ensureRowComplete` |
+| E3.3 | `ExplorerControl`：本地浏览（导航/排序/筛选/拖出/右键动作表）。远端面板**故意不做**——v2 没有 list-dir 帧 |
+| E3.4 | `ComparisonControl`：`rows_` + `viewToRow_` 投影、JSON 持久化（替 v1 的 Sqlite）、`selectedRows()`、动作表、去掉 `static bool inited` |
+| E3.5 | `RelayTaskControl`（主窗口「任务」选项卡）:批次顺序推进、停止、单行重传；文件级失败继续、连接级失败终止 |
+| 身份 | 连接/刷新/发送**共用同一条常驻会话**，id 只分配一次；发送在接收会话上挂第二个 `TransferPeer`，帧靠 `sessionId` 解复用 |
+| 性能 | 默认块 256 KiB（上限仍 4 MiB）、控制帧插队（`isBulkFrame()`）、单帧写超时 60s、接收端写流复用 |
+
+### 0.3 没做（下次接着做）
+
+1. **`Setting` 对话框**：`ConnectorControl::initButtons()` 里 `btnLock` 被显式禁用，
+   注释写着「在 Setting 对话框迁移进来之前不可用」。`Setting.ui` 已在仓库里，
+   没人 include。
+2. **`ReplaceArea` 作用域**：`ComparisonControl::onReplace()` 只做「全部可编辑列 +
+   区分大小写」的普通替换（注释在 cpp 里写明了）。`ReplaceArea.ui` 同样未接线。
+3. **速度显示 / `ProgressTracker`**（§3.7.2 清单 #11）：`RelayTaskControl::onProgress()`
+   收了 `bytesPerSecond` 但没用；空文件除零、时间边界没有集中处。
+4. **E4 验收**：需要一次**真实链路**（两台机器经中继，不是 loopback）的完整收发记录；
+   e2e 还缺 no-auth 场景（`--allow-no-auth` 走过一次手工路径，见 §0.6 最后一条）。
+5. **阶段 F**：远端浏览/下载、对端打包 tar.xz、P2P 直连、多任务并行。前三个都要动协议，
+   `PROTOCOL.md` 得先写帧定义再写代码。
+
+### 0.4 E 阶段定下的架构约束（别推翻，推翻要改协议和测试）
+
+- **一条连接 = 一个常驻接收会话**。GUI 里所有"临时连接"都在消耗服务端递增 id
+  并顶掉常驻会话，症状是「点一次刷新 id 涨一号」。这条已经用 `askListOnStart`
+  和 `sendOnSession` 消掉了，不要再加"用完即弃"的连接。
+- **发送不另建连接**：`Client::sendOnSession()` 在接收会话上挂第二个 `TransferPeer`，
+  收到的帧按 `sessionId` 解复用（接收端空闲时 `sessionId=0`，只认领 `kFileRequestSend`）。
+- **服务端纯转发**（§6.1 的老决策），id 由服务端分配，客户端不能自选。
+- **`overwriteExisting`**：`kAlreadyExists` 时先删后重开。CLI 默认关（e2e 契约），
+  GUI 默认开（日志右键可切）。
+- **`--idle-timeout` 只在传输开始后计时**，判据统一是 `TransferPeer::started()`，
+  不要按角色分别判。
+
+### 0.5 编译与运行
+
+```bash
+# GUI 默认 ON，本机 Qt 6.11.2（MSYS2 UCRT64）能被 CMake 找到，不必再关
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DRELAYER_BUILD_TESTS=ON
+cmake --build build
+cd build && ctest --output-on-failure     # 7 项，约 51 秒（e2e_quick 40s）
+
+build/bin/relayerd.exe --port 9100 --password <口令>   # 中继
+build/bin/relayer.exe                                   # GUI
+build/bin/relayer-cli.exe send/recv ...                 # 对照参考实现、e2e 用
+```
+
+没有 Qt 的机器（或 CI）要显式 `-DRELAYER_BUILD_GUI=OFF`，否则 configure 会停在
+「找不到 Qt6」的提示上——提示本身是可照做的，不是崩溃。
+
+### 0.6 GUI 侧踩过的坑
+
+- **`ld returned 1` 且无任何诊断 = `relayer.exe` 正被占用**。先
+  `taskkill //F //IM relayer.exe`（中继同理）再编，别怀疑编译选项。
+- **不能在 `onDone`/`finish` 的回调栈里 `reset(client_)`**：Client 的 pump 定时器
+  回调返回后还会访问 Impl 成员，栈上析构就是 use-after-free。下次操作时在 post 的
+  lambda 里替换实例。
+- **`RelayTaskControl` 继承 `QDialog` 但被塞进 `QTabWidget`**：能跑，布局按 QWidget
+  处理。若以后要模态，别直接 `exec()`（批次可能跑几分钟，会锁死界面）。
+- **`QTableWidget::selectedItems().size()` 是 `qsizetype`**，`-Wconversion` 下必须显式转。
+- **前向声明要带命名空间**：`class RelayTaskControl;` 在 `namespace relayer::app` 里声明，
+  全局再声明一次就是两个不同类，链接期才炸。
+- **`.ui` 的根类必须与 `.cpp` 一致**：`ComparisonControl.ui` 从 `QDialog` 改成 `QWidget`
+  才能配 `setupUi(QWidget*)`。
+- **no-auth 路径**：服务端 `--allow-no-auth` 时客户端必须显式 `serverAllowNoAuth`，
+  不从空口令推断——漏填口令应报错，不该静默降级。
+
+### 0.7 起手式
+
+1. `git log --oneline -8` 看最近改动，`ctest` 确认基线（7/7）。
+2. 要改 GUI：`app/bridge/CoreService.{h,cpp}` 是唯一的 Qt 边界，先读它，再读
+   `cli/include/relayer/cli/Client.h`（GUI 的 worker 就是它）。
+3. 要改传输：`core/transfer/TransferPeer.h` 的 `Config` / `started()` / `Stats` 是契约面。
+4. 要改协议：先改 `docs/PROTOCOL.md`，再改 `Frame.h`——`protocol_doc` 测试会逐项比对。
+5. 每次提交前跑一次 Release + `-Werror`：`-DCMAKE_BUILD_TYPE=Release -DRELAYER_WERROR=ON`。
 
 ---
 
@@ -375,7 +471,7 @@ FAILED: bin/relayerd.exe
 
 ---
 
-## 10. 下一步
+## 10. 下一步（写于阶段 D 结项时，**已完成**，现状见 §0）
 
 阶段 D 结项，进**阶段 E：`app/` Qt 前端**（REWRITE-PLAN §3.7）。
 

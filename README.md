@@ -2,9 +2,12 @@
 
 跨网络的点对点文件传输工具。一端选文件，另一端收，中间的路径由 relayer 自己找。
 
-> **状态：重写中（v2）**。仓库当前处于重建阶段，功能尚未完整。
+> **状态：重写中（v2）**。阶段 A-D 已完成（filestore / 协议与认证 / 传输引擎 /
+> 三进程集成测试），阶段 E（Qt 前端）进行中：GUI 已能连接中继、稳定收 id、
+> 自动接收、对照表批量发送。剩余项见 `docs/REWRITE-PLAN.md` §4.1。
 > 可用的旧版本在 [`taynpg/relayFile`](https://github.com/taynpg/relayFile)（v0.5）。
-> 设计文档见 [`docs/REWRITE-PLAN.md`](docs/REWRITE-PLAN.md)。
+> 设计文档见 [`docs/REWRITE-PLAN.md`](docs/REWRITE-PLAN.md)，当前交接见
+> [`docs/HANDOFF.md`](docs/HANDOFF.md) §0。
 
 [![CI](https://github.com/taynpg/relayer/actions/workflows/ci.yml/badge.svg)](https://github.com/taynpg/relayer/actions/workflows/ci.yml)
 

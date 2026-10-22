@@ -814,14 +814,44 @@ socket 回调里写就没法把每种组合都测到。
 | **A 地基** | 仓库骨架、CMake、vendored 三方库、CI、`.clang-format`、LICENSE、CONTRIBUTING | 空仓库 CI 绿；`cmake && cmake --build` 通过 |
 | **B filestore** | `IFileStore` + `StdFileStore` + `MemFileStore` + `PathPolicy` + `tar.xz` 归档 | ✅ 已完成：117 用例 / 1718 断言，Release `-Werror` 下 ctest 全绿；与 GNU tar 双向互操作已验证。zip 未做（见 3.1.4） |
 | **C protocol + crypto** | 帧编解码、消息、PBKDF2/HMAC、握手状态机，`PROTOCOL.md` | ✅ 已完成：认证握手（39 用例 / 291 断言）、帧编解码（26 / 443）、传输状态机（60 组合）、心跳策略（14 / 766）、会话策略（23 / 776）、`Session` 组装（39 / 858）、`PeerTable`（24 / 106）；`PROTOCOL.md` 竣工 |
-| **D transport + transfer** | asio 连接、传输引擎接入 `IFileStore` | 三进程集成测试覆盖第 3.5.3 表全部场景 |
-| **E app** | 搬 `.ui`、控件逻辑按 3.7.2 重写、bridge 接线 | GUI 可完成一次完整传输；控件逻辑问题清单逐条关闭 |
-| **F v2 功能** | 认证上线、多任务并行、P2P 直连 | 并行 3 任务互不干扰；直连成功率与回退日志可查 |
+| **D transport + transfer** | asio 连接、传输引擎接入 `IFileStore` | ✅ 已完成：`server/` + `cli/` + 三进程 e2e 10 场景全过（含 1GB），缺陷与验证记录见 `docs/HANDOFF.md` |
+| **E app** | 搬 `.ui`、控件逻辑按 3.7.2 重写、bridge 接线 | 🚧 **进行中**：最小闭环已通（连接/自动接收/发送/对照表/任务表单）——进度与剩余项见下方 |
+| **F v2 功能** | 认证上线、多任务并行、P2P 直连、远端浏览/归档 | 并行 3 任务互不干扰；直连成功率与回退日志可查 |
 | **G 发布** | 打包、安装包、版本号单一来源、CHANGELOG | 干净机器解压即用 |
 
-当前 CTest 共 6 项：`common`（16 用例 / 1111 断言）、`filestore`（117 / 1718）、
-`core`（248 / 4583）、`arch`（架构规则 R1-R6）、`protocol_doc` 与 `transition_doc`
-（文档与代码一致性）。合计 381 用例 / 7412 断言。
+当前 CTest 共 7 项：`common`（16 用例 / 1111 断言）、`filestore`（117 / 1718）、
+`core`（341 / 5482）、`arch`（架构规则 R1-R6）、`protocol_doc` 与 `transition_doc`
+（文档与代码一致性）、`e2e_quick`（三进程 8 场景，约 40s）。
+合计 474 用例 / 8311 断言，全量 51 秒。
+
+### 4.1 阶段 E 进度（2026-10-22 晚）
+
+已落地（按提交顺序）：
+
+| 子项 | 内容 | 状态 |
+| --- | --- | --- |
+| E1 | `app/` 骨架、9 个 `.ui` 原样搬迁、Qt6 自动发现与缺 Qt 时的可照做报错 | ✅ |
+| E2 | `bridge/CoreService`：io_context 线程 + `asio::post` 单线程契约 + 跨线程 queued 信号 | ✅ |
+| E3.1 | `Base/InfoDrop`、`Control/CheckableComboBox` | ✅ |
+| E3.2 | `OwnTableWidget` 重写（清单 #1/#2/#3：`ComColumn`/`ExpColumn` 枚举、列可编辑性收敛、`ensureRowComplete`） | ✅ |
+| E3.3 | `ExplorerControl`（清单外的本地浏览；远端面板排除，v2 无 list-dir 帧） | ✅ |
+| E3.4 | `ComparisonControl`（清单 #4-#9：`selectedRows`、`readRow`、动作表、JSON 持久化、去掉 `static` 一次性初始化）+ 相对目录落盘 | ✅ |
+| E3.5 | `RelayTaskControl` 任务表单（清单 #10/#12：批次推进、停止、重传、`connectionLost` 终止规则） | ✅ |
+| — | 身份稳定：连接=常驻接收会话、`askListOnStart`、`sessionId` 解复用（见 `PROTOCOL.md` §9.4.1） | ✅ |
+| — | 性能三杠杆：默认 256 KiB 块、控制帧插队、单帧写超时 60s；接收端写流复用 | ✅ |
+
+剩余（下一次从这里接）：
+
+1. **`Setting` 对话框**——`ConnectorControl::initButtons()` 里 `btnLock` 目前禁用，
+   注释写明「在 Setting 对话框迁移进来之前不可用」。
+2. **`ReplaceArea` 作用域**——`ComparisonControl::onReplace()` 现在只做「全部可编辑列 +
+   区分大小写」的普通替换；v1 的作用列/大小写/正则未迁移。
+3. **进度与速度（清单 #11 `ProgressTracker`）**——`RelayTaskControl::onProgress()`
+   目前只更新字节进度，`bytesPerSecond` 被忽略；空文件除零与时间边界没有集中处理。
+4. **E4 验收**——GUI 已完成 loopback 与初步实机发送，还缺一次**真实链路**（跨机器、
+   非本机回环）的完整收发记录；e2e 也缺 no-auth 场景。
+5. 阶段 F 才做的：远端浏览/下载、对端打包归档、P2P 直连、多任务并行
+   （前三项需要协议扩展，`cli`/`core` 侧都还没有对应帧）。
 
 ---
 
