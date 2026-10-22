@@ -83,6 +83,24 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(transition_doc PROPERTIES
                          WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
                          LABELS "docs")
+
+    # 三进程集成测试（REWRITE-PLAN §3.5.3 的全表）。
+    #
+    # 这是**唯一**能验证"跨进程"这一维度的测试：其余测试都在一个进程里
+    # 把发送端和接收端接起来，于是真实 socket、真实 TCP 缓冲、真实进程
+    # 退出与句柄占用全都测不到——而本阶段修掉的几个致命缺陷（FrameReader
+    # 的 O(n²) 拷贝、SendWindow 的重传饥饿、残片污染）恰恰只有真进程才能
+    # 暴露出来。
+    #
+    # 用 --quick 挂进 CTest：200MB/1GB 两个 slow 场景加起来要跑十几分钟，
+    # 放进默认测试集会让人不愿意跑 ctest。需要完整覆盖时手工跑不带 --quick。
+    add_test(NAME e2e_quick
+             COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/e2e/run_e2e.py --quick
+                     --bin ${CMAKE_BINARY_DIR}/bin)
+    set_tests_properties(e2e_quick PROPERTIES
+                         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                         TIMEOUT 900
+                         LABELS "e2e")
 else()
     message(WARNING "未找到 Python3，跳过架构与协议文档检查")
 endif()

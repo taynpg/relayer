@@ -51,3 +51,7 @@ crash-*.dmp
 # ---- 其他 ----
 .DS_Store
 Thumbs.db
+
+# ---- Python（e2e 测试脚本）----
+__pycache__/
+*.py[cod]

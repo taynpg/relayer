@@ -237,7 +237,20 @@ void Server::onFrame(session::Session &self, const Frame &frame)
 
             // 转发**必须**走 forward()：它会做身份绑定。直接 send() 会让
             // 服务端发出的帧带着对端自称的 from，那正是 §11.4 要防的。
-            (void)it->second->forward(frame, self.assignedId());
+            //
+            // 返回值必须检查。早先这里是 (void) 丢弃的，代价是一次真实事故：
+            // 对端的写队列满时 forward() 会返回 kNoSpace **并关闭那条连接**，
+            // 而服务端继续按"转发成功"计数。于是中继侧统计一切正常、发送方
+            // 却永远等不到确认，排查方向被引向网络丢包。
+            //
+            // 现在只计数不改行为：中继没有"投递失败"这类帧可回（§9 靠超时
+            // 自己发现），但至少运维能从 forwardFailed 看出问题在对端而不是
+            // 在自己。
+            if (!it->second->forward(frame, self.assignedId()).ok())
+            {
+                ++stats_.forwardFailed;
+                return;
+            }
             ++stats_.forwarded;
             return;
         }

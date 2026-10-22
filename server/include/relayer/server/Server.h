@@ -62,7 +62,8 @@ struct ServerStats
     std::uint64_t rejected = 0;  // 表满 / 重名，直接断开
     std::uint64_t authenticated = 0;
     std::uint64_t forwarded = 0;
-    std::uint64_t unroutable = 0;  // 目标不在线
+    std::uint64_t forwardFailed = 0;  // 目标在线但投递失败（对端写队列满、连接已关闭）
+    std::uint64_t unroutable = 0;     // 目标不在线
     std::uint64_t localFrames = 0;
 };
 

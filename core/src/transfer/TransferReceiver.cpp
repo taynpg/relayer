@@ -607,9 +607,24 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
     // 若给了大写，拒绝它没有意义——那是同一份内容。
     if (out.actualRootHex != expectedRootHex)
     {
+        // 校验不过的残片**必须删掉**。
+        //
+        // 这是"伪造残片"场景（REWRITE-PLAN §3.5.3）真正的落点。续传点只按
+        // 残片长度算（见 scanResumePoint），所以一份"前一半对、后一半是垃圾"
+        // 的残片会被当成"已经下了一半"，从中间接着收。最终根自然对不上——
+        // 但如果把这份残片留在盘上，**下一次传输会再次在它上面续传，于是永远
+        // 失败**，且症状完全相同：每次都传满 100%，每次都报根不匹配。
+        //
+        // 在协议层面没法在 open() 阶段识破它：描述里只有整文件 sha256 和
+        // 一个覆盖前 64KB 的 fingerprint，而伪造残片的前 64KB 恰好是对的。
+        // 唯一能发现它的地方就是这里——算完真实根的那一刻。所以这里不仅
+        // 要报错，还要把污染源清掉，让下一次传输自愈。
+        (void)store_.remove(partPath_);
+
         out.status = CompleteStatus::kRootMismatch;
         out.error = Status::Fail(ErrorCode::kProtocol, "merkle root mismatch: expected " +
-                                                           std::string(expectedRootHex) + ", got " + out.actualRootHex);
+                                                           std::string(expectedRootHex) + ", got " + out.actualRootHex +
+                                                           " (partial file discarded, retry from scratch)");
         return out;
     }
 

@@ -237,6 +237,7 @@ std::uint32_t TransferSender::pump(const PostFn &post)
 
     const auto budget = config_.maxReadInFlight - static_cast<std::uint32_t>(reading_.size());
     auto batch = window_->takeNextBatch(budget);
+
     if (batch.empty())
     {
         return 0;

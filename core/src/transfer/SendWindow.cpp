@@ -52,9 +52,27 @@ ChunkState SendWindow::stateOf(std::uint32_t index) const noexcept
 
 std::uint32_t SendWindow::freeSlots() const noexcept
 {
-    // 窗口容量：受"在飞 + 待重传"占用约束。
+    // 这个函数回答的是"takeNextBatch 现在最多能取出多少块"，必须与
+    // takeNextBatch 的实际规则逐条对齐——否则调用方（hasWork）会据它做出
+    // "没活干"的判断，而实际上还有块可取，传输就无声停住了。
     //
-    // 这里**不含** kPending——它本来就是被窗口挡住的那部分，不是占用者。
+    // 取出规则分两段，配额也分两段：
+    //
+    //   重传段：不受窗口约束。kNeedRetransmit 本来就占着槽，取出来只是
+    //           沿用它，不消耗新配额。这一段能取的量 = needRetransmit()。
+    //   新块段：受窗口约束。它们要**新占**槽位，能取的量 = 窗口剩余空位。
+    //
+    // 历史上这里只算后者（旧实现的 byWindow 夹法），于是
+    // "inflight=0 且 needRetransmit=5 而 window=4" 时返回 0 —— 而那时
+    // 恰恰有 5 块可取。直接后果是 32MB/1MB 块的传输必定停在第 27MB。
+    // 详见 takeNextBatch 里的长注释。
+    //
+    // 窗口剩余空位按 inUse 计数（inflight + needRetransmit）。used 可能
+    // 大于 window（重传判定能让它越界），此时夹到 0，新块不发——这是对的：
+    // 先把已经在窗口里的那些重传完。
+
+    const auto retransmittable = needRetransmit();
+
     std::uint32_t used = 0;
     for (std::uint32_t i = 0; i < total_; ++i)
     {
@@ -65,24 +83,14 @@ std::uint32_t SendWindow::freeSlots() const noexcept
     }
     const auto byWindow = used >= window_ ? 0 : window_ - used;
 
-    // 再夹一个"真的还有块可发"的上界。
+    // 新块还能取多少：窗口空位与"真的还有未发的块"取小。
     //
-    // 少了这个上界会怎样：一块 1MB 的文件配 4MB 窗口，全部发完之后
-    // freeSlots() 会一直报 1/2/3 —— 窗口没满，但没块可发。调用方据此
-    // 认为"还有活要干"，于是空转。
-    //
-    // **必须是 kPending + kNeedRetransmit，不能只有 kPending。**
-    // 只用 kPending 曾经造成过活跃的死锁：一块丢包后变成 kNeedRetransmit
-    // （它在 inUse 里，占着窗口，但不在 pending 里），于是
-    //     byWindow = window - used > 0
-    //     available = pending() = 0
-    //     freeSlots = min(byWindow, 0) = 0
-    // takeNextBatch 第一行就 budget==0 返回，重传队列里的块永远取不出来。
-    // 而 outstanding() 只报告 kInflight，重传超时扫描也看不到它们——
-    // 两头都以为"没活干"，传输无声停住，不报错也不重试。
-    const auto available = pending() + needRetransmit();
+    // 少了后者会怎样：一块 1MB 的文件配 4MB 窗口，全部发完之后 freeSlots()
+    // 会一直报 1/2/3 —— 窗口没满，但没块可发。调用方据此认为"还有活要干"，
+    // 于是空转。
+    const auto newAvailable = std::min(byWindow, pending());
 
-    return std::min(byWindow, available);
+    return retransmittable + newAvailable;
 }
 
 bool SendWindow::done() const noexcept
@@ -98,22 +106,33 @@ std::vector<std::uint32_t> SendWindow::takeNextBatch(std::uint32_t maxCount)
         return out;
     }
 
-    auto budget = std::min(maxCount, freeSlots());
-    if (budget == 0)
-    {
-        return out;
-    }
-
-    // 下面两段循环各自也可能因为"没有可取的块"而提前停，所以实际发出的
-    // 数量不一定等于 budget。这是对的：freeSlots() 是容量上界，不是承诺。
-
-    // 先补空洞。
+    // 先补空洞，**这一段的配额与窗口无关**。
     //
-    // 顺序很重要：新块不会让 ackThrough 前进，只有空洞被填上才会。
-    // 若先发新块，窗口会被"永远得不到确认推进"的块占满，空洞永远补不上
-    // ——这是重传饥饿，表现为"卡在 99% 不动"。
+    // 这里踩过一个致命的坑，值得写清楚：
+    //
+    //   原先的实现是 budget = min(maxCount, freeSlots())，然后重传段也用
+    //   这个 budget 卡。而窗口约束是 inflight + needRetransmit <= window。
+    //   于是当一批块同时超时（3 秒内 5 块，而窗口只有 4），状态变成
+    //
+    //       inflight = 0, needRetransmit = 5  →  used(5) > window(4)
+    //       byWindow = max(0, 4-5) = 0        →  freeSlots() = 0
+    //
+    //   取重传块要 freeSlots > 0，而 freeSlots 要 used <= window，而 used
+    //   恰好就是这些取不出来的重传块——**自锁**。另一头 checkRetransmit
+    //   只扫 outstanding()（kInflight），也看不见它们。两头都以为没活干。
+    //
+    //   实测症状：32MB 配 1MB 块，必定停在第 27MB（acked=26/31, out=0），
+    //   一直挂到 hard timeout。而 8MB 只发 8 块、窗口 4 块，凑不出
+    //   "同时超时数 > 窗口"这个条件，所以小文件全过——这个缺陷只在
+    //   "文件足够大 + 块足够大 + 一批块集中超时"时出现。
+    //
+    // 正确的模型：重传块**本来就在窗口里占着槽**，把 kNeedRetransmit 取出来
+    // 变回 kInflight 是"沿用原来的槽"，不消耗新配额。所以配额只该管新块。
+    //
+    // 顺序仍然重要：新块不会让 ackThrough 前进，只有空洞被填上才会。若先
+    // 发新块，窗口会被"永远得不到确认推进"的块占满——经典的重传饥饿。
     std::size_t consumed = 0;
-    while (consumed < retransmitQueue_.size() && out.size() < budget)
+    while (consumed < retransmitQueue_.size() && out.size() < maxCount)
     {
         const auto idx = retransmitQueue_[consumed];
         // 队列可能与状态脱节（比如重复标记），以状态为准。
@@ -126,18 +145,34 @@ std::vector<std::uint32_t> SendWindow::takeNextBatch(std::uint32_t maxCount)
     }
     retransmitQueue_.erase(retransmitQueue_.begin(), retransmitQueue_.begin() + static_cast<std::ptrdiff_t>(consumed));
 
-    // 再发新块。
+    // 再发新块。新块才受窗口约束——它们要**新占**槽位。
     //
+    // 重传段已经用掉了一些配额，剩下的才是新块能用的。freeSlots() 在重传段
+    // 跑完之后重新算：那一段把 kNeedRetransmit 变成了 kInflight，inUse 的
+    // 判定两边都算，所以 used 不变——这正说明重传没有额外占用窗口。
+    if (out.size() >= maxCount)
+    {
+        return out;
+    }
+
+    const auto newBudget = std::min(maxCount - static_cast<std::uint32_t>(out.size()), freeSlots());
+    if (newBudget == 0)
+    {
+        return out;
+    }
+
     // 从 ackThrough 开始扫而不是从 0 开始：前缀之前的块一定已确认。
     //
     // 但**不能停在第一个非 kPending 的块**——乱序 ACK 会在前缀之后留下
     // 已确认的块，跳过它们继续往后才是对的，否则每遇到一个空洞就少发一批。
-    for (std::uint32_t i = ackThrough_; i < total_ && out.size() < budget; ++i)
+    std::uint32_t taken = 0;
+    for (std::uint32_t i = ackThrough_; i < total_ && taken < newBudget; ++i)
     {
         if (state_[i] == ChunkState::kPending)
         {
             state_[i] = ChunkState::kInflight;
             out.push_back(i);
+            ++taken;
         }
     }
 

@@ -843,6 +843,7 @@ void TransferPeer::pump()
         sendReadyChunks();
         checkRetransmit();
 
+
         // 收尾阶段没有块在飞，重传超时管不到这里。对端不回应答（被杀、
         // 卡在算根、或者干脆不认这个 sessionId）时必须自己有个出口，
         // 否则这条传输永远停在"等一个不会来的应答"上。
