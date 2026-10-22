@@ -24,15 +24,15 @@ template <typename E> constexpr int toInt(E e)
     return static_cast<int>(e);
 }
 
-// ExplorerControl 文件浏览表的列（v1 表格 5 列，拖拽打包时按列取值）。
+// ExplorerControl 文件浏览表的列（与 initControl 的表头一一对应）。
 // v1 的 `items.size() / 5` 与 `items[i * 5 + 1]` 把列数写死在算术里
 // （清单 #4/#7 的同源问题）；v2 用这里的常量与 selectedRows()。
 enum class ExpColumn
 {
-    Id = 0,
+    Icon = 0,
     Name = 1,
-    Type = 2,
-    Mark = 3,
+    Modified = 2,
+    Type = 3,  // "Dir" / "File"
     Size = 4,
 };
 

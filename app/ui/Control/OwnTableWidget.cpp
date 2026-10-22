@@ -209,14 +209,14 @@ void ExpDropTable::mouseMoveEvent(QMouseEvent *event)
     for (int row : rows)
     {
         auto *nameItem = item(row, toInt(ExpColumn::Name));
-        auto *markItem = item(row, toInt(ExpColumn::Mark));
-        if (!nameItem || !markItem)
+        auto *typeItem = item(row, toInt(ExpColumn::Type));
+        if (!nameItem || !typeItem)
         {
             continue;
         }
         InfoDropItem dropItem;
         dropItem.fileName = nameItem->text();
-        dropItem.type = markItem->text() == QStringLiteral("Dir") ? 0 : 1;
+        dropItem.type = typeItem->text() == QStringLiteral("Dir") ? 0 : 1;
         infoDrop.items.push_back(dropItem);
     }
     if (infoDrop.items.isEmpty())

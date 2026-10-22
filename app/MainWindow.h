@@ -12,6 +12,7 @@ class MainWindow;
 QT_END_NAMESPACE
 
 class ConnectorControl;
+class ExplorerControl;
 class LogControl;
 
 // 主窗口：v1 的 relayFile（Gui/relayFile.{h,cpp}）在 v2 的对应物。
@@ -55,6 +56,7 @@ private:
     relayer::app::CoreService *core_;
     ConnectorControl *connector_;
     LogControl *log_;
+    ExplorerControl *explorer_ = nullptr;
 
     // 自动接收状态。发送操作进行中暂停挂起（CoreService 一次只跑一个
     // 操作）；receiveWanted_ 表达"用户想要自动接收"，与"此刻在收"分开。

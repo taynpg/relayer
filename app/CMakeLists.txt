@@ -36,6 +36,7 @@ add_executable(relayer WIN32
     ui/ConnectorControl.cpp
     ui/LogControl.cpp
     ui/Control/CheckableComboBox.cpp
+    ui/Control/ExplorerControl.cpp
     ui/Control/OwnTableWidget.cpp
     relayer.qrc
 )

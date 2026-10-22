@@ -11,6 +11,7 @@
 #include <QVBoxLayout>
 
 #include "ui/ConnectorControl.h"
+#include "ui/Control/ExplorerControl.h"
 #include "ui/LogControl.h"
 #include "ui_MainWindow.h"
 
@@ -66,9 +67,8 @@ MainWindow::~MainWindow()
 
 void MainWindow::buildLayout()
 {
-    // 镜像 v1 relayFile.cpp initLayout：上（连接面板 + 选项卡）/下（文件浏览，
-    // 待 ExplorerControl 迁移后加入）。splitter 的下半暂时没有内容，等
-    // E3 全量时把 sFile 加回来。
+    // 镜像 v1 relayFile.cpp initLayout：上（连接面板 + 选项卡）/ 下（文件浏览）。
+    // 垂直 splitter 让下半部的浏览区可拖大——大目录浏览时这是高频操作。
     auto *tabWidget = new QTabWidget(this);
     tabWidget->addTab(log_, QStringLiteral("日志"));
 
@@ -79,8 +79,19 @@ void MainWindow::buildLayout()
     sTop->setStretchFactor(0, 0);
     sTop->setStretchFactor(1, 1);
 
+    explorer_ = new ExplorerControl(this);
+    connect(explorer_, &ExplorerControl::notice, this,
+            [this](const QString &msg) { log_->appendLog(QStringLiteral("[浏览] %1\n").arg(msg)); });
+
+    auto *sMain = new QSplitter(Qt::Vertical, this);
+    sMain->setHandleWidth(2);
+    sMain->addWidget(sTop);
+    sMain->addWidget(explorer_);
+    sMain->setStretchFactor(0, 0);
+    sMain->setStretchFactor(1, 1);
+
     auto *layout = new QVBoxLayout(this);
-    layout->addWidget(sTop);
+    layout->addWidget(sMain);
 }
 
 void MainWindow::wireSignals()
