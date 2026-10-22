@@ -168,7 +168,7 @@ struct ClientConfig
 
     // 传输参数。chunkSize 在命令行可调，主要用于把"小文件测不出多块"
     // 这条路堵上（见 TransferPeer::Config 的注释）。
-    std::uint32_t chunkSize = 0;  // 0 = 用协议默认值（4 MiB）
+    std::uint32_t chunkSize = 0;  // 0 = 用协议默认值（256 KiB）
 
     // 接收方在收到描述后，最多等多久让发送方把数据发完。
     //

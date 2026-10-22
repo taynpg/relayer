@@ -78,6 +78,8 @@ public:
         //
         // 按块数而不是字节数：块大小是传输开始时就定好的常量，一个块数
         // 上限换算成内存是确定的（maxBufferedChunks × chunkSize）。
+        // 默认 16 × 256 KiB = 4 MiB 未落盘缓冲；块大小调到 4 MiB 时会变成
+        // 64 MiB，调大块之前先想想这个数。
         std::uint32_t maxBufferedChunks = 16;
 
         // 同时在写盘的任务数上限。与上面那个是独立约束：
@@ -214,6 +216,12 @@ private:
     // 兜底——真对不上会退回 kRootMismatch，上层丢弃残片重来。
     [[nodiscard]] std::uint32_t scanResumePoint() const;
 
+    // 关闭残片写流。finalize / abort 前必须调用，析构时由成员自动完成。
+    //
+    // 幂等，且不会与正在进行的写盘任务并发破坏状态：内部持 writeMu_，
+    // 拿到锁时那些任务要么已完成、要么还没开始。
+    void closeWriteStream() noexcept;
+
     filestore::IFileStore &store_;
     WorkerPool &pool_;
     Config config_;
@@ -244,6 +252,20 @@ private:
 
     // 析构时必须等它归零：写盘任务体捕获了 this。
     std::atomic<std::uint32_t> runningTasks_{0};
+
+    // 残片的写流，整个传输期间复用。
+    //
+    // 为什么不每块 open 一次：一次 open 在 Windows 上是 CreateFile 加安全
+    // 求值，实测约 9ms。256 KiB 块下 256 MB 的文件有 1024 块，光开关文件
+    // 就是 9 秒——把 4 MiB 块时代 14 秒的总时长拖到 44 秒，还不算由此引发
+    // 的超时重传（实测 144 块）。复用之后每块只剩 seek/write/flush。
+    //
+    // 为什么用锁而不是"每块一个流"：IWriteStream 的读写位置是流内状态，
+    // seek 与 write 必须成对串行，否则一个线程 seek 完、另一个线程插进来
+    // seek 到别处，数据就写错块了。而磁盘本身就是串行的，多流并行写同一
+    // 文件只会让磁头来回跑。
+    std::unique_ptr<filestore::IWriteStream> writeStream_;
+    std::mutex writeMu_;
 
     bool opened_ = false;
     bool aborted_ = false;

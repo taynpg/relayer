@@ -38,9 +38,22 @@ inline constexpr std::uint32_t kMinChunkSize = 1024;
 inline constexpr std::uint32_t kMaxChunkSize = 4u * 1024 * 1024;
 inline constexpr std::uint32_t kChunkSizeAlignment = 1024;
 
-// 默认块大小。4 MiB 是"一次读盘 + 一次帧发送"的折中：更小则帧头与
-// 往返开销占比升高，更大则单块失败的重传代价与内存峰值同时上升。
-inline constexpr std::uint32_t kDefaultChunkSize = kMaxChunkSize;
+// 默认块大小。
+//
+// 这里曾经取协议上限 4 MiB，理由是"大块摊薄帧头与 ACK 开销"。那个理由在
+// 千兆局域网上成立，但它忽略了两个更重要的代价：
+//
+//   1. **控制帧的排队延迟**。TCP 是有序字节流，一帧发完才发下一帧；一块
+//      4 MiB 在 1 MB/s 的上行链路上要 4 秒才写完，排在它后面的 Cancel /
+//      Complete 只能干等。窗口 4 块时最坏要等十几秒——用户点了"取消"，
+//      界面半天没反应。256 KiB 把这个量级压到 0.25 秒。
+//   2. **内存**。接收端 maxBufferedChunks(16) × 4 MiB = 64 MiB 的未落盘
+//      缓冲上限，多任务并发时直接翻倍。
+//
+// 帧头与 ACK 的摊薄改用"窗口按字节配额"解决（TransferSender::Config::
+// windowBytes）：在飞字节数保持不变，块变小只是让调度粒度更细。
+// 上限仍是 4 MiB，留给将来按链路自适应。
+inline constexpr std::uint32_t kDefaultChunkSize = 256u * 1024;
 
 // 给定文件总长与块大小，算出块数。
 //
@@ -58,7 +71,7 @@ inline constexpr std::uint32_t kDefaultChunkSize = kMaxChunkSize;
 // "文件内容 + 块大小"决定，不依赖 payloadLen 这类可变的传输细节。
 //
 // 补零通过流式 update 完成，不会为了补齐而真的分配 chunkSize 字节：
-// 4 MiB 的块乘上并发任务数很容易把内存吃光。
+// 块被调到上限（4 MiB）时，乘上并发任务数很容易把内存吃光。
 [[nodiscard]] crypto::Sha256::Digest leafHash(const void *chunk, std::size_t len, std::uint32_t chunkSize);
 
 // 计算内部节点：SHA256(0x01 || left || right)。
@@ -82,8 +95,8 @@ inline constexpr std::uint32_t kDefaultChunkSize = kMaxChunkSize;
 // 增量收集器。调用方按顺序喂块，最后取根。
 //
 // 为什么还要一个增量版本：一边读盘一边算叶子是自然的流式过程，先攒齐
-// 全部叶子再算根意味着要额外持有 N × 32 字节。对 1GB / 4MB 来说只有
-// 256 个叶子（8KB），影响不大；但对小块场景（1KB 块 × 1GB = 100 万个叶子，
+// 全部叶子再算根意味着要额外持有 N × 32 字节。对 1GB / 256KB 来说是
+// 4096 个叶子（128KB），影响不大；但块更小（1KB 块 × 1GB = 100 万个叶子，
 // 32MB）就不一样了。增量版内部只保留"当前层"的节点，峰值同样只有 N×32，
 // 但它让调用方不必等全部读完才开始。
 class MerkleBuilder

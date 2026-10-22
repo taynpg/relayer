@@ -49,6 +49,7 @@ Connection::Connection(asio::io_context &ctx, asio::ip::tcp::socket socket, Conn
                        ConnectionOptions options)
     : strand_(asio::make_strand(ctx))
     , socket_(std::move(socket))
+    , writeTimer_(ctx)
     , handler_(std::move(handler))
     , options_(options)
     , readBuffer_(options.readChunk)
@@ -235,7 +236,8 @@ Status Connection::send(const protocol::Frame &frame)
         return st;
     }
 
-    if (pendingWriteBytes_ + wire.size() > options_.maxPendingWrites)
+    const bool bulk = protocol::isBulkFrame(frame.type);
+    if (pendingControlBytes_ + pendingBulkBytes_ + wire.size() > options_.maxPendingWrites)
     {
         // 对端不读，我们的队列在涨。继续排下去会吃光内存。
         // 断开是唯一正确的选择：这已经不是"慢"，是"对面不收"。
@@ -245,8 +247,16 @@ Status Connection::send(const protocol::Frame &frame)
 
     ++framesSent_;
     const std::size_t size = wire.size();
-    pendingWriteBytes_ += size;
-    writeQueue_.push_back(std::move(wire));
+    if (bulk)
+    {
+        pendingBulkBytes_ += size;
+        bulkQueue_.push_back(std::move(wire));
+    }
+    else
+    {
+        pendingControlBytes_ += size;
+        controlQueue_.push_back(std::move(wire));
+    }
 
     if (!writing_)
     {
@@ -257,7 +267,12 @@ Status Connection::send(const protocol::Frame &frame)
 
 void Connection::startWrite()
 {
-    if (writeQueue_.empty() || !isActive())
+    // 控制队列优先。空指针判断放在前面而不是用下标索引：两个队列是独立的
+    // 成员，选中的那个要在异步回调里继续用，所以必须记下"这一次写的是哪条"。
+    const bool fromControl = !controlQueue_.empty();
+    auto &queue = fromControl ? controlQueue_ : bulkQueue_;
+
+    if (queue.empty() || !isActive())
     {
         writing_ = false;
         return;
@@ -270,12 +285,38 @@ void Connection::startWrite()
     // 为什么不在一个 async_write 里发所有待发数据：那样会让多个帧挤在
     // 一次系统调用里，虽然 TCP 层面没问题，但无法逐帧统计，而且一旦
     // 中途出错，很难知道是哪一帧的边界断的。逐帧发让错误定位简单得多。
-    const auto &front = writeQueue_.front();
+    // 单帧写超时：从这一帧真正开始写的那一刻计时。
+    //
+    // 不能从入队算起：排队本身可能合法地很长（前面还有别的帧要发），
+    // 从入队计时会把"慢"误判成"死"。
+    if (options_.writeTimeout.count() > 0)
+    {
+        writeTimer_.expires_after(options_.writeTimeout);
+        writeTimer_.async_wait(asio::bind_executor(strand_,
+                                                   [self = shared_from_this()](const asio::error_code &ec)
+                                                   {
+                                                       // operation_aborted 是我们自己取消的（写完成、或连接已关）。
+                                                       if (ec)
+                                                       {
+                                                           return;
+                                                       }
+                                                       // 到这里说明这一帧写了整整 writeTimeout 还没写完。TCP 发送
+                                                       // 窗口被对端堵死，队列已经不会动了——控制帧也发不出去，
+                                                       // 上层只会一直等到自己的空闲超时。主动断开，让错误立刻可见。
+                                                       self->doClose(Status::Fail(
+                                                           ErrorCode::kTimeout, "write stalled: peer is not reading"));
+                                                   }));
+    }
+
+    const auto &front = queue.front();
     asio::async_write(
         socket_, asio::buffer(front),
         asio::bind_executor(strand_,
-                            [self = shared_from_this()](const asio::error_code &ec, std::size_t n)
+                            [self = shared_from_this(), fromControl](const asio::error_code &ec, std::size_t n)
                             {
+                                // 这一帧已经有结论了，停掉超时计时。
+                                self->writeTimer_.cancel();
+
                                 if (ec)
                                 {
                                     self->doClose(Status::Fail(ErrorCode::kIoError, "write failed: " + ec.message()));
@@ -283,10 +324,22 @@ void Connection::startWrite()
                                 }
 
                                 self->bytesSent_ += n;
-                                if (!self->writeQueue_.empty())
+                                // 用与发起时同一个 fromControl 选队列：这期间
+                                // 另一条队列可能已经被追加了新帧，但**队首**
+                                // 永远是发起那次写的那一帧。
+                                auto &q = fromControl ? self->controlQueue_ : self->bulkQueue_;
+                                if (!q.empty())
                                 {
-                                    self->pendingWriteBytes_ -= self->writeQueue_.front().size();
-                                    self->writeQueue_.pop_front();
+                                    const std::size_t done = q.front().size();
+                                    if (fromControl)
+                                    {
+                                        self->pendingControlBytes_ -= done;
+                                    }
+                                    else
+                                    {
+                                        self->pendingBulkBytes_ -= done;
+                                    }
+                                    q.pop_front();
                                 }
 
                                 self->startWrite();
@@ -317,11 +370,16 @@ void Connection::doClose(Status reason)
 
     // 只取消，不等待。等待回调返回在 strand 上会死锁（见头文件说明）。
     asio::error_code ignored;
+    // 这个 asio 版本的 basic_waitable_timer 没有 cancel(ec) 重载，
+    // cancel() 在无操作时也不会抛（定时器已过期/未设置都算成功）。
+    writeTimer_.cancel();
     socket_.shutdown(asio::ip::tcp::socket::shutdown_both, ignored);
     socket_.close(ignored);
 
-    writeQueue_.clear();
-    pendingWriteBytes_ = 0;
+    controlQueue_.clear();
+    bulkQueue_.clear();
+    pendingControlBytes_ = 0;
+    pendingBulkBytes_ = 0;
     writing_ = false;
     reader_.clear();
 

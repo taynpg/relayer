@@ -175,6 +175,114 @@ TEST_CASE("connection preserves frame order", "[transport][connection][integrati
     }
 }
 
+// 写队列有优先级：控制帧要能插到已排队的数据帧前面。
+//
+// 这个能力直接决定"点了取消之后多久生效"。单队列 FIFO 时，取消帧必须等
+// 前面所有块写完——慢链路上就是十几秒。
+//
+// 构造方式刻意不依赖时序：第一帧 send 后立即进入 async_write（writing_ 变
+// true），但 io_context 还没 run，所以它**一定**还占着写入位置。此时再塞
+// 控制帧和第二个数据帧，两者都只能排队。之后才跑 io_context，出队顺序就
+// 完全由队列策略决定，与回环速度、帧大小无关。
+TEST_CASE("control frames overtake queued bulk frames", "[transport][connection][integration]")
+{
+    asio::io_context ctx;
+    auto pair = makeSocketPair(ctx);
+
+    std::vector<FrameType> order;
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame &) {}, [](Status) {}));
+    auto b = Connection::adopt(ctx, std::move(pair.b),
+                               handler([&](const Frame &f) { order.push_back(f.type); }, [](Status) {}));
+
+    // 第一帧：占住写入位置（ctx 未 run，不会有任何回调）。
+    REQUIRE(a->send(makeFrame(FrameType::kChunkRequestData, "first")).ok());
+    // 第二个数据帧：排进数据队列。
+    //
+    // 顺序很重要：控制帧必须**最后**发。FIFO 会得到
+    //   first → second → cancel
+    // 有优先级才能得到
+    //   first → cancel → second
+    // 把控制帧放在前面发就测不出任何区别（两种实现都是那个顺序）。
+    REQUIRE(a->send(makeFrame(FrameType::kChunkRequestData, "second")).ok());
+    // 控制帧：应当插到第二个数据帧前面去。
+    REQUIRE(a->send(makeFrame(FrameType::kFileRequestCancel, "cancel")).ok());
+
+    REQUIRE(pumpUntil(ctx, [&] { return order.size() == 3; }, std::chrono::seconds(2)));
+
+    REQUIRE(order.size() == 3);
+    REQUIRE(order[0] == FrameType::kChunkRequestData);
+    // 关键断言：控制帧排在**第二个数据帧**之前。单队列 FIFO 实现会
+    // 在这里得到 second → cancel，用例失败。
+    REQUIRE(order[1] == FrameType::kFileRequestCancel);
+    REQUIRE(order[2] == FrameType::kChunkRequestData);
+}
+
+TEST_CASE("a stalled write times out instead of hanging forever", "[transport][connection][integration]")
+{
+    // 对端完全不读时，TCP 发送窗口会被填满，async_write 永远不完成。
+    // 没有写超时的话，这条连接会静静躺着——连控制帧都发不出去，上层只能
+    // 等自己的空闲超时。这里验证本层能自己判死。
+    asio::io_context ctx;
+    auto pair = makeSocketPair(ctx);
+
+    // 把缓冲压到最小，保证大帧写不完。Windows 会把这些值抬到系统下限
+    // （几 KB），配合 4 MiB 的帧仍然远远不够——重点是"远小于帧大小"。
+    asio::error_code ignored;
+    pair.a.set_option(asio::socket_base::send_buffer_size(4096), ignored);
+    pair.b.set_option(asio::socket_base::receive_buffer_size(4096), ignored);
+
+    bool closedCalled = false;
+    Status closedStatus;
+
+    ConnectionOptions opt;
+    opt.writeTimeout = std::chrono::milliseconds(150);
+
+    // 只把 a 包成 Connection；b 保持裸 socket 且**不读**，制造背压。
+    auto a = Connection::adopt(ctx, std::move(pair.a),
+                               handler([](const Frame &) {},
+                                       [&](Status s)
+                                       {
+                                           closedCalled = true;
+                                           closedStatus = std::move(s);
+                                       }),
+                               opt);
+
+    // 4 MiB（协议块上限）：远大于几 KB 的 socket 缓冲。
+    REQUIRE(a->send(makeFrame(FrameType::kChunkRequestData, std::string(4u * 1024 * 1024, 'x'))).ok());
+
+    REQUIRE(pumpUntil(ctx, [&] { return closedCalled; }, std::chrono::seconds(5)));
+    REQUIRE(closedStatus.code == relayer::ErrorCode::kTimeout);
+}
+
+TEST_CASE("a completed write cancels its timeout", "[transport][connection][integration]")
+{
+    // 反向保护：超时计时器必须随写完成一起取消。漏掉 cancel 的话，连接会在
+    // 发送成功后莫名其妙地自己断掉——而且只在超时时间到了才暴露，线上会
+    // 表现成"传完就断"，极难定位。
+    asio::io_context ctx;
+    auto pair = makeSocketPair(ctx);
+
+    bool closedCalled = false;
+    std::vector<Frame> got;
+
+    ConnectionOptions opt;
+    opt.writeTimeout = std::chrono::milliseconds(80);
+
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame &) {}, [&](Status) {}), opt);
+    auto b = Connection::adopt(ctx, std::move(pair.b),
+                               handler([&](const Frame &f) { got.push_back(f); }, [&](Status) { closedCalled = true; }),
+                               opt);
+
+    REQUIRE(a->send(makeFrame(FrameType::kAskId, "x")).ok());
+    REQUIRE(pumpUntil(ctx, [&] { return !got.empty(); }, std::chrono::seconds(2)));
+
+    // 再等三个超时周期：如果 timer 没被取消，连接此时应该已经断了。
+    pump(ctx, std::chrono::milliseconds(260));
+
+    REQUIRE_FALSE(closedCalled);
+    REQUIRE(a->state() == ConnectionState::kOpen);
+}
+
 TEST_CASE("connection carries a large body", "[transport][connection][integration]")
 {
     asio::io_context ctx;

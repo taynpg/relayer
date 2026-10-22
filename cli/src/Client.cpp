@@ -34,9 +34,8 @@ using protocol::FrameType;
 
 // 进度上报的最小间隔。
 //
-// 每个块都报一次在 4 MiB 块下是"每块一行"，看起来像日志刷屏；而在小
-// 块测试里又会变成几千行。100ms 是"人眼觉得在动、输出又不至于淹掉终端"
-// 的折中。
+// 每块都报一次的话，默认 256 KiB 块下一个 256 MB 的文件会刷出 1024 行，
+// 终端直接淹掉。100ms 是"人眼觉得在动、输出又不至于刷屏"的折中。
 constexpr auto kProgressInterval = std::chrono::milliseconds(100);
 
 // pump 间隔。TransferPeer 不自带定时器（见它的 pump 注释），由调用方驱动。

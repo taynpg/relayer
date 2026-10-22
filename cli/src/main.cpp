@@ -53,7 +53,7 @@ void printUsage()
                 "      --no-auth            中继已用 --allow-no-auth 启动时必须加这个\n"
                 "                           （与 --password 互斥；不自动推断，防止漏填口令静默降级）\n"
                 "      --id <name>          要求服务端分配的身份（一般不用给）\n"
-                "      --chunk-size <bytes> 分块大小（默认 4 MiB，测试时可调小）\n"
+                "      --chunk-size <bytes> 分块大小（默认 256 KiB，上限 4 MiB）\n"
                 "      --idle-timeout <sec> 传输开始后多久没有进展就判定对端失联（默认 60）\n"
                 "                           传输开始前不计时：recv 会一直等，除非给 --hard-timeout\n"
                 "      --hard-timeout <sec> 整个操作的硬上限，0 表示不限（默认 0）\n"

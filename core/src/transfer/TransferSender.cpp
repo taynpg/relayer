@@ -20,13 +20,8 @@ TransferSender::TransferSender(filestore::IFileStore &store, WorkerPool &pool, C
     , pool_(pool)
     , config_(config)
 {
-    // 窗口为 0 会让 takeNextBatch 一块也取不出（SendWindow 会夹到 1，
-    // 但 1 块的窗口在 4MB 块大小下只有 4MB 在飞，吞吐会被 RTT 锁死）。
-    // 这里夹到至少 1，并把读盘上限也夹到至少 1。
-    if (config_.windowChunks == 0)
-    {
-        config_.windowChunks = 1;
-    }
+    // 窗口块数在 open() 里按 windowBytes 换算（那一刻才知道 chunkSize），
+    // 这里只保证读盘上限至少为 1：0 会让 pump 一块也提交不出去。
     if (config_.maxReadInFlight == 0)
     {
         config_.maxReadInFlight = 1;
@@ -91,7 +86,22 @@ Status TransferSender::open(std::string_view sourcePath, std::uint32_t chunkSize
     totalSize_ = st.size;
     totalChunks_ = chunkCountFor(totalSize_, chunkSize_);
 
-    window_ = std::make_unique<SendWindow>(totalChunks_, config_.windowChunks);
+    // 窗口块数：显式指定的优先，否则按字节配额换算。
+    //
+    // 换算放在这里而不是构造函数里：构造函数还不知道 chunkSize，而"4 MiB
+    // 在飞"要在知道块大小之后才能落成块数。
+    //
+    // 上限 65536 是防御性的：windowBytes 是可配置的，块又能小到 1 KiB，
+    // 两者相乘会让窗口大得毫无意义（并让 SendWindow 的位图失控）。
+    std::uint32_t effectiveWindowChunks = config_.windowChunks;
+    if (effectiveWindowChunks == 0)
+    {
+        const std::size_t byBytes = config_.windowBytes / chunkSize;
+        const std::size_t clamped = std::min<std::size_t>(std::max<std::size_t>(byBytes, 1), 65536);
+        effectiveWindowChunks = static_cast<std::uint32_t>(clamped);
+    }
+
+    window_ = std::make_unique<SendWindow>(totalChunks_, effectiveWindowChunks);
     opened_ = true;
 
     return Status::Ok();

@@ -157,6 +157,20 @@ constexpr std::uint16_t kChunkBegin = 600;
     return static_cast<std::uint16_t>(t) >= type_range::kChunkBegin;
 }
 
+// 这一帧是否承载**大块负载**（会长时间占住 TCP 写队列）。
+//
+// 只有两种数据帧算：kChunkRequestData / kChunkAnswerData。同属块段的两个
+// ACK 帧刻意**不算**——它们小、且是推进发送窗口的唯一手段，压在数据帧后面
+// 会让整条管道停摆。分类错了不会报错，只会让所有帧一起排队，也就是退回
+// 到没有优先级的状态，所以这里用精确的等值判断而不是范围判断。
+//
+// 传输层用它决定写队列的优先级：这个函数是"帧有多重"的唯一权威定义，
+// 不要在 Connection 里另写一份。
+[[nodiscard]] constexpr bool isBulkFrame(FrameType t) noexcept
+{
+    return t == FrameType::kChunkRequestData || t == FrameType::kChunkAnswerData;
+}
+
 // 类型号是否落在已定义区间内（含保留段）。用于 UnPack 时拒绝野值。
 [[nodiscard]] bool isKnownType(std::uint16_t raw) noexcept;
 

@@ -32,8 +32,8 @@
 //   pump()            ──►    read at offset       ──►     takeReadyChunks()
 //   applyAck() 腾窗口  ◄──   onChunkReady()               编码 + 发送
 //
-// 关键点：**读盘不占 strand**。一次 4MB 的 read 在慢盘上要几十毫秒，而
-// strand 串行执行——占着它会把心跳、收帧、超时判定全部卡住（见 WorkerPool.h）。
+// 关键点：**读盘不占 strand**。一次 256 KiB 的 read 在慢盘上也要几毫秒，
+// 而 strand 串行执行——占着它会把心跳、收帧、超时判定全部卡住（见 WorkerPool.h）。
 
 namespace relayer::core::transfer
 {
@@ -56,9 +56,22 @@ class TransferSender
 public:
     struct Config
     {
-        // 窗口大小（块数）。内存占用约等于 windowChunks * chunkSize，
-        // 所以上限应当按"最多允许多少字节在飞"来推，而不是拍一个块数。
-        std::uint32_t windowChunks = 4;
+        // 在飞数据的字节配额。窗口的块数由它在 open() 时换算：
+        // windowChunks = max(1, windowBytes / chunkSize)。
+        //
+        // 为什么按字节而不是按块数：吞吐取决于"管道里有多少字节"，
+        // 而取消延迟取决于"最后一帧什么时候能发出去"，后者由块大小决定。
+        // 把这两件事分开，才能既保持吞吐又缩短控制帧的等待——块从 4 MiB
+        // 降到 256 KiB 时，同样是 4 MiB 在飞，块数自动从 4 变成 16。
+        //
+        // 4 MiB 是"一个 RTT 内能被填满、又不至于吃太多内存"的折中。
+        std::size_t windowBytes = 4u * 1024 * 1024;
+
+        // 显式指定窗口块数。非 0 时**覆盖** windowBytes 的换算结果。
+        //
+        // 测试需要精确控制"同时有几块在飞"（比如验证背压、乱序、续传），
+        // 按字节换算会让块数随 chunkSize 漂移，用例就不可复现了。
+        std::uint32_t windowChunks = 0;
 
         // 同时在读盘的任务上限。它与窗口是两个独立约束：
         // 窗口管"允许多少块没被确认"，这里管"允许多少块同时在磁盘上排队"。

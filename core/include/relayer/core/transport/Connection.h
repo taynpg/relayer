@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -9,6 +10,7 @@
 
 #include <asio/io_context.hpp>
 #include <asio/ip/tcp.hpp>
+#include <asio/steady_timer.hpp>
 #include <asio/strand.hpp>
 
 #include "relayer/common/Status.h"
@@ -90,7 +92,24 @@ struct ConnectionOptions
     // 发送队列上限。对端不读而本地持续 write 时，队列会无限增长并吃光内存。
     // 超过上限就判该连接不可用——宁可断开，也不能让一个不读数据的对端
     // 把发送方拖垮。
+    //
+    // 高/低两个优先级队列共用这一个闸门，不分别设限：控制帧都很小（几十
+    // 字节），真正会把内存吃掉的只有数据帧，分设上限只是多一处可能写错的
+    // 状态。总闸在，疯跑的控制帧流也吃不到 32 MiB 以上。
     std::size_t maxPendingWrites = 32u * 1024 * 1024;
+
+    // 单帧写入的超时。
+    //
+    // 解决的是"对端彻底不读"这一种故障：TCP 发送窗口填满之后 async_write
+    // 永远不完成，写队列原地不动——**连控制帧都发不出去**，上层只能干等
+    // 自己的空闲超时。此时连接其实已经死了，早断早报错。
+    //
+    // 60 秒的来历：默认块 256 KiB 要写满 60 秒，等价于链路速率低于
+    // 4.4 KB/s。那不是"慢"，是不可用。而真正慢的链路（10 KB/s）26 秒就
+    // 能写完一帧，不会被误杀。
+    //
+    // 0 表示关闭这项检查（测试里偶尔需要一个永不超时的连接）。
+    std::chrono::milliseconds writeTimeout{60000};
 };
 
 // 唯一所有权：由 Connection 自己管理生命周期，外部拿 shared_ptr。
@@ -188,6 +207,13 @@ private:
 
     asio::strand<asio::io_context::executor_type> strand_;
     asio::ip::tcp::socket socket_;
+
+    // 单帧写超时的计时器。每帧写开始时重置，写完成时取消。
+    //
+    // 放在 strand 上等待：这样超时回调与写完成回调、close 互斥，
+    // 不会出现"超时判死的同时写完成回调正在 pop 队列"的竞态。
+    asio::steady_timer writeTimer_;
+
     ConnectionHandler handler_;
     ConnectionOptions options_;
 
@@ -197,13 +223,21 @@ private:
     FrameReader reader_;
     std::vector<char> readBuffer_;
 
-    // 发送队列：每个元素是已经序列化好的一帧字节。
+    // 发送队列：按优先级分成两条。
     //
-    // 为什么按帧而不是按字节排队：帧边界就是写入边界，这样写完一帧才发
-    // 下一帧，天然不会交错。代价是大帧要整块驻留内存——考虑到 32MB 上限
-    // 和 maxPendingWrites 的总量控制，这是可以接受的。
-    std::deque<std::vector<char>> writeQueue_;
-    std::size_t pendingWriteBytes_ = 0;
+    // 为什么分：TCP 有序字节流 + 一次只写一帧，FIFO 队列意味着一帧 256 KiB
+    // 的数据排在前面时，后面的 Cancel 必须等它写完。而"取消要及时生效"恰恰
+    // 是用户最在意的交互（也是 v1 用两条 TCP 想解决的问题）。
+    //
+    // 分队列是单连接能做到的最好程度：控制帧能在**当前这一帧**写完之后立刻
+    // 出队，不用等整个积压。已经在 async_write 中的帧无法撤回——那要靠
+    // 减小块大小，不是靠调度。
+    //
+    // 判据来自 protocol::isBulkFrame()，不要在这里另写一份帧类型判断。
+    std::deque<std::vector<char>> controlQueue_;
+    std::deque<std::vector<char>> bulkQueue_;
+    std::size_t pendingControlBytes_ = 0;
+    std::size_t pendingBulkBytes_ = 0;
     bool writing_ = false;
 
     std::uint64_t framesSent_ = 0;

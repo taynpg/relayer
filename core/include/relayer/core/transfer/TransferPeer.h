@@ -88,14 +88,18 @@ public:
     {
         // 发送方切块大小。接收方从描述里读，本字段对它无意义。
         //
-        // 默认取协议上限（4 MiB）：大块能摊薄每块的帧头与 ACK 开销，
-        // 在千兆以上的链路上明显更快。测试与小文件场景可以调小——
-        // 4 MiB 意味着 2 MB 的文件只有 1 块，测不出乱序、续传、背压。
+        // 默认 256 KiB（见 kDefaultChunkSize 的说明）：块的大小直接决定
+        // "一帧数据要占住 TCP 写队列多久"，也就决定了控制帧（取消/收尾）
+        // 最坏要排多久。大块只在小文件、低延迟场景下略有优势，代价是
+        // 取消变钝和内存峰值，不值得做默认值。
+        //
+        // 测试与小文件场景仍可调小——256 KiB 意味着 2 MB 的文件有 8 块，
+        // 刚好够测乱序、续传、背压；要更细就显式给 1 KiB。
         std::uint32_t chunkSize = kDefaultChunkSize;
 
         // 分块重传的超时。超过这么久没收到某块的 ACK，就当它丢了。
         //
-        // 4 MiB 块在慢链路上可能真要几秒才传完，所以不能设得太短；
+        // 默认块在慢链路上可能真要几秒才传完，所以不能设得太短；
         // 但太长又会让丢包恢复变钝。3 秒是个经验值。
         std::chrono::milliseconds retransmitTimeout{3000};
 
@@ -276,8 +280,9 @@ private:
     // 所以"发了多久没回音"这件事只能由本层维护。
     std::map<std::uint32_t, std::chrono::steady_clock::time_point> chunkSentAt_;
 
-    // 接收方上次发 ACK 的时间。ACK 不能每收一块就发——4 MiB 块下那等于
-    // 每个块都多一个往返。
+    // 接收方上次发 ACK 的时间。ACK 不能每收一块就发——块变小之后
+    // （默认 256 KiB）不合并的话，ACK 帧的数量会和数据帧同量级，纯属浪费
+    // 带宽和 CPU。kAckInterval 把这段时间内的确认合并成一帧。
     std::chrono::steady_clock::time_point lastAckSent_{};
     bool ackPending_ = false;
 

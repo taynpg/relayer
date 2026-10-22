@@ -135,7 +135,40 @@ Status TransferReceiver::open(const TransferDesc &desc, std::string_view targetP
 
     opened_ = true;
     resumeFrom = scanResumePoint();
+
+    // 打开写流并保留到传输结束。见头文件里 writeStream_ 的说明。
+    //
+    // 放在 scanResumePoint() 之后：它可能调用 resize() 截断残片，那会另开
+    // 一个流。先开这里的话，截断虽然不影响流的可用性，但会让"谁负责关闭"
+    // 出现两条路径。
+    {
+        std::lock_guard<std::mutex> lock(writeMu_);
+        Status openSt;
+        writeStream_ = store_.openWrite(partPath_, false, openSt);
+        if (!writeStream_)
+        {
+            // 回滚 opened_：不然后续无法重试，而且析构时看起来像"开过"。
+            opened_ = false;
+            return openSt.ok() ? Status::Fail(ErrorCode::kIoError, "reopen part file failed: " + partPath_) : openSt;
+        }
+    }
+
     return Status::Ok();
+}
+
+void TransferReceiver::closeWriteStream() noexcept
+{
+    // 这里可能抛（析构函数里 vector 释放、FILE 关闭失败等），但调用点都在
+    // "已经要收尾了"的路上，异常逃出去会让上层看到一个与根因无关的崩溃。
+    try
+    {
+        std::lock_guard<std::mutex> lock(writeMu_);
+        writeStream_.reset();
+    }
+    catch (...)
+    {
+        // 关闭失败不影响后续：finalize 会重读残片，abort 会删文件。
+    }
 }
 
 std::uint32_t TransferReceiver::scanResumePoint() const
@@ -337,56 +370,50 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void *data,
                 }
             };
 
-            Status openStatus;
-
-            // truncate=false：这里要的是"打开已存在的残片并保留内容"。
-            // 用 true 会把前面所有块的成果清掉——症状是"永远只传最后一块"。
-            auto out = store_.openWrite(partPath_, false, openStatus);
-            if (!out)
-            {
-                fail(openStatus.ok() ? Status::Fail(ErrorCode::kIoError, "open part file failed: " + partPath_)
-                                     : openStatus);
-                return;
-            }
-
-            // 每块自己 seek。共用流位置在并发下必然踩乱（与发送侧同一个
-            // 坑，见 TransferSender.cpp）。
-            if (auto st = out->seek(offsetOf(idx)); !st.ok())
-            {
-                fail(std::move(st));
-                return;
-            }
-
-            if (auto st = out->write(c.data.data(), c.data.size()); !st.ok())
-            {
-                fail(std::move(st));
-                return;
-            }
-
-            // flush 是**必须**的，sync 是可选的。
+            // 整段 seek/write/flush/sync 必须在同一把锁里：流的读写位置是
+            // 流内状态，两个线程交错 seek 会把这一块写到别的块的偏移上。
             //
-            // 必须 flush 的理由不在"数据安全"，而在 flush 会把用户态缓冲
-            // 交给操作系统——不做这一步，write 成功只意味着"进了本进程的
-            // 缓冲区"。而我们在下一行就要告诉对端"这块我收好了"。ACK 的
-            // 语义是"已经到文件里了"，不是"已经到我的内存里了"。
-            if (auto st = out->flush(); !st.ok())
+            // 这不再是"每块重新 open"——那样每次还要多付一次 CreateFile
+            // 的代价（实测 9ms/块），正是它让 256 KiB 分块看起来比 4 MiB
+            // 慢三倍。见 writeStream_ 的说明。
+            Status ws;
             {
-                fail(std::move(st));
-                return;
-            }
-
-            if (config_.syncOnWrite)
-            {
-                if (auto st = out->sync(); !st.ok())
+                std::lock_guard<std::mutex> lock(writeMu_);
+                if (!writeStream_)
                 {
-                    fail(std::move(st));
-                    return;
+                    // 流已经被 finalize / abort 关掉了，而这一块还没写完。
+                    // 正常收尾顺序不该出现；如实报错，别静默丢块。
+                    ws = Status::Fail(ErrorCode::kIoError, "part file closed before chunk write: " + partPath_);
+                }
+                else if (auto st = writeStream_->seek(offsetOf(idx)); !st.ok())
+                {
+                    ws = std::move(st);
+                }
+                else if (auto st = writeStream_->write(c.data.data(), c.data.size()); !st.ok())
+                {
+                    ws = std::move(st);
+                }
+                // flush 是**必须**的，sync 是可选的。
+                //
+                // 必须 flush 的理由不在"数据安全"，而在 flush 会把用户态
+                // 缓冲交给操作系统——不做这一步，write 成功只意味着"进了
+                // 本进程的缓冲区"。而下一行就要告诉对端"这块我收好了"。
+                // ACK 的语义是"已经到文件里了"，不是"已经到我的内存里了"。
+                else if (auto st = writeStream_->flush(); !st.ok())
+                {
+                    ws = std::move(st);
+                }
+                else if (config_.syncOnWrite)
+                {
+                    ws = writeStream_->sync();
                 }
             }
 
-            // 流在这里析构关闭。关闭失败在多数实现里表现为 flush 失败，
-            // 已经覆盖；有些实现把关闭时的错误留到下一次 open 才报，
-            // 那属于实现细节，本层不额外处理。
+            if (!ws.ok())
+            {
+                fail(std::move(ws));
+                return;
+            }
 
             if (post)
             {
@@ -515,6 +542,13 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
         out.error = Status::Fail(ErrorCode::kBusy, "finalize while writes are still in flight");
         return out;
     }
+
+    // 已经没有在写的块了，写流必须先关掉：
+    //   1. Windows 上 atomicReplace 无法重命名一个仍被打开的文件
+    //      （sharing violation），残片会原地留着，用户看到一个"传完了但
+    //      名字还是 .relaypart"的文件；
+    //   2. 下面要重读残片算根，写句柄留着只是多一份可能不一致的状态。
+    closeWriteStream();
 
     if (auto st = writeError(); !st.ok())
     {
@@ -660,6 +694,10 @@ void TransferReceiver::abort()
     // 已经在写的任务拦不住，它们会往刚被删掉（或已不存在的）文件里写。
     // MemFileStore 上这会重建出一个新节点，StdFileStore 上会失败——两种都
     // 无害，因为 aborted_ 之后没人再看这块数据。
+
+    // 删之前先关写流：Windows 上删除一个仍被打开的文件会失败，残片就永远
+    // 留在用户目录里，而界面上已经显示"已取消"——没人会把两者联系起来。
+    closeWriteStream();
     (void)store_.remove(partPath_);
 }
 

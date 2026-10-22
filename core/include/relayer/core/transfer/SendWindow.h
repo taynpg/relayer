@@ -141,7 +141,7 @@ private:
     std::uint32_t retransmitted_ = 0;
 
     // 待重传的块号，按 FIFO 排。用 deque 的替代：vector + 头指针，
-    // 因为窗口上限不大（4MB 窗口 / 4MB 块 = 1 块起，1MB 块 = 4 块），
+    // 因为窗口上限不大（默认 4 MiB 在飞 / 256 KiB 块 = 16 块），
     // 简单线性结构足够，且便于断言顺序。
     std::vector<std::uint32_t> retransmitQueue_;
 };
