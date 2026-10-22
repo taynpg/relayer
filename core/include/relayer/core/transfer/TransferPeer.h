@@ -192,6 +192,12 @@ public:
         std::uint64_t acksReceived = 0;
         std::uint64_t duplicateChunks = 0;
         std::uint64_t protocolErrors = 0;
+
+        // 发送方：累计重传块次。接收方恒为 0（它不发数据块）。
+        //
+        // 这是"丢包只补空洞"的唯一可观测证据：e2e 的 drop-chunks 场景
+        // 丢掉 N 个数据帧，这里应当 ≈ N，而不是块总数。
+        std::uint64_t chunksRetransmitted = 0;
     };
     [[nodiscard]] const Stats &stats() const noexcept
     {

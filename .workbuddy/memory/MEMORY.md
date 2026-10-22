@@ -40,9 +40,12 @@
 ## 构建与验证
 
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+# app/ 目录还没建（阶段 E），而 RELAYER_BUILD_GUI 默认 ON → 必须显式关掉，
+# 否则 configure 直接报 "add_subdirectory given source app"
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+      -DRELAYER_BUILD_GUI=OFF -DRELAYER_BUILD_TESTS=ON
 cmake --build build
-cd build && ctest --output-on-failure
+cd build && ctest --output-on-failure        # 含 e2e_quick，约 90 秒
 
 # 带 -Werror 的 Release 验证（提交前跑一次）
 cmake -S . -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DRELAYER_WERROR=ON
@@ -59,20 +62,20 @@ cmake --build build-rel && cd build-rel && ctest
   - ✅ `docs/PROTOCOL.md` + 文档一致性检查
   - ✅ `core/auth` 握手状态机（39 用例 / 291 断言）
   - ✅ `core/transfer/StateMachine` 转移表（25 用例 / 547 断言）
-- 🚧 阶段 D transport + transfer
-  - ✅ `core/transport/FrameReader` 帧切分（18 用例 / 678 断言）
-  - ✅ `core/transport/Connection` asio 连接（13 用例 / 152 断言）
-  - ✅ `core/transport/Heartbeat` 心跳策略（14 用例 / 766 断言）
-  - ✅ `core/session/SessionPolicy` 会话策略（23 用例 / 776 断言）
-  - ✅ `core/session/Session` 组装（36 用例 / 841 断言）
-  - ⬜ 服务端 peer 表（id → Session，让转发真正有地方投递）
-  - ⬜ 心跳 asio 定时器接线（`pollHeartbeatNow()` 已有，缺 `steady_timer`）
-  - ⬜ `core/transfer` 传输引擎
-- ⬜ 阶段 E ～ G（Qt 前端 / P2P / 发布）
+- ✅ 阶段 D transport + transfer + 三进程集成测试（**已结项**）
+  - `core/transport`（FrameReader / Connection / Heartbeat）
+  - `core/session`（SessionPolicy / PeerTable / Session）
+  - `core/transfer`（StateMachine / Merkle / Payload / WorkPool / SendWindow
+    / TransferSender / TransferReceiver / TransferPeer）
+  - `server/`（relayerd）、`cli/`（relayer-cli）
+  - `tests/e2e/run_e2e.py`：10 个三进程场景，完整跑 295 秒全过
+- ⬜ 阶段 E ～ G（Qt 前端 / P2P / 发布）—— 下一步是 E，写 `app/`
 
-测试基线（254 用例 / 4940 断言）：`common` 16/1111、`filestore` 117/1718、
-`core` 121/2111。CTest 6 项：common / filestore / core / arch / protocol_doc /
-transition_doc。
+测试基线：`ctest` 7 项全过（common / filestore / core / arch / protocol_doc /
+transition_doc / e2e_quick）。core 335 用例 / 5451 断言；e2e 10 场景。
+
+**交接文档：`docs/HANDOFF.md`** —— 阶段 D 的全部缺陷、坑与验证记录都在里面，
+比记忆详细。接手先读它。
 
 ## 定位
 
@@ -109,3 +112,13 @@ transition_doc。
 - **asio 的 `run_one()` 在"没有就绪任务但有挂起异步操作"时会阻塞**，
   不是返回 0。测试里用 `run_for(时限)`，否则会永久挂死。
 - **Windows 上连被拒端口前有 SYN 重传**，测试等待时间要 5 秒以上。
+- **链接报 `ld returned 1` 却没有任何诊断 = 目标 exe 正被占用**。测试留下的
+  `relayerd.exe` 没退出时就这样，`taskkill //F //IM relayerd.exe` 后重编即可。
+  别去怀疑编译选项。
+- **测试脚手架的反压会伪装成产品故障**：`subprocess.PIPE` 有容量上限（Windows
+  几 KB），只等其中一个进程时另一个没人读，写满就阻塞在 `write` 上、事件循环
+  停摆，症状是"传输卡在 94%"。e2e 的 `Process` 已改成输出直连文件。
+  写这类测试时：**先确认自己在读所有子进程的输出**。
+- **`--idle-timeout` 只该在传输开始后计时**。`TransferPeer::started()` 是
+  "现在沉默是否正常"的权威判据（发送方=收到 AnswerSend，接收方=open 成功），
+  不要在调用层按角色分别判——漏一边就会出现"接收端在发送端算摘要时把自己掐了"。

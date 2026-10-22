@@ -97,6 +97,16 @@ public:
     [[nodiscard]] std::uint32_t pending() const noexcept;
     [[nodiscard]] std::uint32_t needRetransmit() const noexcept;
 
+    // 累计"被取出用于重传"的块次（同一块重传两次算两次）。
+    //
+    // 用途是诊断与验收：丢包场景下它应当约等于**丢失的块数**，而不是
+    // 总块数。没有这个数字时，"每次丢一块就整份重传"这种退化只能靠
+    // 传完之后的总耗时去猜，而那在慢机器上完全不可分辨。
+    [[nodiscard]] std::uint32_t retransmitted() const noexcept
+    {
+        return retransmitted_;
+    }
+
     [[nodiscard]] ChunkState stateOf(std::uint32_t index) const noexcept;
 
     // 连续已确认前缀的长度。等于全部块数时说明收齐了。
@@ -125,6 +135,10 @@ private:
 
     std::uint32_t ackThrough_ = 0;  // 连续已确认前缀长度
     std::uint32_t acked_ = 0;       // 已确认总数（含空洞之外的）
+
+    // 累计重传块次。只增不减：release() 把块退回 kPending 也不回退它，
+    // 因为"曾经重传过"这个事实不会因为后来的归还而消失。
+    std::uint32_t retransmitted_ = 0;
 
     // 待重传的块号，按 FIFO 排。用 deque 的替代：vector + 头指针，
     // 因为窗口上限不大（4MB 窗口 / 4MB 块 = 1 块起，1MB 块 = 4 块），

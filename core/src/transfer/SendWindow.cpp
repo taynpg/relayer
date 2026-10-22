@@ -140,6 +140,7 @@ std::vector<std::uint32_t> SendWindow::takeNextBatch(std::uint32_t maxCount)
         {
             state_[idx] = ChunkState::kInflight;
             out.push_back(idx);
+            ++retransmitted_;
         }
         ++consumed;
     }

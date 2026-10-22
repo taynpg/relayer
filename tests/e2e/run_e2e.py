@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import os
 import shutil
@@ -74,55 +75,91 @@ class SkipScenario(Exception):
 
 
 class Process:
-    """一个子进程，带输出缓冲。
+    """一个子进程，输出**重定向到文件**。
 
-    为什么不直接用 subprocess.run：这些进程是**常驻**的（服务端、接收端
-    在传输结束前不退出），必须一边跑一边读它的输出。读晚了会踩管道缓冲
-    上限——进程阻塞在 write 上，整个测试挂死，而你看不到任何日志。
+    为什么不用 subprocess.PIPE：管道有容量上限（Windows 上只有几 KB），
+    写满之后子进程就**阻塞在 write 调用里**，事件循环随之停摆——不收帧、
+    不回 ACK，整条传输无声停住。而测试的常见写法是"先等发送端、再等
+    接收端"（`sender.wait_exit(600)` 之后才 `recv.wait_exit(120)`），
+    这期间接收端的输出**没有任何人读**。
+
+    这不是猜测：2026-10-22 的 transfer-200mb / transfer-1gb 就死在这里。
+    两端都停在 94%，发送端 120 秒后报 "peer idle"，而同样的参数手工
+    跑（加了 -q、没有进度输出）763 块零重传、一次通过。差别只在有没有
+    人读那个管道。
+
+    落文件之后进程想写多少写多少；读不读只影响断言的实时性。代价是
+    日志要按偏移增量读，见 pill()。
     """
 
     def __init__(self, name: str, args: list[str], log_path: Path):
         self.name = name
         self.log_path = log_path
         self._lines: list[str] = []
+        self._partial = ""
+        # 增量解码器：一次 read 可能把 UTF-8 多字节字符切成两半，
+        # 单独 decode 会得到替换字符，错误信息就成了乱码。
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._read_pos = 0
         self._file = open(log_path, "wb")
         # stdin 给 DEVNULL：任何"等用户输入"的路径都该立刻拿到 EOF，
         # 而不是把测试挂在那里。
         self.proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
+            stdout=self._file,
             stderr=subprocess.STDOUT,
             cwd=str(ROOT),
         )
         self.returncode: int | None = None
 
+    @classmethod
+    def adopt(cls, name: str, proc: subprocess.Popen, log_path: Path) -> "Process":
+        """接管一个已经启动、且 stdout 已指向 log_path 的进程。
+
+        target-busy 需要"一个抱着文件不放的 PowerShell"，它的生命周期
+        与普通被测进程一样要管理，但参数不由 Cluster 决定（不是 relayer
+        的可执行文件）。走同一条读取路径，避免两套缓冲逻辑。
+        """
+        self = cls.__new__(cls)
+        self.name = name
+        self.log_path = log_path
+        self._lines = []
+        self._partial = ""
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._read_pos = 0
+        self._file = open(log_path, "ab")
+        self.proc = proc
+        self.returncode = None
+        return self
+
     # -- 读 --------------------------------------------------------------
 
     def pill(self) -> list[str]:
-        """把管道里现有的输出全部取出来，追加到缓冲。
+        """把日志文件里**新增**的内容读出来，追加到缓冲。
 
-        不阻塞：用 select 判断有没有可读数据。Windows 上 select 不能用于
-        管道，所以退回"直接 read1"——由调用方在轮询里反复调它。
+        不阻塞、也不依赖调用方节奏：读文件不会因为"没数据"而卡住，这一点
+        与管道相反。子进程的 stderr 是无缓冲的，所以进度行几乎实时可见；
+        stdout 是块缓冲的，关键契约行（ASSIGNED_ID / STATS / 已启动）在
+        C++ 侧都显式 fflush 过。
         """
-        buf = getattr(self, "_pending", b"")
+        pos = getattr(self, "_read_pos", 0)
         try:
-            chunk = self.proc.stdout.read1(65536)  # type: ignore[union-attr]
-        except (ValueError, AttributeError):
+            with open(self.log_path, "rb") as f:
+                f.seek(pos)
+                chunk = f.read()
+                self._read_pos = f.tell()
+        except OSError:
             chunk = b""
 
         if chunk:
-            buf += chunk
-            self._file.write(chunk)
-            self._file.flush()
             # 进度条用 \r 刷新，和正文混在一行里。统一拆开，调用方就不用
             # 为"这一行有没有 \r"操心。
-            text = buf.decode("utf-8", errors="replace").replace("\r", "\n")
-            parts = text.split("\n")
+            text = self._decoder.decode(chunk).replace("\r", "\n")
+            parts = (self._partial + text).split("\n")
             # 最后一段可能只写了一半，留到下次拼。
-            buf = parts.pop().encode("utf-8")
+            self._partial = parts.pop()
             self._lines.extend(parts)
-        self._pending = buf
         return self._lines
 
     def wait_for(self, needle: str, timeout: float) -> str:
@@ -185,6 +222,8 @@ class Process:
 
     def close(self) -> None:
         self.kill()
+        # stdout 现在直连文件，没有管道可关。保留 try 是因为
+        # Process.adopt 出来的对象可能带着别人的句柄。
         try:
             if self.proc.stdout:
                 self.proc.stdout.close()
@@ -237,13 +276,12 @@ class Cluster:
 
     # -- 启动 ------------------------------------------------------------
 
-    def start_server(self, timeout: float = 15.0) -> Process:
+    def start_server(self, timeout: float = 15.0, extra: list[str] | None = None) -> Process:
         name = f"server-{self.port}"
-        p = Process(
-            name,
-            [str(self.bin_dir / f"relayerd{EXE}"), "--port", str(self.port), "--password", PASSWORD],
-            self.workdir / f"{name}.log",
-        )
+        args = [str(self.bin_dir / f"relayerd{EXE}"), "--port", str(self.port), "--password", PASSWORD]
+        if extra:
+            args += extra
+        p = Process(name, args, self.workdir / f"{name}.log")
         self.procs.append(p)
         self.server = p
         # 等"已启动"而不是盲睡：盲等短了会连不上（报错是"目标机器积极
@@ -288,6 +326,41 @@ class Cluster:
         return self.cli(name, *args)
 
     # -- 收尾 ------------------------------------------------------------
+
+    def wait_all(self, procs: list[Process], timeout: float) -> list[int]:
+        """**同时**等一批进程退出，返回与 procs 对齐的退出码列表。
+
+        同时而不是串行：串行时第一个进程的失败会被第二个的等待掩埋。
+        1GB 场景要跑几分钟，若发送端 20 秒就失败了，串行等法要白等
+        剩下几分钟才把错误报出来。
+
+        （输出已经落文件，所以这里不再有"没人读管道就阻塞"的问题；
+        但那正是把两条逻辑分开的理由——等待策略不该顺带承担"消费输出"
+        的职责，否则一旦忘了消费就表现为传输卡死，而不是测试报错。）
+        """
+        pending = list(procs)
+        codes: dict[int, int] = {}
+        deadline = time.monotonic() + timeout
+        while pending and time.monotonic() < deadline:
+            for p in list(pending):
+                p.pill()
+                rc = p.proc.poll()
+                if rc is not None:
+                    p.pill()
+                    p.returncode = rc
+                    codes[id(p)] = rc
+                    pending.remove(p)
+            if pending:
+                time.sleep(0.01)
+
+        if pending:
+            names = "、".join(p.name for p in pending)
+            detail = "\n".join(p.tail(10) for p in pending)
+            for p in pending:
+                p.kill()
+            raise E2EFailure(f"{names} 在 {timeout:.0f}s 内没有退出（已强杀）\n{detail}")
+
+        return [codes[id(p)] for p in procs]
 
     def shutdown(self) -> None:
         for p in self.procs:
@@ -340,6 +413,22 @@ def expect_eq(actual, expected, what: str) -> None:
         raise E2EFailure(f"{what}：期望 {expected!r}，实际 {actual!r}")
 
 
+def parse_stats(line: str) -> dict[str, int]:
+    """解析 `STATS k=v ...` 契约行（见 cli/src/main.cpp）。
+
+    这里刻意不用正则：格式是固定的一组 `k=v`，而正则会让"键名拼错"
+    变成一个不匹配的空字典——失败信息里就只剩"期望 2，实际 None"，
+    看不出是键名写错了还是统计真的没输出。
+    """
+    out: dict[str, int] = {}
+    for token in line.split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        out[key] = int(value)
+    return out
+
+
 def expect_no_fragment(dst: Path, name: str) -> None:
     """残片不该留下。
 
@@ -376,8 +465,11 @@ def _transfer_roundtrip(workdir: Path, bin_dir: Path, size: int, chunk: int = 26
         recv, rid = c.start_receiver(idle_timeout=120)
         sender = c.send(src, rid, extra=["--chunk-size", str(chunk), "--idle-timeout", "120"])
 
-        expect_eq(sender.wait_exit(600), 0, "发送端退出码")
-        expect_eq(recv.wait_exit(120), 0, "接收端退出码")
+        # 同时等两端。串行等会掩盖"先失败的那一端"，也会让 1GB 场景在
+        # 早就失败的情况下白等几分钟。
+        rc = c.wait_all([sender, recv], 600)
+        expect_eq(rc[0], 0, "发送端退出码")
+        expect_eq(rc[1], 0, "接收端退出码")
 
         got = c.dst / "payload.bin"
         expect(got.exists(), f"目标文件不存在：{got}")
@@ -436,7 +528,11 @@ def kill_sender(workdir: Path, bin_dir: Path) -> None:
     try:
         c.start_server()
         src = c.src / "big.bin"
-        want = make_file(src, 200_000_000)
+        # 64MB 而不是 200MB：本场景断言的是**杀进程之后盘上的状态**，不是
+        # 吞吐。残片只需"已有进展且远小于完整文件"，文件越大只是把
+        # make_file() 的逐字节生成时间（约 3s/64MB、10s/200MB）也算进
+        # 场景耗时里。早先用 200MB 时整场 36s，其中一半花在造数据上。
+        want = make_file(src, 64_000_000)
 
         # 块给大一点（1MB），确保我们能在一部分数据已经落地之后才杀。
         recv, rid = c.start_receiver(idle_timeout=8)
@@ -444,16 +540,20 @@ def kill_sender(workdir: Path, bin_dir: Path) -> None:
 
         # 等到确实有进展再杀。杀太早等于什么都没测——那时接收端连
         # .relaypart 都还没建。
+        #
+        # 阈值 4MB（原为 8MB）：只要求"明显超过一个块、且远小于完整文件"。
+        # 8MB 贴着启动爬坡期（建链 + 窗口填充 + 首批写盘），在机器有磁盘
+        # 压力的时机会被拖到 60s 之外——那不是被测逻辑的问题。
         part = c.dst / "big.bin.relaypart"
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
-            if part.exists() and part.stat().st_size > 8 << 20:
+            if part.exists() and part.stat().st_size > 4 << 20:
                 break
             if sender.proc.poll() is not None:
                 raise E2EFailure(f"发送端提前退出了（code={sender.proc.returncode}）\n{sender.tail()}")
             time.sleep(0.05)
         else:
-            raise E2EFailure(f"60s 内没等到 8MB 数据落地\n{sender.tail()}\n{recv.tail()}")
+            raise E2EFailure(f"90s 内没等到 4MB 数据落地\n{sender.tail()}\n{recv.tail()}")
 
         size_at_kill = part.stat().st_size
         sender.kill()
@@ -475,7 +575,7 @@ def kill_sender(workdir: Path, bin_dir: Path) -> None:
         got = part.stat().st_size
         # 残片长度只该增长（杀之前那一次量到的是下界），且必须远小于完整文件。
         expect(got >= size_at_kill, f"残片比杀之前还短（{got} < {size_at_kill}）")
-        expect(got < 200_000_000, f"残片竟然有完整大小 {got}，那不是残片")
+        expect(got < 64_000_000, f"残片竟然有完整大小 {got}，那不是残片")
 
         # 内容前缀必须真的对得上，否则"残片可续传"就是句空话。
         with open(part, "rb") as f:
@@ -613,6 +713,62 @@ def resume_forged(workdir: Path, bin_dir: Path) -> None:
         c.shutdown()
 
 
+@scenario("drop-chunks", "中继丢掉两个数据帧：只重传空洞，内容一致")
+def drop_chunks(workdir: Path, bin_dir: Path) -> None:
+    """链路丢包之后，SACK 应当让发送端只补那两个空洞。
+
+    §3.5.3 要求"乱序 / 丢包"场景，但真实 socket 上制造稳定可复现的丢包
+    很难——`SO_RCVBUF` 调小、`iptables`、代理都不在当前平台上可用，而且
+    丢哪一块完全不可控。所以用中继的测试参数 `--drop-data-frames` 精确
+    丢"第 3、5 个转发的数据帧"。
+
+    这条场景的价值不在"最终成功"（那只能证明没卡死），而在**重传块数
+    恰好等于丢失块数**：
+      - == 丢的块数 → SACK 位图生效，只补空洞
+      - ≈ 总块数   → 退化成整份重传。内容仍然正确，只有这个数字能看出来
+      - 0          → PULL 端没发现丢包，等最终校验才发现，即"传完才失败"
+
+    也顺带覆盖"丢包后不卡死"：丢块会让 ackThrough 停住，若重传定时器
+    失效，整个传输会停在窗口耗尽处——那正是 §3.5.3 要排除的形态。
+    """
+    dropped = (3, 5)
+    chunk = 1 << 20
+    size = 8 << 20
+    total = size // chunk
+
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server(extra=["--drop-data-frames", ",".join(str(n) for n in dropped)])
+        src = c.src / "dropped.bin"
+        want = make_file(src, size)
+
+        recv, rid = c.start_receiver(idle_timeout=60)
+        # -q：进度条会盖住 ASSIGNED_ID 那种行；--stats 让发送端在结论前
+        # 多打一行机器可读的计数，这是断言"只补了 2 块"的唯一依据。
+        sender = c.send(
+            src, rid,
+            extra=["-q", "--stats", "--chunk-size", str(chunk), "--idle-timeout", "60"],
+        )
+
+        # 重传要等 retransmitTimeout（3 秒）才触发，所以传输本身不到 1 秒、
+        # 整场却要 4 秒以上——这个时限必须比它宽。
+        expect_eq(sender.wait_exit(120), 0, "发送端退出码")
+        expect_eq(recv.wait_exit(120), 0, "接收端退出码")
+
+        got = c.dst / "dropped.bin"
+        expect(got.exists(), f"目标文件不存在：{got}")
+        expect_eq(sha256_of(got), want, "内容哈希")
+        expect_no_fragment(c.dst, "dropped.bin")
+
+        stats = parse_stats(sender.wait_for("STATS ", 5.0))
+        expect_eq(stats.get("chunksRetransmitted"), len(dropped), "重传块数（应只补空洞，不是整份重发）")
+        # 原始每个块一帧，丢了 2 块又各补一帧。总数对不上说明有块被发了
+        # 两次以上——那通常意味着 ACK 丢了解析或窗口状态回退。
+        expect_eq(stats.get("chunksSent"), total + len(dropped), "数据帧总数（原始 + 重传）")
+    finally:
+        c.shutdown()
+
+
 @scenario("target-busy", "目标被占用：明确报错，不挂死")
 def target_busy(workdir: Path, bin_dir: Path) -> None:
     """目标被别的进程独占打开时，接收端要立刻拒绝，而不是卡住。
@@ -640,6 +796,8 @@ def target_busy(workdir: Path, bin_dir: Path) -> None:
         # 用 Windows API 独占打开。subprocess 里没法直接调 Win32，改用
         # msvcrt 不行——它没有共享模式参数。所以这里借 PowerShell 的
         # FileStream 打开并持有：进程一直活着，句柄就一直占着。
+        holder_log = c.workdir / "holder.log"
+        holder_file = open(holder_log, "wb")
         holder = subprocess.Popen(
             [
                 "powershell", "-NoProfile", "-NonInteractive", "-Command",
@@ -648,16 +806,12 @@ def target_busy(workdir: Path, bin_dir: Path) -> None:
                 f"Start-Sleep -Seconds 300",
             ],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
+            stdout=holder_file,
             stderr=subprocess.STDOUT,
         )
-        held = Process.__new__(Process)
-        held.name = "holder"
-        held.log_path = c.workdir / "holder.log"
-        held._lines = []
-        held._pending = b""
-        held._file = open(held.log_path, "wb")
-        held.proc = holder
+        # 走同一条读取路径（adopt），而不是手工复制一堆私有属性：
+        # 手工复制会在 Process 内部结构变化时静默错位。
+        held = Process.adopt("holder", holder, holder_log)
         c.procs.append(held)
         held.wait_for("HELD", 20.0)
 

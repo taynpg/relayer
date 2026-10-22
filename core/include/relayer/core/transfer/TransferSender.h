@@ -143,6 +143,12 @@ public:
 
     [[nodiscard]] std::uint32_t ackedChunks() const noexcept;
 
+    // 累计取出用于重传的块次。转发 SendWindow 的同名计数。
+    //
+    // 丢包场景下它应当约等于"真正丢掉的块数"。若它约等于总块数，说明重传
+    // 退化成了全量重发——那时内容仍然正确，只有这个数字能看出来。
+    [[nodiscard]] std::uint32_t retransmittedChunks() const noexcept;
+
     // 读盘失败时记住的错误。非 Ok 时调用方应当取消整个传输。
     // 返回副本而不是引用：内部有锁，返回引用会让调用方拿到一个随时
     // 可能被 worker 改写的对象。

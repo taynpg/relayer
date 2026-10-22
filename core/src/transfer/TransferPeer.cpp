@@ -326,7 +326,12 @@ void TransferPeer::sendReadyChunks()
     if (auto re = sender_->readError(); !re.ok())
     {
         finish(TransferOutcome::kFailed, re);
+        return;
     }
+
+    // 重传计数从窗口同步一次即可：它是"取出重传的次数"，只增不减，
+    // 不依赖本层的任何状态。
+    stats_.chunksRetransmitted = sender_->retransmittedChunks();
 }
 
 void TransferPeer::checkRetransmit()
@@ -726,8 +731,7 @@ bool TransferPeer::onFrame(const Frame &frame)
     // 只在**接收方 + 未定 sessionId** 时放宽，且只对请求帧放宽：发送方
     // 侧永远是严格比较（它的 sessionId 是自己选的），而不是两条宽松规则。
     const bool sessionMismatch = frame.sessionId != sessionId_;
-    const bool canAdopt =
-        role_ == Role::kReceiver && sessionId_ == 0 && frame.type == FrameType::kFileRequestSend;
+    const bool canAdopt = role_ == Role::kReceiver && sessionId_ == 0 && frame.type == FrameType::kFileRequestSend;
 
     if (sessionMismatch && !canAdopt)
     {
@@ -842,7 +846,6 @@ void TransferPeer::pump()
         }
         sendReadyChunks();
         checkRetransmit();
-
 
         // 收尾阶段没有块在飞，重传超时管不到这里。对端不回应答（被杀、
         // 卡在算根、或者干脆不认这个 sessionId）时必须自己有个出口，

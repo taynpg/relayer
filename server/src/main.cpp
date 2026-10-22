@@ -30,20 +30,21 @@ constexpr int kExitStartup = 2;
 
 void printUsage()
 {
-    std::printf(
-        "用法: relayerd [选项]\n"
-        "\n"
-        "选项:\n"
-        "  -l, --listen <addr>    监听地址（默认 0.0.0.0）\n"
-        "  -p, --port <port>      监听端口，0 表示由系统分配（默认 9527）\n"
-        "      --id <name>        服务端在协议里的身份（默认 relayerd）\n"
-        "      --password <pw>    认证口令。不提供时必须显式 --allow-no-auth\n"
-        "      --allow-no-auth    关闭认证（危险：任何能连上的人都能接入中继）\n"
-        "      --max-peers <n>    在线对端上限（默认 1024）\n"
-        "  -h, --help             显示本帮助\n"
-        "\n"
-        "安全说明：不传 --password 时默认**拒绝启动**，而不是悄悄变成开放\n"
-        "服务端。一个忘记配口令就上线的中继等于任何人都能借它传文件。\n");
+    std::printf("用法: relayerd [选项]\n"
+                "\n"
+                "选项:\n"
+                "  -l, --listen <addr>    监听地址（默认 0.0.0.0）\n"
+                "  -p, --port <port>      监听端口，0 表示由系统分配（默认 9527）\n"
+                "      --id <name>        服务端在协议里的身份（默认 relayerd）\n"
+                "      --password <pw>    认证口令。不提供时必须显式 --allow-no-auth\n"
+                "      --allow-no-auth    关闭认证（危险：任何能连上的人都能接入中继）\n"
+                "      --max-peers <n>    在线对端上限（默认 1024）\n"
+                "      --drop-data-frames <n[,n...]>\n"
+                "                         测试专用：丢弃第 n 个转发的传输数据帧（从 1 起）\n"
+                "  -h, --help             显示本帮助\n"
+                "\n"
+                "安全说明：不传 --password 时默认**拒绝启动**，而不是悄悄变成开放\n"
+                "服务端。一个忘记配口令就上线的中继等于任何人都能借它传文件。\n");
 }
 
 struct ParseResult
@@ -154,6 +155,44 @@ ParseResult parseArgs(int argc, char **argv)
                 return r;
             }
         }
+        else if (a == "--drop-data-frames")
+        {
+            // **测试专用**。格式："3,7" → 丢掉第 3 和第 7 个转发的数据帧。
+            //
+            // 生产上永远不该出现这个参数，所以启动日志里会明确打一条
+            // warning：一个悄悄丢帧的中继比一个明显崩溃的中继更难查。
+            std::string v;
+            if (!takeValue(a, v))
+            {
+                return r;
+            }
+            std::string_view rest(v);
+            while (!rest.empty())
+            {
+                const auto comma = rest.find(',');
+                const auto piece = rest.substr(0, comma);
+                try
+                {
+                    const auto n = std::stoull(std::string(piece));
+                    if (n == 0)
+                    {
+                        std::fprintf(stderr, "错误: --drop-data-frames 的序号从 1 开始\n");
+                        return r;
+                    }
+                    r.config.dropDataFrames.push_back(n);
+                }
+                catch (const std::exception &)
+                {
+                    std::fprintf(stderr, "错误: --drop-data-frames 里有非数字项: %s\n", std::string(piece).c_str());
+                    return r;
+                }
+                if (comma == std::string_view::npos)
+                {
+                    break;
+                }
+                rest.remove_prefix(comma + 1);
+            }
+        }
         else
         {
             std::fprintf(stderr, "错误: 未知参数: %s\n", argv[i]);
@@ -212,6 +251,15 @@ int main(int argc, char **argv)
                     parsed.config.allowNoAuth ? "关闭" : "开启");
         std::fflush(stdout);
 
+        // 丢帧是测试注入的故障，必须自曝。一个悄悄丢帧的中继比一个直接
+        // 崩溃的中继难查得多——排障的人会先怀疑网络。
+        if (!parsed.config.dropDataFrames.empty())
+        {
+            std::printf("警告: 测试模式，将丢弃指定的传输数据帧（共 %zu 个序号）\n",
+                        parsed.config.dropDataFrames.size());
+            std::fflush(stdout);
+        }
+
         // 测试要能拿到真实端口：端口为 0 时打印出来，由测试解析。
         // 这不是"调试输出"，而是与本进程的契约——见 tests/e2e。
         if (parsed.config.port == 0)
@@ -221,13 +269,14 @@ int main(int argc, char **argv)
         }
 
         asio::signal_set signals(ctx, SIGINT, SIGTERM);
-        signals.async_wait([&](const std::error_code &, int sig)
-        {
-            std::printf("\n收到信号 %d，正在关闭……\n", sig);
-            std::fflush(stdout);
-            srv.stop();
-            ctx.stop();
-        });
+        signals.async_wait(
+            [&](const std::error_code &, int sig)
+            {
+                std::printf("\n收到信号 %d，正在关闭……\n", sig);
+                std::fflush(stdout);
+                srv.stop();
+                ctx.stop();
+            });
 
         ctx.run();
         return kExitOk;

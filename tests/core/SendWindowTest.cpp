@@ -247,6 +247,33 @@ TEST_CASE("retransmit does not apply to acked or pending chunks", "[transfer][wi
     REQUIRE(w.markRetransmit({2}) == 1);
 }
 
+TEST_CASE("retransmitted counts only chunks taken for retransmit", "[transfer][window]")
+{
+    // 这个计数是 e2e 的 drop-chunks 场景唯一的验收依据：丢了 2 块就该
+    // 只补 2 次。若它把新块也算进来，丢包场景看起来就像"整份重传"，
+    // 而那正是要防的退化——内容仍然对，只有这个数字能看出来。
+    SendWindow w(10, 8);
+    (void)w.takeNextBatch(8);  // 0..7 首轮发出，窗口满
+    REQUIRE(w.retransmitted() == 0);
+
+    // 标记不是重传：只是把状态改成"该重传了"。
+    REQUIRE(w.markRetransmit({2, 5}) == 2);
+    REQUIRE(w.retransmitted() == 0);
+
+    const auto batch = w.takeNextBatch(8);
+    REQUIRE(batch == std::vector<std::uint32_t>{2, 5});
+    REQUIRE(w.retransmitted() == 2);
+
+    // 重复取不会重复计数：队列已经空了。
+    (void)w.takeNextBatch(8);
+    REQUIRE(w.retransmitted() == 2);
+
+    // 同一块丢两次就计两次——语义是"取出重传的块次"，不是"重传过的块数"。
+    REQUIRE(w.markRetransmit({2}) == 1);
+    (void)w.takeNextBatch(8);
+    REQUIRE(w.retransmitted() == 3);
+}
+
 TEST_CASE("released chunks become pending again", "[transfer][window]")
 {
     // 发送失败（比如网络刚断）时归还块，让它们还能被重新取走。

@@ -37,28 +37,29 @@ constexpr int kExitTimeout = 3;
 
 void printUsage()
 {
-    std::printf(
-        "用法: relayer-cli <子命令> [选项]\n"
-        "\n"
-        "子命令:\n"
-        "  send <本地文件> --to <对端id>   把文件发给在线的对端\n"
-        "  recv --to-dir <目录>            等待别人发来文件，落到目录里\n"
-        "  list                            只连上去列出在线对端\n"
-        "\n"
-        "通用选项:\n"
-        "  -H, --host <addr>        中继地址（默认 127.0.0.1）\n"
-        "  -p, --port <port>        中继端口（默认 9527）\n"
-        "      --password <pw>      认证口令\n"
-        "      --id <name>          要求服务端分配的身份（一般不用给）\n"
-        "      --chunk-size <bytes> 分块大小（默认 4 MiB，测试时可调小）\n"
-        "      --idle-timeout <sec> 多久没有进展就判定对端失联（默认 60）\n"
-        "      --hard-timeout <sec> 整个操作的硬上限，0 表示不限（默认 0）\n"
-        "  -q, --quiet              不打印进度，只在结束时输出一行结论\n"
-        "  -h, --help               显示本帮助\n"
-        "\n"
-        "示例:\n"
-        "  relayer-cli send ./a.bin --to client-2 -H 10.0.0.5 -p 9527 --password pw\n"
-        "  relayer-cli recv --to-dir ./downloads -H 10.0.0.5 -p 9527 --password pw\n");
+    std::printf("用法: relayer-cli <子命令> [选项]\n"
+                "\n"
+                "子命令:\n"
+                "  send <本地文件> --to <对端id>   把文件发给在线的对端\n"
+                "  recv --to-dir <目录>            等待别人发来文件，落到目录里\n"
+                "  list                            只连上去列出在线对端\n"
+                "\n"
+                "通用选项:\n"
+                "  -H, --host <addr>        中继地址（默认 127.0.0.1）\n"
+                "  -p, --port <port>        中继端口（默认 9527）\n"
+                "      --password <pw>      认证口令\n"
+                "      --id <name>          要求服务端分配的身份（一般不用给）\n"
+                "      --chunk-size <bytes> 分块大小（默认 4 MiB，测试时可调小）\n"
+                "      --idle-timeout <sec> 传输开始后多久没有进展就判定对端失联（默认 60）\n"
+                "                           传输开始前不计时：recv 会一直等，除非给 --hard-timeout\n"
+                "      --hard-timeout <sec> 整个操作的硬上限，0 表示不限（默认 0）\n"
+                "  -q, --quiet              不打印进度，只在结束时输出一行结论\n"
+                "      --stats              结束时额外输出一行统计（STATS k=v ...），供脚本判断\n"
+                "  -h, --help               显示本帮助\n"
+                "\n"
+                "示例:\n"
+                "  relayer-cli send ./a.bin --to client-2 -H 10.0.0.5 -p 9527 --password pw\n"
+                "  relayer-cli recv --to-dir ./downloads -H 10.0.0.5 -p 9527 --password pw\n");
 }
 
 // 人类可读的字节数。进度行里 "1023.9 MiB / 2.0 GiB" 比裸字节好读，
@@ -95,6 +96,13 @@ struct Args
     std::string toDir;
     relayer::cli::ClientConfig config;
     bool quiet = false;
+
+    // 结束时多打一行机器可读的统计（STATS k=v ...）。
+    //
+    // 为什么不是默认输出：正常用户的结论只有"发送完成"一句，计数只会
+    // 让人以为出了问题。而集成测试需要一个**契约行**来断言"丢包只补了
+    // 空洞、没有全量重传"——那件事没有别的可观测痕迹。
+    bool stats = false;
 };
 
 struct ParseResult
@@ -267,6 +275,10 @@ ParseResult parseArgs(int argc, char **argv)
         {
             r.args.quiet = true;
         }
+        else if (a == "--stats")
+        {
+            r.args.stats = true;
+        }
         else if (a == "--to")
         {
             if (!takeValue(a, r.args.to))
@@ -341,9 +353,8 @@ int main(int argc, char **argv)
             {
                 return;
             }
-            const double pct = p.bytesTotal > 0
-                                   ? 100.0 * static_cast<double>(p.bytesDone) / static_cast<double>(p.bytesTotal)
-                                   : 0.0;
+            const double pct =
+                p.bytesTotal > 0 ? 100.0 * static_cast<double>(p.bytesDone) / static_cast<double>(p.bytesTotal) : 0.0;
             std::fprintf(stderr, "\r%5.1f%%  %s / %s  %s   ", pct, humanBytes(p.bytesDone).c_str(),
                          humanBytes(p.bytesTotal).c_str(), humanSpeed(p.bytesPerSecond).c_str());
             std::fflush(stderr);
@@ -391,6 +402,20 @@ int main(int argc, char **argv)
     if (progressDirty)
     {
         std::fprintf(stderr, "\n");
+    }
+
+    // 统计行在结论之前打：脚本通常按"先拿到 STATS，再判断退出码"的顺序
+    // 处理，而结论那行在失败时走 stderr。同一路输出（stdout）便于抓。
+    if (a.stats)
+    {
+        const auto &s = outcome.stats;
+        std::printf("STATS chunksSent=%llu chunksReceived=%llu chunksRetransmitted=%llu "
+                    "duplicateChunks=%llu acksSent=%llu acksReceived=%llu\n",
+                    static_cast<unsigned long long>(s.chunksSent), static_cast<unsigned long long>(s.chunksReceived),
+                    static_cast<unsigned long long>(s.chunksRetransmitted),
+                    static_cast<unsigned long long>(s.duplicateChunks), static_cast<unsigned long long>(s.acksSent),
+                    static_cast<unsigned long long>(s.acksReceived));
+        std::fflush(stdout);
     }
 
     if (outcome.ok)

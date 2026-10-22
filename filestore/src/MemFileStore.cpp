@@ -312,7 +312,9 @@ public:
 
         // resize 影响整个文件长度，所以它天然让整个文件变脏。
         buffer_.resize(target, '\0');
-        resizedTo_ = size;
+        // resizedTo_ 是 int64（与 tell() 的返回类型一致，用 -1 表示"未 resize"）。
+        // size 超过 int64 上限在这里不可能：上一行 buffer_.resize 早已 OOM。
+        resizedTo_ = static_cast<std::int64_t>(size);
 
         // 截短之后 pos_ 可能落在末尾之外。夹回末尾：停在越界位置继续写
         // 会补零，那对调用方来说更难理解。

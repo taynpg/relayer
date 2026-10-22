@@ -33,6 +33,21 @@
 namespace relayer::cli
 {
 
+// 传输层的诊断计数，只挑验收用得着的那几个。
+//
+// 刻意**不**直接暴露 core::transfer::TransferPeer::Stats：那会把
+// TransferPeer.h（连带 SendWindow / TransferPayload）拖进这个头文件，
+// 而 CLI 的上层只需要几个整数。转换在 Client.cpp 里一次做完。
+struct TransferStats
+{
+    std::uint64_t chunksSent = 0;
+    std::uint64_t chunksReceived = 0;
+    std::uint64_t chunksRetransmitted = 0;  // 丢包后补空洞的次数（不是块总数）
+    std::uint64_t duplicateChunks = 0;
+    std::uint64_t acksSent = 0;
+    std::uint64_t acksReceived = 0;
+};
+
 // 一次操作的最终结论。
 //
 // 不直接用 Status 是有原因的：Status 只有"成功/失败 + 原因"，而这里的
@@ -46,6 +61,8 @@ struct Outcome
     std::string summary;
     // 出错时的技术细节（路径、系统错误）。可能为空。
     Status status;
+    // 传输层的计数。list 这类没有传输的操作全为 0。
+    TransferStats stats;
 };
 
 // 进度回调。bytesPerSecond 由 Client 自己算——传原始计数让每个调用方
@@ -86,6 +103,10 @@ struct ClientConfig
     //
     // 语义是**空闲超时**（多久没有任何进展），不是总时长：1GB 在慢盘上
     // 可能跑很久，用总时长会误杀正常传输。
+    //
+    // **只在传输开始后生效**（TransferPeer::started()）。传输开始前的沉默
+    // 是正常的：发送方在算摘要，接收方在等第一个请求帧。想让 recv 等待
+    // 多久就放弃，用 hardTimeout——那是"总共多久"，语义不同。
     std::chrono::seconds idleTimeout{60};
 
     // 整个操作的硬上限。0 表示不限。
@@ -100,9 +121,9 @@ struct ClientConfig
 // 两者共享 90% 的骨架（连、等、收尾），拆开就是复制粘贴。
 enum class Action
 {
-    kSend,    // 把本地文件推给对端
-    kReceive, // 把收到的文件落到本地
-    kList,    // 只连上去打印在线列表，然后退出
+    kSend,     // 把本地文件推给对端
+    kReceive,  // 把收到的文件落到本地
+    kList,     // 只连上去打印在线列表，然后退出
 };
 
 class Client

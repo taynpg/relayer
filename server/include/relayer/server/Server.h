@@ -53,6 +53,18 @@ struct ServerConfig
     std::size_t maxPeers = session::PeerTable::kDefaultCapacity;
 
     std::chrono::seconds handshakeTimeout{30};
+
+    // **测试专用**：按"第几个转发的传输数据帧"丢弃，序号从 1 开始。
+    // 空表示一个都不丢（生产默认）。
+    //
+    // 只作用于 kChunkRequestData。丢控制帧（握手、请求、收尾）测的是
+    // 另一类问题——"请求被吞"与"块丢失"的失败表现都是超时，混在一起
+    // 会让失败原因无法归因。
+    //
+    // 为什么在服务端注入而不是在 socket 层制造真实丢包：真实丢包不可
+    // 复现，测试只能断言"最终成功"，而无法断言"只补了丢失的那几块"。
+    // 精确丢第 3、7 块，才能同时验证 SACK 位图与"不是全量重传"。
+    std::vector<std::uint64_t> dropDataFrames;
 };
 
 // 一次服务端的运行统计。给日志与测试用。
@@ -65,6 +77,10 @@ struct ServerStats
     std::uint64_t forwardFailed = 0;  // 目标在线但投递失败（对端写队列满、连接已关闭）
     std::uint64_t unroutable = 0;     // 目标不在线
     std::uint64_t localFrames = 0;
+
+    // 测试注入丢掉的数据帧数。生产环境恒为 0；非 0 就说明这个服务端
+    // 不是按生产配置跑起来的——日志里必须能看出来。
+    std::uint64_t droppedForTest = 0;
 };
 
 class Server
@@ -127,6 +143,10 @@ private:
 
     session::PeerTable peers_;
     std::uint64_t nextIdHint_ = 1;
+
+    // 已转发的传输数据帧序号（从 1 开始），配合 config_.dropDataFrames
+    // 决定"这一帧丢不丢"。与 nextIdHint_ 一样只在单线程上访问。
+    std::uint64_t dataFrameSeq_ = 0;
 
     // id -> 会话。与 peers_ 分开维护：PeerTable 只存公开信息（可被 UI 与
     // 日志安全读取），路由要的 Session 指针留在这里。合成一张表会让

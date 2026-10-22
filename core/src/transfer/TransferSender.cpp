@@ -494,6 +494,11 @@ std::uint32_t TransferSender::ackedChunks() const noexcept
     return window_ ? window_->acked() : 0;
 }
 
+std::uint32_t TransferSender::retransmittedChunks() const noexcept
+{
+    return window_ ? window_->retransmitted() : 0;
+}
+
 Status TransferSender::readError() const
 {
     std::lock_guard<std::mutex> lock(mu_);

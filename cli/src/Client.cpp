@@ -77,7 +77,7 @@ struct Client::Impl
     std::shared_ptr<core::transfer::TransferPeer> peer;
 
     asio::steady_timer pumpTimer;
-    asio::steady_timer watchdog;      // 空闲 / 总时长
+    asio::steady_timer watchdog;  // 空闲 / 总时长
     asio::steady_timer progressTimer;
 
     Action action = Action::kList;
@@ -138,6 +138,18 @@ struct Client::Impl
             o.ok = ok;
             o.summary = std::move(summary);
             o.status = std::move(status);
+            if (peer)
+            {
+                // 只在这里读一次：finish 之后 peer 会被上层释放，之后再取
+                // 就是悬空访问。
+                const auto s = peer->stats();
+                o.stats.chunksSent = s.chunksSent;
+                o.stats.chunksReceived = s.chunksReceived;
+                o.stats.chunksRetransmitted = s.chunksRetransmitted;
+                o.stats.duplicateChunks = s.duplicateChunks;
+                o.stats.acksSent = s.acksSent;
+                o.stats.acksReceived = s.acksReceived;
+            }
             onDone(o);
         }
     }
@@ -240,11 +252,22 @@ struct Client::Impl
 
             // 传输还没开始（发送方等摘要，或接收方等请求帧）时不算空闲。
             //
-            // 发送方的摘要阶段没有上限可用：1GB 文件在慢盘上可能要几十秒，
-            // 而这段时间它对网络是完全沉默的。用 idleTimeout 卡它等于
-            // "文件越大越容易失败"，而那与用户感知的"网速慢"毫无关系。
-            // 真正的兜底是 hardTimeout（如果调用方给了）——那是另一个语义。
-            if (action == Action::kSend && !peer->started())
+            // 两边的沉默都是**正常**的：
+            //   - 发送方的摘要阶段没有上限可用：1GB 文件在慢盘上可能要几十秒，
+            //     而这段时间它对网络是完全沉默的。用 idleTimeout 卡它等于
+            //     "文件越大越容易失败"，而那与用户感知的"网速慢"毫无关系。
+            //   - 接收方在第一个 kFileRequestSend 到达之前只是挂着等别人发，
+            //     这段时间长不代表对端失联——对端可能还没点"发送"。
+            //
+            // 所以判据交给传输层：started() 就是"现在沉默是否正常"的答案
+            // （见 TransferPeer.h 的注释）。**不要按角色分别判**——早先只写了
+            // kSend，结果接收方用 `--idle-timeout 8` 时，发送端还在算摘要、
+            // 请求帧还没发出，接收端就把自己掐了；发送方随后拿到的是
+            // "peer did not answer"，排查方向完全错（看着像中继丢包）。
+            //
+            // 真正的兜底是 hardTimeout（如果调用方给了）——那是另一个语义：
+            // 不管有没有进展，总共只许花这么久。
+            if (!peer->started())
             {
                 lastActivity = std::chrono::steady_clock::now();
                 return;
@@ -260,10 +283,10 @@ struct Client::Impl
         // 注意措辞：这里的结论是"对端没动静"，不是"传输失败"。对端进程
         // 被 kill 之后，本地能观察到的**唯一**事实就是没有进展——把这点
         // 说清楚，测试失败时人才不会往错的方向查。
-        finish(false, "对端长时间无响应（" + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
-                                                          config.idleTimeout)
-                                                              .count()) +
-                          " 秒无进展）",
+        finish(false,
+               "对端长时间无响应（" +
+                   std::to_string(std::chrono::duration_cast<std::chrono::seconds>(config.idleTimeout).count()) +
+                   " 秒无进展）",
                Status::Fail(ErrorCode::kTimeout, "peer idle"));
     }
 
@@ -472,9 +495,9 @@ struct Client::Impl
         // sessionId 由发送方选。这里用时间戳而不是随机数：多进程测试里
         // 两边都从同一个种子起算，撞车的概率与"进程启动在同一毫秒"相当，
         // 而时间戳在日志里能直接看出"哪一次"。
-        const auto sid = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::steady_clock::now().time_since_epoch())
-                             .count();
+        const auto sid =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+                .count();
 
         peer = core::transfer::TransferPeer::createSender(
             ctx, session, store, pool, peerPathSource, peerPathRemoteName, toPeerId, sid, std::move(cfg),
@@ -501,9 +524,9 @@ struct Client::Impl
         // 但当前实现里 onFrame 会按 sessionId 过滤（!= sessionId_ 就丢），
         // 所以接收方的 sessionId 必须与发送方一致。命令行工具没法协商，
         // 于是接收方采用 **0 表示通配**——见下面对 dispatch 的处理。
-        peer = core::transfer::TransferPeer::createReceiver(
-            ctx, session, store, pool, targetPath, 0, std::move(cfg),
-            [this](const core::transfer::TransferResult &r) { onTransferDone(r); });
+        peer = core::transfer::TransferPeer::createReceiver(ctx, session, store, pool, targetPath, 0, std::move(cfg),
+                                                            [this](const core::transfer::TransferResult &r)
+                                                            { onTransferDone(r); });
 
         touch();
     }

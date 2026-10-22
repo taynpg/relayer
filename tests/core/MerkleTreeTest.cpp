@@ -227,8 +227,17 @@ TEST_CASE("odd node is promoted, not duplicated", "[transfer][merkle]")
         leafHash(b.data(), b.size(), 1024),
         leafHash(c.data(), c.size(), 1024),
     };
-    auto four = three;
-    four.push_back(three[2]);  // 复制最后一个
+    // 一次列出四个元素，而不是 `auto four = three; four.push_back(three[2])`。
+    // 后者在 GCC 16 + `-O3 -Werror` 下会触发 `-Warray-bounds` 误报：编译器
+    // 把"拷贝构造一个 3 元素 vector 再 push_back"内联成了对定长数组的越界
+    // 访问（`array subscript 3 is outside array bounds of ... [3]`）。写法
+    // 换掉之后告警消失，语义完全一样。
+    std::vector<Digest> four{
+        three[0],
+        three[1],
+        three[2],
+        three[2],  // 复制最后一个
+    };
 
     const auto r3 = computeRoot(three);
     const auto r4 = computeRoot(four);

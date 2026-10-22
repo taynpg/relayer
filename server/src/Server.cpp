@@ -154,8 +154,8 @@ void Server::doAccept()
 
             std::error_code e2;
             const auto ep = socket.remote_endpoint(e2);
-            const std::string addrText = e2 ? std::string{}
-                                            : ep.address().to_string() + ":" + std::to_string(ep.port());
+            const std::string addrText =
+                e2 ? std::string{} : ep.address().to_string() + ":" + std::to_string(ep.port());
 
             session::SessionHandler h;
 
@@ -216,49 +216,64 @@ void Server::onFrame(session::Session &self, const Frame &frame)
 
     const auto plan = planRoute(session::Role::kServer, true, rc, self.assignedId(), frame);
 
-
     switch (plan.action)
     {
-        case RouteAction::kAcceptLocal:
-            handleLocal(self, frame);
-            return;
+    case RouteAction::kAcceptLocal:
+        handleLocal(self, frame);
+        return;
 
-        case RouteAction::kForward:
+    case RouteAction::kForward:
+    {
+        // 测试注入的丢包：在中继这一跳丢掉，等价于"目标端没收到"。
+        //
+        // 放在查目标之前，是因为它模拟的是链路问题，与目标是否在线无关。
+        // 计数在**所有**数据帧上递增（含被丢的和没丢的），这样测试给
+        // 的序号就是"全局第几个数据帧"，不会因为前面的帧被丢而错位。
+        if (frame.type == FrameType::kChunkRequestData && !config_.dropDataFrames.empty())
         {
-            const auto it = sessions_.find(plan.to);
-            if (it == sessions_.end())
+            ++dataFrameSeq_;
+            if (std::find(config_.dropDataFrames.begin(), config_.dropDataFrames.end(), dataFrameSeq_) !=
+                config_.dropDataFrames.end())
             {
-                // 目标不在线。不回错误帧——协议里没有"投递失败"这一类
-                // （§9 的传输帧靠超时自己发现）。记一次计数，让运维能看出
-                // "有人在找不存在的对端"。
-                ++stats_.unroutable;
+                ++stats_.droppedForTest;
                 return;
             }
+        }
 
-            // 转发**必须**走 forward()：它会做身份绑定。直接 send() 会让
-            // 服务端发出的帧带着对端自称的 from，那正是 §11.4 要防的。
-            //
-            // 返回值必须检查。早先这里是 (void) 丢弃的，代价是一次真实事故：
-            // 对端的写队列满时 forward() 会返回 kNoSpace **并关闭那条连接**，
-            // 而服务端继续按"转发成功"计数。于是中继侧统计一切正常、发送方
-            // 却永远等不到确认，排查方向被引向网络丢包。
-            //
-            // 现在只计数不改行为：中继没有"投递失败"这类帧可回（§9 靠超时
-            // 自己发现），但至少运维能从 forwardFailed 看出问题在对端而不是
-            // 在自己。
-            if (!it->second->forward(frame, self.assignedId()).ok())
-            {
-                ++stats_.forwardFailed;
-                return;
-            }
-            ++stats_.forwarded;
+        const auto it = sessions_.find(plan.to);
+        if (it == sessions_.end())
+        {
+            // 目标不在线。不回错误帧——协议里没有"投递失败"这一类
+            // （§9 的传输帧靠超时自己发现）。记一次计数，让运维能看出
+            // "有人在找不存在的对端"。
+            ++stats_.unroutable;
             return;
         }
 
-        case RouteAction::kReject:
-        default:
-            ++stats_.unroutable;
+        // 转发**必须**走 forward()：它会做身份绑定。直接 send() 会让
+        // 服务端发出的帧带着对端自称的 from，那正是 §11.4 要防的。
+        //
+        // 返回值必须检查。早先这里是 (void) 丢弃的，代价是一次真实事故：
+        // 对端的写队列满时 forward() 会返回 kNoSpace **并关闭那条连接**，
+        // 而服务端继续按"转发成功"计数。于是中继侧统计一切正常、发送方
+        // 却永远等不到确认，排查方向被引向网络丢包。
+        //
+        // 现在只计数不改行为：中继没有"投递失败"这类帧可回（§9 靠超时
+        // 自己发现），但至少运维能从 forwardFailed 看出问题在对端而不是
+        // 在自己。
+        if (!it->second->forward(frame, self.assignedId()).ok())
+        {
+            ++stats_.forwardFailed;
             return;
+        }
+        ++stats_.forwarded;
+        return;
+    }
+
+    case RouteAction::kReject:
+    default:
+        ++stats_.unroutable;
+        return;
     }
 }
 
@@ -302,8 +317,7 @@ void Server::onClosed(std::string id, Status status)
         // 结束的留下没有意义。注意 onClosed 是**投递**执行的，此刻调用
         // 发生在事件循环上，会话状态已稳定，读 finished() 是安全的。
         pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
-                                      [](const std::shared_ptr<session::Session> &p)
-                                      { return !p || p->finished(); }),
+                                      [](const std::shared_ptr<session::Session> &p) { return !p || p->finished(); }),
                        pending_.end());
         return;
     }
