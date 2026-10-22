@@ -14,12 +14,19 @@
 
 add_library(relayer_core STATIC
     src/protocol/Frame.cpp
+    src/auth/Handshake.cpp
+    src/auth/HandshakeClient.cpp
+    src/auth/HandshakeServer.cpp
+    src/auth/Random.cpp
 )
 
 target_include_directories(relayer_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # relayer_filestore 是 PUBLIC：core 的后续模块会用到 IFileStore 接口，
 # 而它由 filestore 提供。relayer_common 由 filestore 传递过来（PUBLIC）。
+#
+# relayer_platform 是 PRIVATE 但必须显式列出：Random.cpp 用到 BCryptGenRandom
+# （Windows）和 getrandom（Linux），这些系统库通过它链接。
 target_link_libraries(relayer_core PUBLIC relayer_filestore PRIVATE relayer_platform)
 
 relayer_set_warnings(relayer_core)

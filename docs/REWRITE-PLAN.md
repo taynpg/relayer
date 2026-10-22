@@ -418,12 +418,46 @@ client                                 server
 - 未认证连接发来的业务帧一律丢弃并断开。
 - 禁用认证时（`authEnabled=false`）行为等价 v1，仅限内网自用，README 里写明风险。
 
-**状态：未开始**。协议细节（`tag` 取值、`status` 码表、两个 proof 的 nonce 顺序为何
-相反、nonce 重放防护策略）已在 `PROTOCOL.md` §7 写定，实现时按文档来。
+**状态：已完成**（`core/include/relayer/core/auth/Handshake.h`）。
+协议细节（`tag` 取值、`status` 码表、两个 proof 的 nonce 顺序为何相反、nonce 重放防护策略）
+原先在 `PROTOCOL.md` §7 写定，实现按文档来；实现过程中发现文档把 `tag` 长度误写为
+24 字节（实际 15），已一并修正。
+
+实现要点：
+
+- `ClientHandshake` / `ServerHandshake` 是两个纯逻辑状态机，"吃一帧吐一帧"，不含 I/O。
+  谁读 socket、超时怎么算、超时后谁断开都在 transport 层。
+- 相位用显式枚举（`ClientPhase` / `ServerPhase`），非法顺序一律进 `kFailed` 终态，
+  不存在"失败之后靠某些字节恢复"的路径。
+- 降级只有一条路：服务端构造时 `ServerConfig::allowNoAuth = true`。**没有**任何
+  "因为握手失败所以跳过"的分支；客户端要求认证时收到业务帧直接判失败。
+- 服务端"要认证却口令为空"在启动阶段就失败，不静默变成开放服务器。
+- 重放检查放在 PBKDF2 之前：让重放请求先过一道便宜的过滤，避免被刷爆 CPU。
+- 服务端额外拒绝 `nonceC == nonceS`：两者相同时两个 proof 的输入就一样了，
+  §7.4 的对称性被打破。
+- `bindSenderIdentity()` 把"转发前覆写 from"变成一个有名字的函数，而不是依赖
+  调用方记得写 `f.from = id`——这是本协议里少数几个"漏写就是安全漏洞"的点。
+
+随机源：`core/src/auth/Random.cpp`，Windows 走 `BCryptGenRandom`，Linux 走
+`getrandom(2)`（失败退 `/dev/urandom`），macOS 走 `arc4random_buf`。**不用**
+`std::random_device`：标准把质量留给实现，某些 MinGW 版本它是 mt19937 加固定种子。
+
+交叉验证：除单元测试外，用 Python `hashlib.pbkdf2_hmac` / `hmac` 独立算出 4 组
+输入（含空口令、中文口令）的 `key` / `clientProof` / `serverProof`，与本实现逐字节
+比对，12 项全部一致。这一步是为了排除"测试和实现共享同一个错误"。
+
+测试：`tests/core/AuthTest.cpp`，39 用例 / 291 断言，覆盖正确口令双向通过、
+错口令判 `kBadProof`、假服务器（伪造 proof 与抄回客户端 proof 两种）被识破、
+nonce 重放被拒、两个 proof 恒不相等、乱序帧被拒、失败终态不可恢复、
+`allowNoAuth` 降级、未认证业务帧被拒、认证帧过一遍 Pack/UnPack、CSPRNG 可用性。
 
 #### 3.3.3 身份绑定
 
 **服务器转发时强制覆写 `frame->from` 为认证身份**。这是 v1「from 可伪造」的根治手段。
+
+**状态：已完成**（`bindSenderIdentity()`）。做成独立函数而不是靠调用方记得写
+`f.from = id`：这条规则漏掉一处，就允许任何已认证客户端伪装成任意其他客户端
+给对方发文件。真正在转发路径上调用它属于 transport 层（3.4），届时接入。
 
 ---
 

@@ -77,7 +77,9 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(relayer_platform INTERFACE)
 if(WIN32)
-    target_link_libraries(relayer_platform INTERFACE ws2_32 mswsock)
+    # bcrypt 提供 BCryptGenRandom（CSPRNG）。认证握手生成 salt / nonce 用它，
+    # 不能用 rand()：可预测的 nonce 会让重放防护完全失效，而握手看起来是成功的。
+    target_link_libraries(relayer_platform INTERFACE ws2_32 mswsock bcrypt)
     target_compile_definitions(relayer_platform INTERFACE
         _WIN32_WINNT=0x0A00        # Windows 10+：需要 UTF-8 代码页 API
         WIN32_LEAN_AND_MEAN

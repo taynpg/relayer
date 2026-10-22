@@ -29,6 +29,7 @@ add_test(NAME filestore COMMAND filestore_test)
 
 add_executable(core_test
     core/FrameTest.cpp
+    core/AuthTest.cpp
 )
 target_link_libraries(core_test PRIVATE relayer_core Catch2::Catch2WithMain)
 target_include_directories(core_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

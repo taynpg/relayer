@@ -363,7 +363,7 @@ client                                          server
 ### 7.3 域分隔 `tag`
 
 ```
-tag = "relayer/auth/v2"        // 24 字节
+tag = "relayer/auth/v2"        // 15 字节（ASCII，无 NUL 结尾）
 ```
 
 作用是把这次 HMAC 与"任何其他用到同一密钥的 HMAC"区分开。没有它的话，
