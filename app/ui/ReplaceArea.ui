@@ -37,9 +37,16 @@
          </widget>
         </item>
         <item>
-         <widget class="QCheckBox" name="cBoxRemote">
+         <widget class="QCheckBox" name="cBoxPeer">
           <property name="text">
-           <string>远端目录</string>
+           <string>对端</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="cBoxRel">
+          <property name="text">
+           <string>相对目录</string>
           </property>
          </widget>
         </item>

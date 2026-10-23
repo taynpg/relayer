@@ -11,6 +11,7 @@
 #include <QJsonObject>
 #include <QMenu>
 #include <QMessageBox>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QUrl>
@@ -18,6 +19,7 @@
 #include <functional>
 
 #include "Base/MenuIcons.h"
+#include "ReplaceArea.h"
 #include "ui_ComparisonControl.h"
 
 using relayer::app::RelayTaskItem;
@@ -704,32 +706,92 @@ void ComparisonControl::onReplace()
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("查找内容不能为空"));
         return;
     }
-    const auto choice = QMessageBox::question(
-        this, QStringLiteral("确认"), QStringLiteral("将所有行的可编辑列中的「%1」替换为「%2」？").arg(from, to),
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if (choice != QMessageBox::Yes)
+
+    // 作用域对话框（v1 同名对话框）：选列、大小写、普通/正则。取消即不动。
+    ReplaceArea dlg(this);
+    dlg.exec();
+    const ReplaceScope scope = dlg.result();
+    if (!scope.apply)
     {
         return;
     }
 
-    // 简化说明：v1 的 ReplaceArea 可选作用列/大小写/正则；v2 目前作用于
-    // 全部可编辑文本列、区分大小写的普通替换。作用域选择等有真实需求再补。
+    const auto cs = scope.caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
+
+    // 正则模式先验证：坏的 pattern 提前报错，别替换到一半炸。
+    QRegularExpression re;
+    if (scope.useRegex)
+    {
+        re.setPattern(from);
+        if (!re.isValid())
+        {
+            QMessageBox::warning(this, QStringLiteral("提示"),
+                                 QStringLiteral("正则表达式不合法：%1").arg(re.errorString()));
+            return;
+        }
+    }
+
+    // 非正则时的命中计数：QString::replace 不返回替换次数，自己数
+    // （重复字符串里逐段推进，大小写敏感性要与替换一致）。
+    auto countOccurrences = [cs](const QString &text, const QString &needle)
+    {
+        int hits = 0;
+        for (qsizetype pos = text.indexOf(needle, 0, cs); pos >= 0; pos = text.indexOf(needle, pos + needle.size(), cs))
+        {
+            ++hits;
+        }
+        return hits;
+    };
+
+    auto replaceIn = [&](QString &text)
+    {
+        if (text.isEmpty())
+        {
+            return 0;
+        }
+        if (scope.useRegex)
+        {
+            int hits = 0;
+            auto it = re.globalMatch(text);
+            while (it.hasNext())
+            {
+                it.next();
+                ++hits;
+            }
+            if (hits > 0)
+            {
+                text.replace(re, to);
+            }
+            return hits;
+        }
+        if (!text.contains(from, cs))
+        {
+            return 0;
+        }
+        const int hits = countOccurrences(text, from);
+        text.replace(from, to, cs);
+        return hits;
+    };
+
     int hits = 0;
     for (auto &r : rows_)
     {
-        QString *fields[] = {&r.name, &r.localDir, &r.peer, &r.relDir};
-        for (auto *f : fields)
+        if (scope.name)
         {
-            if (f->contains(from))
-            {
-                hits += static_cast<int>(f->count(from));
-                *f = f->replace(from, to);
-            }
+            hits += replaceIn(r.name);
         }
-    }
-    for (auto &r : rows_)
-    {
-        r.type = r.mark == QStringLiteral("Dir") ? QStringLiteral("Dir") : QStringLiteral("File");
+        if (scope.localDir)
+        {
+            hits += replaceIn(r.localDir);
+        }
+        if (scope.peer)
+        {
+            hits += replaceIn(r.peer);
+        }
+        if (scope.relDir)
+        {
+            hits += replaceIn(r.relDir);
+        }
     }
     rebuildView();
     emit logMessage(QStringLiteral("[替换] 共替换 %1 处").arg(hits));
