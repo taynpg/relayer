@@ -1,7 +1,9 @@
 #pragma once
 
 #include <QDialog>
+#include <QHash>
 #include <QList>
+#include <QSet>
 
 #include "bridge/CoreService.h"
 #include "model/ProgressTracker.h"
@@ -69,11 +71,12 @@ signals:
 
 private slots:
     // 单个文件的发送结论（CoreService::sendFinished）。批次逐行推进靠它。
-    void onSendFinished(bool ok, const QString &summary, const QString &detail);
+    // 并发发送里某一项的结论。taskId = 行号 + 1（0 保留给单文件发送）。
+    void onSendTaskFinished(qint64 taskId, bool ok, const QString &summary, const QString &detail);
     // 会话级结论（CoreService::operationFinished）：中继断开/认证失败等，
     // 当前项不会再有 sendFinished，批次就此中止。
     void onSessionEnded(bool ok, const QString &summary, const QString &detail);
-    void onProgress(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond);
+    void onSendTaskProgress(qint64 taskId, quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond);
     void onRetryFailed();
     void onStopClicked();
     void onClearClicked();
@@ -102,7 +105,8 @@ public:
     };
 
     void buildLayout();
-    void startNext();
+    // 把并发窗口补满：从 rows_ 里找还没开始的行，启动直到 active_ 达到上限。
+    void fillWindow();
     void finishBatch(bool allOk);
     void rebuildTable();
     void setStatus(int row, Status st);
@@ -120,12 +124,20 @@ public:
     relayer::app::ConnInfo conn_;
 
     QList<Row> rows_;
-    int current_ = -1;
+
+    // 同时进行的行（0 基行号）。阶段 F 的多任务并行：对照表里发往 B/C/D
+    // 的行同时在跑，而不是排成一队。
+    //
+    // 上限 kConcurrency 是有意的：每多一路就多一条连接、多一份握手，
+    // 而总吞吐由网络决定，开太多只会让每条流都变慢、进度条一起爬。
+    QSet<int> active_;
+
+    // 每行独立的进度跟踪。**不能共用一个**——并发时 B 的速度会画到 C 的
+    // 那一行上，用户看到的是"两个任务速度一样"的假象。
+    QHash<int, relayer::app::ProgressTracker> trackers_;
+
     bool running_ = false;
     bool stopping_ = false;
-
-    // 当前行（current_）的进度/速度跟踪。startNext 里随行切换 reset。
-    relayer::app::ProgressTracker progressTracker_;
 };
 
 }  // namespace relayer::app

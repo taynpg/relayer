@@ -281,6 +281,63 @@ bool CoreService::sendFile(const QString &localPath, const QString &remoteName, 
         });
 }
 
+bool CoreService::sendFileTask(qint64 taskId, const QString &localPath, const QString &remoteName,
+                               const QString &toPeerId, const ConnInfo &conn)
+{
+    if (taskId <= 0 || localPath.isEmpty() || toPeerId.isEmpty())
+    {
+        return false;
+    }
+
+    // makeConfig 在 GUI 线程求值：它读 QSettings，而那不该在 io 线程碰。
+    auto cfg = makeConfig(conn);
+    // **不声明 id**。并发时每一路都是一条新连接，若都声明同一个 requestedId，
+    // 第二条起就会被服务端按"已被占用"拒掉。这些连接是即用即弃的，界面也不
+    // 显示它们的 id（onIdAssigned 置空），与"一次操作一条连接"时期一致。
+    cfg.requestedId.clear();
+    cfg.onIdAssigned = nullptr;
+
+    runOnIo(
+        [this, taskId, path = fromQt(localPath), name = fromQt(remoteName), peer = fromQt(toPeerId),
+         cfg = std::move(cfg)]() mutable
+        {
+            auto client = std::make_shared<cli::Client>(
+                ctx_, std::move(cfg), [this, taskId](const cli::ProgressReport &p)
+                { emit sendTaskProgress(taskId, p.bytesDone, p.bytesTotal, p.bytesPerSecond); },
+                [this, taskId](const cli::Outcome &o)
+                {
+                    emit sendTaskFinished(taskId, o.ok, toQt(o.summary), toQt(o.status.message));
+
+                    auto it = sendJobs_.find(taskId);
+                    if (it == sendJobs_.end())
+                    {
+                        return;
+                    }
+                    // 不能在 Client 自己的回调栈上销毁它（use-after-free 老坑），
+                    // 先摘出来交给下一轮事件循环释放——与 TransferPeer 的处理同理。
+                    auto keep = it->second.client;
+                    sendJobs_.erase(it);
+                    asio::post(ctx_, [keep]() { (void)keep; });
+                });
+            sendJobs_[taskId] = SendJob{taskId, client};
+            client->sendFile(path, name, peer);
+        });
+    return true;
+}
+
+void CoreService::cancelSendTask(qint64 taskId)
+{
+    runOnIo(
+        [this, taskId]
+        {
+            const auto it = sendJobs_.find(taskId);
+            if (it != sendJobs_.end() && it->second.client)
+            {
+                it->second.client->cancelSend();
+            }
+        });
+}
+
 void CoreService::finishSendOperation(const cli::Outcome &o)
 {
     // 一次性连接的发送：这次结论同时也是操作结论（busy 要翻），但只发

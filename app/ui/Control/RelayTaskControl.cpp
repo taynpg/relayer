@@ -18,6 +18,13 @@ namespace relayer::app
 namespace
 {
 
+// 同时进行的最大路数。
+//
+// 不是越大越好：每多一路就多一条连接和一次握手，而总吞吐由网络决定。
+// 3 是"能重叠 RTT"与"别让每条流都变慢"之间的折中，也是对照表里常见的
+// A/B/C 三目标场景的路数。
+constexpr int kConcurrency = 3;
+
 // 状态的显示文本与颜色集中在这里：新增状态只改这一处。
 struct StatusStyle
 {
@@ -118,9 +125,12 @@ void RelayTaskControl::buildLayout()
 void RelayTaskControl::attachCoreService(relayer::app::CoreService *core)
 {
     core_ = core;
-    connect(core_, &CoreService::sendFinished, this, &RelayTaskControl::onSendFinished);
+    // 批量发送走**并发**那条信号（带 taskId），不再用单文件发送的
+    // sendFinished/progressChanged：并发时"这次进度是谁的"必须能区分，
+    // 否则 B 的进度会画到 C 那一行上。
+    connect(core_, &CoreService::sendTaskFinished, this, &RelayTaskControl::onSendTaskFinished);
+    connect(core_, &CoreService::sendTaskProgress, this, &RelayTaskControl::onSendTaskProgress);
     connect(core_, &CoreService::operationFinished, this, &RelayTaskControl::onSessionEnded);
-    connect(core_, &CoreService::progressChanged, this, &RelayTaskControl::onProgress);
 }
 
 void RelayTaskControl::startTasks(const RelayTaskItems &items, const ConnInfo &conn, const QString &defaultPeerId)
@@ -200,10 +210,11 @@ void RelayTaskControl::startTasks(const RelayTaskItems &items, const ConnInfo &c
 
     running_ = true;
     stopping_ = false;
-    current_ = -1;
+    active_.clear();
+    trackers_.clear();
     updateButtons();
     emit logMessage(QStringLiteral("[任务] 开始：%1 个文件\n").arg(rows_.size()));
-    startNext();
+    fillWindow();
 }
 
 void RelayTaskControl::stopBatch()
@@ -213,8 +224,9 @@ void RelayTaskControl::stopBatch()
         return;
     }
     stopping_ = true;
-    // 剩余等待项现在就标取消：它们永远不会被发送了。
-    for (int i = current_ + 1; i < rows_.size(); ++i)
+
+    // 还没开始的行现在就标取消：它们不会被发送了。
+    for (int i = 0; i < rows_.size(); ++i)
     {
         if (rows_[i].status == kWait)
         {
@@ -222,27 +234,99 @@ void RelayTaskControl::stopBatch()
         }
     }
     updateSummary();
-    // 当前项走硬取消（与 CLI abort 同语义），结论由 operationFinished 带回。
-    if (core_)
+
+    // 在跑的那几路逐个硬取消（与 CLI abort 同语义）。它们的结论仍会各自经
+    // sendTaskFinished 回来，那里看到 stopping_ 就把行标"已取消"——所以
+    // 全部回来之前不结束批次，否则界面上会留下几个永远"传输中"的行。
+    if (active_.isEmpty())
     {
-        core_->cancelCurrent();
+        finishBatch(false);
+        return;
+    }
+    for (int row : active_)
+    {
+        if (core_)
+        {
+            core_->cancelSendTask(row + 1);
+        }
     }
 }
 
-void RelayTaskControl::startNext()
+void RelayTaskControl::fillWindow()
 {
     if (!running_)
     {
         return;
     }
 
-    // 跳过无需发送的行（未指定对端）。
-    while (current_ + 1 < rows_.size() && rows_[current_ + 1].status == kSkipped)
+    // 补满并发窗口：从前往后找还没开始的行。
+    //
+    // **同一对端的行串行**：对方的接收端一次只收一个文件（TransferPeer 是按
+    // sessionId 解复用的单会话），同时给它发两个，第二个的 kFileRequestSend
+    // 只会被拒或被忽略。所以并发的收益只在"发往不同对端"时存在——这恰好
+    // 也是对照表的典型形状（A 行发 B、C 行发 C、D 行发 D）。
+    while (active_.size() < kConcurrency)
     {
-        ++current_;
+        int next = -1;
+        for (int i = 0; i < rows_.size(); ++i)
+        {
+            if (rows_[i].status != kWait)
+            {
+                continue;
+            }
+            bool peerBusy = false;
+            for (int a : active_)
+            {
+                if (rows_[a].peerId == rows_[i].peerId)
+                {
+                    peerBusy = true;
+                    break;
+                }
+            }
+            if (!peerBusy)
+            {
+                next = i;
+                break;
+            }
+        }
+        if (next < 0)
+        {
+            break;  // 剩下的都在等同一批对端，等它们回来再补
+        }
+
+        const Row &t = rows_[next];
+        setStatus(next, kTransing);
+        trackers_.remove(next);  // 新的一路，进度从零算
+        active_.insert(next);
+
+        emit logMessage(QStringLiteral("[任务] %1/%2  %3 → %4:%5\n")
+                            .arg(next + 1)
+                            .arg(rows_.size())
+                            .arg(t.name, t.peerId, t.relDir));
+
+        // taskId = 行号 + 1：0 保留给"单文件发送"（MainWindow 那条路径）。
+        if (!core_->sendFileTask(next + 1, t.localPath, t.relDir, t.peerId, conn_))
+        {
+            active_.remove(next);
+            trackers_.remove(next);
+            setStatus(next, kFailed);
+            emit logMessage(QStringLiteral("[任务] 通道被占用，任务中止\n"));
+            finishBatch(false);
+            return;
+        }
     }
 
-    if (current_ + 1 >= rows_.size())
+    // 没有在跑的、也没有排队的 → 这一批结束了。
+    bool hasWait = false;
+    for (const auto &r : rows_)
+    {
+        if (r.status == kWait)
+        {
+            hasWait = true;
+            break;
+        }
+    }
+    if (active_.isEmpty() && !hasWait)
     {
         bool allOk = true;
         for (const auto &r : rows_)
@@ -254,71 +338,59 @@ void RelayTaskControl::startNext()
             }
         }
         finishBatch(allOk);
-        return;
-    }
-
-    ++current_;
-    const Row &t = rows_[current_];
-    setStatus(current_, kTransing);
-    progressTracker_.reset();
-    emit logMessage(QStringLiteral("[任务] %1/%2  %3 → %4:%5\n")
-                        .arg(current_ + 1)
-                        .arg(rows_.size())
-                        .arg(t.name, t.peerId, t.relDir));
-
-    // 防御：入口已挡过真忙。到这还 sendFile 失败说明通道被意外占住，
-    // 宁可中止批次也不能卡在"等一个永远不来的 operationFinished"。
-    if (!core_->sendFile(t.localPath, t.relDir, t.peerId, conn_))
-    {
-        emit logMessage(QStringLiteral("[任务] 通道被占用，任务中止\n"));
-        setStatus(current_, kFailed);
-        finishBatch(false);
     }
 }
 
-void RelayTaskControl::onSendFinished(bool ok, const QString &summary, const QString &detail)
+void RelayTaskControl::onSendTaskFinished(qint64 taskId, bool ok, const QString &summary, const QString &detail)
 {
-    if (!running_ || current_ < 0 || current_ >= rows_.size())
+    if (!running_)
     {
         return;
     }
+    const int row = static_cast<int>(taskId) - 1;
+    if (row < 0 || row >= rows_.size() || !active_.contains(row))
+    {
+        return;  // 不是这一批的，或已经处理过（同一次任务不该有两个结论）
+    }
+    active_.remove(row);
+    trackers_.remove(row);
 
     if (stopping_)
     {
-        setStatus(current_, kCancelled);
-        finishBatch(false);
+        setStatus(row, kCancelled);
+        if (active_.isEmpty())
+        {
+            finishBatch(false);
+        }
         return;
     }
 
     if (ok)
     {
-        setStatus(current_, kDone);
+        setStatus(row, kDone);
     }
     else
     {
-        setStatus(current_, kFailed);
+        setStatus(row, kFailed);
         emit logMessage(
-            QStringLiteral("[任务] %1 失败：%2\n").arg(rows_[current_].name, detail.isEmpty() ? summary : detail));
+            QStringLiteral("[任务] %1 失败：%2\n").arg(rows_[row].name, detail.isEmpty() ? summary : detail));
 
-        // 连接级失败（中继断开/对端失联）终止批次：链路没了，剩余文件
-        // 只会逐个等满 answerTimeout。文件级失败（目标已存在、写盘失败、
-        // 校验不过）继续下一个——v1 的"单个文件失败不中断整批"。
+        // 连接级失败（中继断开 / 对端失联）：只把**还在排队**的行标跳过。
+        // 不像串行时代那样一刀切终止整批——其他并发路可能还连着，它们的
+        // 结论会各自回来；真断了的话它们也会失败，不会漏。
         if (core_ && core_->lastFailureConnectionLost())
         {
-            emit logMessage(QStringLiteral("[任务] 连接已断开，剩余项不再传输（可连接后点「重传失败项」）\n"));
-            for (int i = current_ + 1; i < rows_.size(); ++i)
+            for (int i = 0; i < rows_.size(); ++i)
             {
                 if (rows_[i].status == kWait)
                 {
                     setStatus(i, kSkipped);
                 }
             }
-            finishBatch(false);
-            return;
         }
     }
 
-    startNext();
+    fillWindow();
 }
 
 void RelayTaskControl::onSessionEnded(bool ok, const QString &summary, const QString &detail)
@@ -330,25 +402,32 @@ void RelayTaskControl::onSessionEnded(bool ok, const QString &summary, const QSt
     }
     Q_UNUSED(ok);
 
-    if (current_ >= 0 && current_ < rows_.size())
-    {
-        setStatus(current_, kFailed);
-    }
-    emit logMessage(QStringLiteral("[任务] 会话已结束（%1%2），批次中止\n")
-                        .arg(summary, detail.isEmpty() ? QString() : QStringLiteral("：") + detail));
-    for (int i = current_ + 1; i < rows_.size(); ++i)
+    // 结束的是**常驻接收会话**。并发发送各自有连接，理论上不受它影响，
+    // 但中继整体挂了的话它们也会各自失败。所以这里只把排队的项标跳过，
+    // 在跑的那几路等它们自己的结论——强行改它们的状态会让结论对不上。
+    for (int i = 0; i < rows_.size(); ++i)
     {
         if (rows_[i].status == kWait)
         {
             setStatus(i, kSkipped);
         }
     }
-    finishBatch(false);
+    emit logMessage(QStringLiteral("[任务] 常驻会话已结束（%1%2），在跑的项各自报结果\n")
+                        .arg(summary, detail.isEmpty() ? QString() : QStringLiteral("：") + detail));
+    if (active_.isEmpty())
+    {
+        finishBatch(false);
+    }
 }
 
-void RelayTaskControl::onProgress(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond)
+void RelayTaskControl::onSendTaskProgress(qint64 taskId, quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond)
 {
-    if (!running_ || current_ < 0 || current_ >= rows_.size())
+    if (!running_)
+    {
+        return;
+    }
+    const int row = static_cast<int>(taskId) - 1;
+    if (row < 0 || row >= rows_.size() || !active_.contains(row))
     {
         return;
     }
@@ -358,9 +437,10 @@ void RelayTaskControl::onProgress(quint64 bytesDone, quint64 bytesTotal, double 
     {
         return;
     }
-    if (auto *it = table_->item(current_, kColProgress))
+    // 每行一个 tracker：并发时共用一份会把别的任务的速率画到这一行上。
+    if (auto *it = table_->item(row, kColProgress))
     {
-        it->setText(progressTracker_.update(bytesDone, bytesTotal, bytesPerSecond));
+        it->setText(trackers_[row].update(bytesDone, bytesTotal, bytesPerSecond));
     }
 }
 
@@ -403,10 +483,11 @@ void RelayTaskControl::onRetryFailed()
 
     running_ = true;
     stopping_ = false;
-    current_ = -1;
+    active_.clear();
+    trackers_.clear();
     updateButtons();
     emit logMessage(QStringLiteral("[任务] 重传失败项\n"));
-    startNext();
+    fillWindow();
 }
 
 void RelayTaskControl::onStopClicked()
@@ -430,7 +511,8 @@ void RelayTaskControl::finishBatch(bool allOk)
     const int total = static_cast<int>(rows_.size());
     running_ = false;
     stopping_ = false;
-    current_ = -1;
+    active_.clear();
+    trackers_.clear();
     updateButtons();
     updateSummary();
     if (allOk)

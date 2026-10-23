@@ -850,7 +850,7 @@ socket 回调里写就没法把每种组合都测到。
 | F1 | 远端目录列举：`kAskFileList`/`kAnswerFileList`（`PROTOCOL.md` §11.8）、`core/session/FileList` 编解码、客户端侧服务（共享根 + `resolveWithin`）、CLI `ls`、GUI：`ExplorerControl` 的本地/远端双数据源（v1 形状，同一个控件切数据源）+ 共享目录设置 + 对照表右键"检查远端"、e2e `remote-list` | ✅ 完成 |
 | F2 | 远端取回（下载）：`kAskFilePull`/`kAnswerFilePull`（`PROTOCOL.md` §11.9）、`FilePullStatus` 编解码、客户端侧服务（共享根 + `resolveWithin`）、复用 500-509 推流程、CLI `recv --pull-from/--pull-path`、GUI 远端面板右键「下载到接收目录」、e2e `pull-file` | ✅ 完成（目录取回见 F3） |
 | F3 | 目录取回（打包）：`kAskArchivePull`（`PROTOCOL.md` §11.10）、tar.xz 打包（级别 1、上限 20000 文件 / 256 MiB）、临时包在系统 temp 并传完即删、复用 500-509 推流程、CLI `--pull-dir`、GUI 右键「下载目录（打包为 tar.xz）」、e2e `pull-dir` | ✅ 完成（**不自动解包**，见 §11.10.6） |
-
+| F4 | 批量发送并发：`CoreService::sendFileTask`（每任务一个 Client，不占常驻会话）+ 任务表并发窗口（`kConcurrency=3`，**同一对端串行**）+ 带 taskId 的进度/结论信号 + `cancelSendTask` | ✅ 完成（GUI 路径无自动化覆盖，见 HANDOFF §0.8 第 14 条） |
 剩余（下一次从这里接）：
 
 1. **E4 验收**——GUI 已在本机中继 + loopback 上完成收发，还缺一次**真实链路**
@@ -859,8 +859,9 @@ socket 回调里写就没法把每种组合都测到。
 2. **对端打包归档（tar.xz）**——`kAskArchivePack` 等 130-133 帧仍是占位。
    它是**目录取回**的前置：没有它，取回一个目录就是 N 次独立请求。
 3. **P2P 直连**——550/551 仍是占位；收益取决于网络环境（同局域网才有意义）。
-4. **多任务并行**——把 `CoreService` 从"一次一操作"改成"每任务一个 Client"。
-   不动协议，但 GUI 状态机、任务表单、自动接收都要跟着改，影响面最大。
+4. **并发度可配置**——`kConcurrency` 现在写死 3（`RelayTaskControl.cpp`）。
+   要先有一次真实链路测量再决定要不要做成设置项，否则只是多一个用户会
+   调错的旋钮。
 
 远端浏览与下载已在 F1/F2 完成，不再列为剩余项。
 

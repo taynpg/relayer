@@ -4,6 +4,7 @@
 #include <QString>
 #include <QStringList>
 #include <atomic>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -117,6 +118,26 @@ public:
     bool sendFile(const QString &localPath, const QString &remoteName, const QString &toPeerId,
                   const relayer::app::ConnInfo &conn);
 
+    // 批量发送里的一路（阶段 F 的多任务并行）。
+    //
+    // 与上面的 sendFile 是两条**刻意分开**的路径：
+    //   - sendFile 搭常驻接收会话（id 稳定、不换号），但只能串行——一条
+    //     TCP 上同时跑两个文件，窗口和 sessionId 会互相打架；
+    //   - sendFileTask 每次新建一条连接，多路可以并存。
+    //
+    // 并发的代价是每路多一次握手。换来的是"发往 B/C/D 的三行同时进行"，
+    // 对跨网（RTT 明显）的小文件批量收益最大；局域网里串行本来就快，收益小。
+    //
+    // taskId 由调用方给（RelayTaskControl 用行号），进度与结论都带着它回来。
+    // 同一个 taskId 不允许重复提交。
+    bool sendFileTask(qint64 taskId, const QString &localPath, const QString &remoteName, const QString &toPeerId,
+                      const relayer::app::ConnInfo &conn);
+
+    // 取消某一路并发发送（停止批次时用）。结论仍会经 sendTaskFinished 回来
+    // ——"取消"不是一个静默动作，界面要能据此把该行标成"已取消"而不是
+    // 一直停在"传输中"。
+    void cancelSendTask(qint64 taskId);
+
     // 有"搭车发送"正在进行（会话内发送）。GUI 用它挡重复点击。
     bool sendInFlight() const noexcept
     {
@@ -167,6 +188,12 @@ signals:
 
     // 传输进度。bytesPerSecond 是瞬时速率，可能为 0（尚未有两次采样）。
     void progressChanged(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond);
+
+    // 批量发送中某一项的进度与结论。与上面两个信号分开，因为并发时
+    // "这次进度是谁的"必须能区分——只有一组进度数字的界面在多路并发下
+    // 会把 B 的进度画到 C 那一行上。
+    void sendTaskProgress(qint64 taskId, quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond);
+    void sendTaskFinished(qint64 taskId, bool ok, const QString &summary, const QString &technicalDetail);
 
     // 一次操作的最终结论。发出后 busy 变 false，之后不会再有该操作的信号。
     // technicalDetail 失败时可能非空（Status 的 message）。
@@ -222,6 +249,18 @@ private:
 
     // 常驻会话 + 表单参数一致 + 当前没有发送在跑 → 可以搭车发送。
     bool canSendOnSession(const relayer::app::ConnInfo &conn) const;
+
+    // 并发的发送任务：taskId → Client。**只在 io 线程读写**。
+    //
+    // 每个任务一个 Client（也就是一条连接）。它不碰 client_、也不碰 busy_：
+    // busy_ 表示"常驻会话的占用"，而并发发送不该阻止自动接收挂起——否则
+    // "我在发给 B" 期间别人就无法发给我，这正是并行要解决的问题之一。
+    struct SendJob
+    {
+        qint64 taskId = 0;
+        std::shared_ptr<cli::Client> client;
+    };
+    std::map<qint64, SendJob> sendJobs_;
 
     asio::io_context ctx_;
 
