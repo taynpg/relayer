@@ -724,6 +724,62 @@ def self_send(workdir: Path, bin_dir: Path) -> None:
         c.shutdown()
 
 
+@scenario("remote-list", "远端目录列举：共享根内可列，越界与未共享都被拒")
+def remote_list(workdir: Path, bin_dir: Path) -> None:
+    """PROTOCOL.md §11.8 的端到端验收。
+
+    远端列举由**对端客户端**回答（服务端只转发，它没有文件能力）。安全性
+    全靠三条：只暴露一个共享根、路径必须过 resolveWithin、默认不共享。
+
+    四条断言：
+      1. 共享根能列出来（目录在前、名字有序），条目与盘上一致；
+      2. 子目录能列（相对路径解析正确）；
+      3. `..` 越界被拒（**这条是安全看门测试**，退出码必须非 0）；
+      4. 没开共享的实例明确拒绝，而不是静默超时。
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        share = workdir / "share"
+        (share / "sub").mkdir(parents=True, exist_ok=True)
+        (share / "a.txt").write_bytes(b"hello")
+        (share / "sub" / "b.txt").write_bytes(b"world!")
+
+        # 共享方：recv 挂着等文件，同时开共享。hard-timeout 让它最后自己退出。
+        bob = c.cli("recv-bob", "recv", "--to-dir", str(c.dst), *c.cli_common(), "--id", "bob",
+                    "--share", str(share), "--hard-timeout", "30")
+        bob.wait_for(ASSIGNED_PREFIX, 20.0)
+
+        lister = c.cli("ls-bob", "ls", "--to", "bob", *c.cli_common(), "--id", "alice")
+        expect_eq(lister.wait_exit(30), 0, "列举共享根的退出码")
+        out = "\n".join(lister.pill())
+        expect("REMOTE_LIST status=0 count=2" in out, f"列举汇总不对：{out}")
+        # 目录在前、文件在后（顺序稳定，UI 才不闪）。
+        expect("D  sub" in out, f"没列到子目录：{out}")
+        expect("F  5  a.txt" in out, f"没列到文件或大小不对：{out}")
+
+        sub = c.cli("ls-sub", "ls", "--to", "bob", "--path", "sub", *c.cli_common(), "--id", "alice2")
+        expect_eq(sub.wait_exit(30), 0, "列举子目录的退出码")
+        sub_out = "\n".join(sub.pill())
+        expect("b.txt" in sub_out, f"子目录内容不对：{sub_out}")
+
+        # --- 安全看门：路径穿越必须被拒 ---
+        bad = c.cli("ls-escape", "ls", "--to", "bob", "--path", "../", *c.cli_common(), "--id", "alice3")
+        expect(bad.wait_exit(30) != 0, "`..` 越界竟然列举成功——共享根形同虚设")
+        expect("拒绝" in bad.tail(), f"越界失败的原因没说清：{bad.tail()}")
+
+        # --- 默认不共享 ---
+        carol = c.cli("recv-carol", "recv", "--to-dir", str(c.dst), *c.cli_common(), "--id", "carol",
+                      "--hard-timeout", "30")
+        carol.wait_for(ASSIGNED_PREFIX, 20.0)
+        nob = c.cli("ls-carol", "ls", "--to", "carol", *c.cli_common(), "--id", "alice4")
+        expect(nob.wait_exit(30) != 0, "没开共享的实例竟然能列举——默认暴露了目录")
+        expect("拒绝" in nob.tail(), f"未共享的失败原因没说清：{nob.tail()}")
+        carol.kill()
+    finally:
+        c.shutdown()
+
+
 @scenario("one-byte", "1 字节文件正常完成")
 def one_byte(workdir: Path, bin_dir: Path) -> None:
     _transfer_roundtrip(workdir, bin_dir, 1)

@@ -843,6 +843,12 @@ socket 回调里写就没法把每种组合都测到。
 | E3.7 | `ReplaceArea` 作用域对话框：作用列对齐 v2 四字段（名称/本地目录/对端/相对目录）；v1 的 useCase/useRegex 是**假选项**（结果传入 lambda 但从未使用），v2 做成真的（`Qt::CaseSensitivity` + `QRegularExpression`，pattern 先验证） | ✅ |
 | E3.8 | `model/ProgressTracker`（清单 #11）：除零/时间边界/速度择优类内闭环（bytesTotal=0 占位、无瞬时速度退回自算均值、开头 200ms 不显示均值）；任务表进度列升级为「百分比 · 速度」；`humanBytes` 三处拷贝收拢 | ✅ |
 
+阶段 F 的第一块（2026-10-23）：
+
+| 子项 | 内容 | 状态 |
+| --- | --- | --- |
+| F1 | 远端目录列举：`kAskFileList`/`kAnswerFileList` 语义（`PROTOCOL.md` §11.8）、`core/session/FileList` 编解码、客户端侧服务（共享根 + `resolveWithin`）、CLI `ls --to <对端>`、e2e `remote-list` | ✅ 协议与 CLI 侧完成；GUI 面板与对照表粗校验未做 |
+
 剩余（下一次从这里接）：
 
 1. **E4 验收**——GUI 已在本机中继 + loopback 上完成收发，还缺一次**真实链路**

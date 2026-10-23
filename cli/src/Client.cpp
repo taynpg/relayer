@@ -6,6 +6,7 @@
 #include <asio/post.hpp>
 #include <asio/steady_timer.hpp>
 
+#include "relayer/core/session/FileList.h"
 #include "relayer/core/session/PeerTable.h"
 #include "relayer/core/transfer/TransferPeer.h"
 
@@ -98,6 +99,10 @@ struct Client::Impl
 
     Action action = Action::kList;
     std::string toPeerId;
+
+    // kBrowse 的目标与相对路径（PROTOCOL.md §11.8）。
+    std::string browsePeerId;
+    std::string browseRelPath;
     std::string targetPath;
 
     bool authenticated = false;
@@ -129,6 +134,10 @@ struct Client::Impl
 
     // 服务端列表（kAnswerClientList 的内容）。
     std::vector<core::session::PeerInfo> peers;
+
+    // 远端列举的结果（kAnswerFileList 的内容）。由 finish() 搬进 Outcome。
+    std::vector<core::session::RemoteEntry> remoteEntries;
+    core::session::FileListStatus listStatus = core::session::FileListStatus::kOk;
 
     // ---------------------------------------------------------------------
     // 收尾
@@ -186,6 +195,11 @@ struct Client::Impl
                 {
                     o.peerList.push_back(PeerEntry{p.id, p.address});
                 }
+            }
+            else if (action == Action::kBrowse)
+            {
+                o.remoteEntries = remoteEntries;
+                o.listStatus = listStatus;
             }
             onDone(o);
         }
@@ -567,6 +581,12 @@ struct Client::Impl
             requestPeerList();
             return;
 
+        case Action::kBrowse:
+            // 只要 `to` 对，不需要等自己的 id——服务端在认证时已经登记了
+            // 这条连接，转发目标查得到。
+            requestFileList();
+            return;
+
         case Action::kSend:
             startSending();
             return;
@@ -589,6 +609,106 @@ struct Client::Impl
         Frame f;
         f.type = FrameType::kAskClientList;
         (void)session->send(f);
+    }
+
+    void requestFileList()
+    {
+        Frame f;
+        f.type = FrameType::kAskFileList;
+        f.to = browsePeerId;
+        f.body = core::session::encodeAskFileList(browseRelPath);
+        if (!session->send(f).ok())
+        {
+            finish(false, "远端列举请求发送失败", Status::Fail(ErrorCode::kProtocol, "send failed"));
+        }
+    }
+
+    // 对端来问目录：按共享根解析、列一层、回一条。**只服务这一个根**。
+    //
+    // 目录列举是同步做的：一次 readdir 在该规模下是毫秒级，而引入工作线程
+    // 会把"谁保证 store 生命周期"的问题带进来。真遇到网络盘这类慢列举，
+    // 再按传输路径那样丢进 WorkerPool。
+    void serveFileList(const Frame &req)
+    {
+        Frame answer;
+        answer.type = FrameType::kAnswerFileList;
+        // 请求者的身份由服务端在转发时绑定（不是自称），可以直接当回信地址。
+        answer.to = req.from;
+
+        std::vector<core::session::RemoteEntry> out;
+        auto status = core::session::FileListStatus::kOk;
+
+        std::string rel;
+        std::string err;
+        if (!core::session::decodeAskFileList(req.body, rel, err))
+        {
+            status = core::session::FileListStatus::kRejected;
+        }
+        else if (config.shareRoot.empty())
+        {
+            // 没开共享：明确拒绝。静默不回会让对方等满应答超时，
+            // 看起来像网络问题。
+            status = core::session::FileListStatus::kRejected;
+        }
+        else
+        {
+            const std::string target = rel.empty() ? config.shareRoot : store.resolveWithin(config.shareRoot, rel);
+            if (target.empty())
+            {
+                status = core::session::FileListStatus::kRejected;  // 绝对路径 / 越界
+            }
+            else
+            {
+                const auto st = store.stat(target);
+                if (!st.exists || !st.isDir)
+                {
+                    status = core::session::FileListStatus::kNotFound;
+                }
+                else
+                {
+                    std::vector<filestore::DirEntry> raw;
+                    if (!store.list(target, false, raw).ok())
+                    {
+                        status = core::session::FileListStatus::kNotFound;
+                    }
+                    else
+                    {
+                        // 目录在前、同类型按名字排：列表是给人看的，顺序稳定
+                        // 比"文件系统返回什么算什么"重要（也方便测试断言）。
+                        std::sort(raw.begin(), raw.end(),
+                                  [](const filestore::DirEntry &a, const filestore::DirEntry &b)
+                                  {
+                                      if (a.isDir != b.isDir)
+                                      {
+                                          return a.isDir;
+                                      }
+                                      return a.name < b.name;
+                                  });
+                        if (raw.size() > core::session::kMaxListEntries)
+                        {
+                            raw.resize(core::session::kMaxListEntries);
+                            status = core::session::FileListStatus::kTruncated;
+                        }
+                        out.reserve(raw.size());
+                        for (const auto &e : raw)
+                        {
+                            core::session::RemoteEntry r;
+                            r.name = e.name;
+                            r.isDir = e.isDir;
+                            r.size = e.size;
+                            r.mtime = e.mtime;
+                            out.push_back(std::move(r));
+                        }
+                    }
+                }
+            }
+        }
+
+        if (const auto st = core::session::encodeAnswerFileList(status, out, answer.body); !st.ok())
+        {
+            return;  // 编码失败只可能是内部 bug，没必要再回一个坏帧
+        }
+        (void)session->send(answer);
     }
 
     void refreshPeers()
@@ -935,6 +1055,46 @@ struct Client::Impl
 
     void dispatch(const Frame &f)
     {
+        // 对端的目录列举请求：**任何操作模式下都要应答**——"我正在收文件"
+        // 不妨碍回答一次列举。放在最前面，避免被 send/recv peer 的认领
+        // 逻辑漏掉（它们只认自己 sessionId 的帧）。
+        if (f.type == FrameType::kAskFileList)
+        {
+            serveFileList(f);
+            return;
+        }
+
+        if (action == Action::kBrowse && f.type == FrameType::kAnswerFileList)
+        {
+            core::session::FileListStatus status = core::session::FileListStatus::kOk;
+            std::vector<core::session::RemoteEntry> entries;
+            std::string err;
+            if (!core::session::decodeAnswerFileList(f.body, status, entries, err))
+            {
+                finish(false, "远端列表解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+                return;
+            }
+            listStatus = status;
+            remoteEntries = std::move(entries);
+
+            switch (status)
+            {
+            case core::session::FileListStatus::kOk:
+                finish(true, "远端列表 " + std::to_string(remoteEntries.size()) + " 项");
+                return;
+            case core::session::FileListStatus::kTruncated:
+                finish(true, "远端列表已截断（只返回前 " + std::to_string(remoteEntries.size()) + " 项）");
+                return;
+            case core::session::FileListStatus::kNotFound:
+                finish(false, "对端没有这个目录", Status::Fail(ErrorCode::kNotFound, "remote path not found"));
+                return;
+            case core::session::FileListStatus::kRejected:
+            default:
+                finish(false, "对端拒绝列举（未开启共享，或路径越界）",
+                       Status::Fail(ErrorCode::kPermissionDenied, "remote list rejected"));
+                return;
+            }
+        }
         // 常驻接收的重建窗口：上一次接收刚结束（成功或失败），post 的
         // 重建还排在事件队列里，而发送方的下一个请求已经到了。此刻 peer
         // 是 finished 状态，onFrame 必然不认；把帧丢掉的话发送方要等满
@@ -1070,6 +1230,14 @@ void Client::receiveFile(std::string targetPath)
 void Client::listPeers()
 {
     impl_->action = Action::kList;
+    impl_->connect();
+}
+
+void Client::browsePeer(std::string peerId, std::string relPath)
+{
+    impl_->action = Action::kBrowse;
+    impl_->browsePeerId = std::move(peerId);
+    impl_->browseRelPath = std::move(relPath);
     impl_->connect();
 }
 

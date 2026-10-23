@@ -3,105 +3,21 @@
 #include <cstring>
 #include <string>
 
+#include "ByteReader.h"
+
 namespace relayer::core::session
 {
 
 namespace
 {
 
-// 载荷读写的小工具。
-//
-// 单独写而不是用 protocol 里的实现：protocol 的那套面向完整帧（含魔法、
-// CRC、路由字段），而这里只是 body 内部的裸字节，两者的错误处理方式也
-// 不同（一个返回 UnPackResult，一个只需 bool + err）。
-void putU8(std::vector<char> &out, std::uint8_t v)
-{
-    out.push_back(static_cast<char>(v));
-}
-
-void putU16(std::vector<char> &out, std::uint16_t v)
-{
-    out.push_back(static_cast<char>(v & 0xFF));
-    out.push_back(static_cast<char>((v >> 8) & 0xFF));
-}
-
-void putU32(std::vector<char> &out, std::uint32_t v)
-{
-    for (int i = 0; i < 4; ++i)
-    {
-        out.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
-    }
-}
-
-// 顺序读取器。越界时 ok() 变 false，之后所有读操作都返回 0。
-//
-// 用"读失败也不抛、但标记失败"而不是每步都判：解码函数里连续读四五个
-// 字段时，逐步判会让主要逻辑淹没在错误处理里。最后统一判一次就够。
-class Reader
-{
-public:
-    explicit Reader(const std::vector<char> &b) noexcept
-        : buf_(b)
-    {
-    }
-
-    std::uint8_t u8()
-    {
-        if (!ok_ || pos_ + 1 > buf_.size())
-        {
-            ok_ = false;
-            return 0;
-        }
-        return static_cast<std::uint8_t>(buf_[pos_++]);
-    }
-
-    std::uint16_t u16()
-    {
-        const auto lo = u8();
-        const auto hi = u8();
-        return static_cast<std::uint16_t>(lo | (static_cast<std::uint16_t>(hi) << 8));
-    }
-
-    std::uint32_t u32()
-    {
-        std::uint32_t v = 0;
-        for (int i = 0; i < 4; ++i)
-        {
-            v |= static_cast<std::uint32_t>(u8()) << (8 * i);
-        }
-        return v;
-    }
-
-    std::string str(std::size_t len)
-    {
-        if (!ok_ || pos_ + len > buf_.size())
-        {
-            ok_ = false;
-            return {};
-        }
-        std::string s(buf_.data() + pos_, len);
-        pos_ += len;
-        return s;
-    }
-
-    [[nodiscard]] bool ok() const noexcept
-    {
-        return ok_;
-    }
-    [[nodiscard]] std::size_t consumed() const noexcept
-    {
-        return pos_;
-    }
-    [[nodiscard]] std::size_t remaining() const noexcept
-    {
-        return buf_.size() - pos_;
-    }
-
-private:
-    const std::vector<char> &buf_;
-    std::size_t pos_ = 0;
-    bool ok_ = true;
-};
+// 载荷读写工具已抽到 ByteReader.h（与 FileList 的编解码共用一套）。
+using detail::putI64;
+using detail::putU16;
+using detail::putU32;
+using detail::putU64;
+using detail::putU8;
+using detail::Reader;
 
 }  // namespace
 

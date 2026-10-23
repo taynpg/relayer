@@ -351,6 +351,7 @@ std::uint64_t unroutable = 0;     // 目标不在线
 | 无认证中继 | `no-auth` | ✅ 2026-10-23 补：可传 + 两类拒绝（见 §0.6 末条） |
 | 固定标识 | `fixed-id` | ✅ 2026-10-23：声明生效 / 撞名被拒 / 先到者不受影响 / 断开后名字可重用 |
 | 自投（发给自己） | `self-send` | ✅ 2026-10-23：帧绕回本连接，内容一致、无残片 |
+| 远端目录列举 | `remote-list` | ✅ 2026-10-23：共享根可列 / 子目录可列 / `..` 越界被拒 / 未共享被拒 |
 
 ### 4.2 `drop-chunks`：丢包场景怎么测的
 
@@ -525,7 +526,7 @@ FAILED: bin/relayerd.exe
 | 构建 | ✅ 无警告（`relayer_core` / `relayerd` / `relayer-cli` / `core_test`） |
 | ctest 全量 | ✅ **7/7**（core 335 用例 / 5451 断言；e2e_quick 64.9s；总计 87s） |
 | e2e `--quick` | ✅ **8/8**，57.3s |
-| e2e 完整（含 1GB） | ✅ **15/15**，220s（Release；200MB 27s / 1GB 149s） |
+| e2e 完整（含 1GB） | ✅ **16/16**，198s（Release） |
 | `kill-sender` × 5 | ✅ 全过，单次 17.6s |
 | `drop-chunks` × 3 | ✅ 全过，单次 5.1s；篡改参数后计数随之改变 |
 | 手工 200MB | ✅ 33s，`cmp` 一致，无 `.relaypart` 残留 |

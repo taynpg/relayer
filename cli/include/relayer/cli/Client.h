@@ -10,6 +10,7 @@
 #include <asio/io_context.hpp>
 
 #include "relayer/common/Status.h"
+#include "relayer/core/session/FileList.h"
 #include "relayer/core/session/Session.h"
 #include "relayer/core/transfer/WorkerPool.h"
 #include "relayer/filestore/StdFileStore.h"
@@ -80,6 +81,11 @@ struct Outcome
     TransferStats stats;
     // list 操作的在线对端。其他操作为空。
     std::vector<PeerEntry> peerList;
+
+    // browse（远端目录列举）的结果。其他操作为空。
+    // status 为 kRejected / kNotFound 时 entries 为空，summary 说明原因。
+    std::vector<core::session::RemoteEntry> remoteEntries;
+    core::session::FileListStatus listStatus = core::session::FileListStatus::kOk;
 };
 
 // 进度回调。bytesPerSecond 由 Client 自己算——传原始计数让每个调用方
@@ -184,6 +190,13 @@ struct ClientConfig
     // 提前结束并报错。
     std::string selfSendPath;
 
+    // 远端目录列举的共享根（PROTOCOL.md §11.8）。空 = **不响应**列举请求。
+    //
+    // 只有这个目录之下的内容能被对端看到：请求里的路径一律按"相对该根"
+    // 解释并过 resolveWithin，绝对路径与 `..` 逃逸都会被拒绝。默认关闭是
+    // 有意的——"能被别人看目录"必须是显式决定，不能靠忘记配置来默认开启。
+    std::string shareRoot;
+
     // 传输参数。chunkSize 在命令行可调，主要用于把"小文件测不出多块"
     // 这条路堵上（见 TransferPeer::Config 的注释）。
     std::uint32_t chunkSize = 0;  // 0 = 用协议默认值（256 KiB）
@@ -217,6 +230,7 @@ enum class Action
     kSend,     // 把本地文件推给对端
     kReceive,  // 把收到的文件落到本地
     kList,     // 只连上去打印在线列表，然后退出
+    kBrowse,   // 问对端要一次目录列举（远端浏览 / 对照表粗校验的前置）
 };
 
 class Client
@@ -241,6 +255,12 @@ public:
 
     // 连上去打印在线列表。
     void listPeers();
+
+    // 问对端要一次目录列举（PROTOCOL.md §11.8）。
+    //
+    // relPath 是**相对对端共享根**的路径，空表示根目录本身。对端没开共享
+    // 或路径越界时结果为失败（kRejected），不是崩溃。
+    void browsePeer(std::string peerId, std::string relPath);
 
     // 在**当前这条连接**上问一次在线列表（只对常驻接收会话有意义）。
     //

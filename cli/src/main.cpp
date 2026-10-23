@@ -45,6 +45,7 @@ void printUsage()
                 "        [--as <相对名>]           对端落点名，可带目录段（如 docs/a.bin）\n"
                 "  recv --to-dir <目录>            等待别人发来文件，落到目录里\n"
                 "        [--overwrite]            目标已存在时覆盖（默认拒绝，保护已有文件）\n"
+                "  ls --to <对端id> [--path <相对路径>]  列出对端共享目录（远端浏览/粗校验）\n"
                 "  list                            只连上去列出在线对端\n"
                 "\n"
                 "通用选项:\n"
@@ -55,6 +56,8 @@ void printUsage()
                 "                           （与 --password 互斥；不自动推断，防止漏填口令静默降级）\n"
                 "      --id <name>          声明本机标识（重连后保持不变；被别人占用则连接失败）\n"
                 "      --self-send <file>   自检：recv 时把这个文件发给自己（验完整链路）\n"
+                "      --share <dir>        recv 时允许对端列举这个目录（不给则不响应）\n"
+                "      --path <rel>         ls 的相对路径（相对对端共享根，默认根目录）\n"
                 "      --chunk-size <bytes> 分块大小（默认 256 KiB，上限 4 MiB）\n"
                 "      --idle-timeout <sec> 传输开始后多久没有进展就判定对端失联（默认 60）\n"
                 "                           传输开始前不计时：recv 会一直等，除非给 --hard-timeout\n"
@@ -100,6 +103,9 @@ struct Args
     std::string file;
     std::string to;
     std::string toDir;
+
+    // ls 的相对路径（相对对端共享根，空 = 根目录）。
+    std::string path;
 
     // send 的 --as：对端落点的相对名（可带目录段，如 "docs/a.bin"）。
     // 空则用本地文件名。安全性由接收方负责（路径校验 + 中间目录建齐，
@@ -161,7 +167,7 @@ ParseResult parseArgs(int argc, char **argv)
         r.ok = true;
         return r;
     }
-    if (r.args.command != "send" && r.args.command != "recv" && r.args.command != "list")
+    if (r.args.command != "send" && r.args.command != "recv" && r.args.command != "list" && r.args.command != "ls")
     {
         r.error = "未知子命令: " + r.args.command;
         return r;
@@ -327,6 +333,21 @@ ParseResult parseArgs(int argc, char **argv)
                 return r;
             }
         }
+        else if (a == "--path")
+        {
+            if (!takeValue(a, r.args.path))
+            {
+                return r;
+            }
+        }
+        else if (a == "--share")
+        {
+            // 允许对端列举哪个目录（PROTOCOL.md §11.8）。不给 = 不响应。
+            if (!takeValue(a, r.args.config.shareRoot))
+            {
+                return r;
+            }
+        }
         else if (a == "--overwrite")
         {
             // 接收目标已存在时删旧收新。默认拒绝覆盖（保护用户文件），
@@ -350,6 +371,16 @@ ParseResult parseArgs(int argc, char **argv)
     if (r.args.command == "recv" && r.args.toDir.empty())
     {
         r.error = "recv 需要 --to-dir 指定落点目录";
+        return r;
+    }
+    if (r.args.command == "ls" && r.args.to.empty())
+    {
+        r.error = "ls 需要 --to 指定要列举哪个对端";
+        return r;
+    }
+    if (r.args.command == "ls" && !r.args.config.shareRoot.empty())
+    {
+        r.error = "--share 是接收方选项，ls 只需要 --path";
         return r;
     }
 
@@ -448,6 +479,10 @@ int main(int argc, char **argv)
     {
         client->receiveFile(a.toDir);
     }
+    else if (a.command == "ls")
+    {
+        client->browsePeer(a.to, a.path);
+    }
     else
     {
         client->listPeers();
@@ -489,6 +524,26 @@ int main(int argc, char **argv)
                     static_cast<unsigned long long>(s.chunksRetransmitted),
                     static_cast<unsigned long long>(s.duplicateChunks), static_cast<unsigned long long>(s.acksSent),
                     static_cast<unsigned long long>(s.acksReceived));
+        std::fflush(stdout);
+    }
+
+    // ls 的契约输出：先一行机器可读的汇总，再逐条。e2e 断言靠这些行，
+    // 所以格式固定（不用本地化文案）。
+    if (a.command == "ls" && outcome.ok)
+    {
+        std::printf("REMOTE_LIST status=%d count=%zu\n", static_cast<int>(outcome.listStatus),
+                    outcome.remoteEntries.size());
+        for (const auto &e : outcome.remoteEntries)
+        {
+            if (e.isDir)
+            {
+                std::printf("D  %s\n", e.name.c_str());
+            }
+            else
+            {
+                std::printf("F  %llu  %s\n", static_cast<unsigned long long>(e.size), e.name.c_str());
+            }
+        }
         std::fflush(stdout);
     }
 

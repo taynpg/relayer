@@ -44,6 +44,7 @@ add_executable(core_test
     core/SessionPolicyTest.cpp
     core/SessionTest.cpp
     core/PeerTableTest.cpp
+    core/FileListTest.cpp
 )
 # relayer_asio 是 relayer_core 的 PRIVATE 依赖（本模块内部用），所以测试
 # 需要自己显式链接——ConnectionTest 直接 include <asio/...> 并用 io_context。
