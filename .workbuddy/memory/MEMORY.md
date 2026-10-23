@@ -90,8 +90,15 @@ cmake --build build-rel && cd build-rel && ctest
   - ✅ E3.6 Setting 对话框（压缩/加密组故意不迁，v2 无对应物；QSettings 键
     单一来源 `app/ui/SettingsKeys.h`）；E3.7 ReplaceArea 作用域（v1 的
     useCase/useRegex 是假选项，v2 做成真的）；E3.8 ProgressTracker（清单 #11）
-  - ⬜ 剩余：E4 真实链路验收（两台机器经中继；e2e 缺 no-auth 场景）
-- ⬜ 阶段 F（多任务并行 / P2P / 远端浏览归档）、G（发布）
+  - ⬜ 剩余：E4 真实链路验收（两台机器经中继；本机 e2e 已 20+ 场景）
+- ✅ **阶段 F 的 GUI 入口（P2P 除外）全部补齐**（2026-10-23）：
+  远端列举（`kAskFileList`）/ 取回（`kAskFilePull`）/ 目录打包取回
+  （`kAskArchivePull` + 自动解包）/ 并发发送（`sendFileTask`，同对端串行）/
+  压缩解压 / 粗校验 / 时间戳校验 / **行级下载**（落该行本地目录，逐项串行）/
+  详细信息对话框 / **跨面板拖拽** / **访问对端目录**。
+  最后三项（行级下载、详细信息、拖拽）**只有编译与代码审查，无自动化测试**，
+  验收要点在 `HANDOFF §0.8` 第 18-21 条。
+- ⬜ P2P（用户明确不做）、G 发布
 
 测试基线：`ctest` 7 项全过（common / filestore / core / arch / protocol_doc /
 transition_doc / e2e_quick），51 秒。common 16/1111、filestore 117/1718、
