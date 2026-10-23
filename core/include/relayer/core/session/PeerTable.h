@@ -150,6 +150,19 @@ private:
 // `kAskId` 的 body 为空。
 [[nodiscard]] std::vector<char> encodeAskId();
 
+// `kAnswerId` 的 status 字节（PROTOCOL.md §11.6 / §11.7）。
+//
+// 0 与 1 是既有语义（1 = 服务端没能分配）。2/3 是 kClaimId 的两种拒绝：
+// 标识被占用、标识非法。**只往后加**，既有值不能改——它们已经进了
+// 线上流量与测试向量。
+enum class IdAnswerStatus : std::uint8_t
+{
+    kOk = 0,
+    kNotAssigned = 1,  // 服务端没能分配任何 id
+    kTaken = 2,        // kClaimId：该标识已被别人占用
+    kInvalid = 3,      // kClaimId：标识不合法（空 / 超长 / 含 NUL）
+};
+
 // `kAnswerId`：`u8 status || u8 idLen || id[idLen]`
 //
 // status != 0 时不带 id。用 u8 长度而不是通用约定的 u16：这个字段要
@@ -157,9 +170,22 @@ private:
 // 避免"同一个 id 有两套长度编码"。
 [[nodiscard]] Status encodeAnswerId(std::string_view assignedId, std::vector<char> &out);
 
+// 带显式 status 的版本。kOk 且 id 为空时仍按既有约定发 status=1
+// （"没分配"），而不是"成功但身份空白"。
+[[nodiscard]] Status encodeAnswerId(IdAnswerStatus status, std::string_view assignedId, std::vector<char> &out);
+
 // 解 `kAnswerId`。失败时 err 说明原因（截断 / status 未知 / 长度不符）。
 [[nodiscard]] bool decodeAnswerId(const std::vector<char> &body, std::uint8_t &status, std::string &assignedId,
                                   std::string &err);
+
+// `kClaimId`：`u8 idLen || id[idLen]`（PROTOCOL.md §11.7）。
+//
+// 校验放在编码侧：非法 id 不该被发出去，服务端无论如何还会再校验一次
+// ——两端的校验是"早失败"与"不信对端"的分工，不是重复。
+[[nodiscard]] Status encodeClaimId(std::string_view id, std::vector<char> &out);
+
+// 解 `kClaimId`。不校验语义合法性（那是服务端策略），只保证结构正确。
+[[nodiscard]] bool decodeClaimId(const std::vector<char> &body, std::string &id, std::string &err);
 
 // `kAnswerClientList`：`u32 count || (u8 idLen || id || u16 addrLen || addr)*`
 [[nodiscard]] Status encodeClientList(const std::vector<PeerInfo> &peers, std::vector<char> &out);

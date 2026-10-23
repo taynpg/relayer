@@ -642,6 +642,56 @@ def no_auth(workdir: Path, bin_dir: Path) -> None:
         c.shutdown()
 
 
+@scenario("fixed-id", "标识声明：--id 固定身份；撞名被拒；断开后名字可重用")
+def fixed_id(workdir: Path, bin_dir: Path) -> None:
+    """PROTOCOL.md §11.7 的端到端验收。
+
+    四件事，缺一不可：
+      1. 声明的名字真的被采纳（ASSIGNED_ID 必须是 alice，不是 client-N）。
+         这条也在看"临时号不能被宣布"——声明前服务端会先发 client-N，
+         若客户端把那个号打出去，这里会立刻红。
+      2. 同一个名字的第二条连接被拒，且理由说清是"被占用"。
+      3. **先到者不受影响**：抢名失败不能把原来那条踢下线（顶掉先到者
+         是最危险的实现之一：用户的对照表会静默指向新来的那台）。
+      4. 断开之后名字被释放，同一个人重连还能拿回来——否则"固定标识"
+         只在第一次有用。
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        src = c.src / "payload.bin"
+        want = make_file(src, 2_000_000)
+
+        recv1 = c.cli("recv-alice", "recv", "--to-dir", str(c.dst), *c.cli_common(),
+                      "--id", "alice", "--idle-timeout", "60")
+        line = recv1.wait_for(ASSIGNED_PREFIX, 20.0)
+        expect_eq(line.split(ASSIGNED_PREFIX, 1)[1].strip(), "alice", "声明后拿到的 id")
+
+        # 第二条连接抢同一个名字：必须失败、必须说清原因。
+        recv2 = c.cli("recv-dup", "recv", "--to-dir", str(c.dst), *c.cli_common(),
+                      "--id", "alice", "--idle-timeout", "10")
+        expect(recv2.wait_exit(60) != 0, "同一个标识竟然能连上两条连接")
+        expect("已被占用" in recv2.tail(), "撞名失败的原因没说清是被占用")
+
+        # 先到者照常工作：还能收到发给 alice 的文件。
+        sender = c.send(src, "alice", extra=["--idle-timeout", "120"])
+        expect_eq(sender.wait_exit(120), 0, "发送端退出码（发给先到的 alice）")
+        expect_eq(recv1.wait_exit(120), 0, "先到者的接收退出码")
+        got = c.dst / "payload.bin"
+        expect(got.exists(), f"目标文件不存在：{got}")
+        expect_eq(sha256_of(got), want, "内容哈希")
+
+        # 名字随连接释放：重连能拿回同一个。
+        recv3 = c.cli("recv-again", "recv", "--to-dir", str(c.dst), *c.cli_common(),
+                      "--id", "alice", "--idle-timeout", "5", "--hard-timeout", "3")
+        line3 = recv3.wait_for(ASSIGNED_PREFIX, 20.0)
+        expect_eq(line3.split(ASSIGNED_PREFIX, 1)[1].strip(), "alice", "重连后拿回的 id")
+        # hard-timeout 只是让它自己退出；退出码不重要（没收到文件）。
+        recv3.kill()
+    finally:
+        c.shutdown()
+
+
 @scenario("one-byte", "1 字节文件正常完成")
 def one_byte(workdir: Path, bin_dir: Path) -> None:
     _transfer_roundtrip(workdir, bin_dir, 1)

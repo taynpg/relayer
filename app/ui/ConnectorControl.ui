@@ -137,6 +137,28 @@
     </layout>
    </item>
    <item>
+    <layout class="QHBoxLayout" name="horizontalLayoutMyId">
+     <item>
+      <widget class="QLabel" name="labelMyId">
+       <property name="text">
+        <string>本机标识：</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="edMyId">
+       <property name="toolTip">
+        <string>声明自己的标识（对应 relayer-cli 的 --id）。留空则由中继自动分配 client-N。
+该标识同时只能有一条连接：被别人占用时连接会失败，不会自动改名——对照表按 id 固定投递，改名比连不上危险。</string>
+       </property>
+       <property name="placeholderText">
+        <string>留空自动分配（建议填一个固定名字）</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
     <layout class="QHBoxLayout" name="horizontalLayout_4">
      <item>
       <widget class="QLabel" name="label_3">

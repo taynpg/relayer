@@ -3,6 +3,7 @@
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QHeaderView>
+#include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
 #include <QRegularExpression>
@@ -114,6 +115,16 @@ void ConnectorControl::initAuth()
     ui_->ckNoAuth->setChecked(settings.value(relayer::app::settings::kConnectorNoAuth, false).toBool());
     ui_->edPassword->setEnabled(!ui_->ckNoAuth->isChecked());
 
+    // 本机标识：持久化，因为它的全部价值就是"跨重启保持同一个名字"
+    // （对照表按 id 固定投递，见 REWRITE-PLAN §6.2）。空 = 让中继分配。
+    ui_->edMyId->setText(settings.value(relayer::app::settings::kConnectorMyId).toString());
+    connect(ui_->edMyId, &QLineEdit::editingFinished, this,
+            [this]()
+            {
+                QSettings s;
+                s.setValue(relayer::app::settings::kConnectorMyId, ui_->edMyId->text().trimmed());
+            });
+
     connect(ui_->ckNoAuth, &QCheckBox::toggled, this,
             [this](bool checked)
             {
@@ -202,6 +213,13 @@ void ConnectorControl::onConnectClicked()
     conn.port = port;
     conn.password = password;
     conn.noAuth = noAuth;
+    // 本机标识：留空则由中继分配 client-N。填了就是"我要叫这个"，
+    // 被占用会连接失败（不会自动改名）。
+    conn.requestedId = ui_->edMyId->text().trimmed();
+    {
+        QSettings s;
+        s.setValue(relayer::app::settings::kConnectorMyId, conn.requestedId);
+    }
 
     // 不在这里开连接。连接动作发给 MainWindow 汇聚：会话活着就复用
     // （在现有连接上刷列表，id 不变）；不在就建立常驻接收会话——认证

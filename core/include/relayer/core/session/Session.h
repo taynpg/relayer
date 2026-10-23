@@ -216,6 +216,22 @@ public:
     {
         return assignedId_;
     }
+
+    // 客户端：声明"我要叫这个 id"（PROTOCOL.md §11.7）。
+    //
+    // 必须在认证完成后调用（服务端此时已分配过一个临时 id）。服务端用
+    // kAnswerId 应答：接受则身份改成新 id，拒绝则**本会话直接以
+    // kIdTaken / kIdInvalid 结束**——不自动改名，理由见 §11.7：用户
+    // 依赖 id 做"文件固定发给谁"的判断，悄悄改名比连不上危险得多。
+    [[nodiscard]] Status claimPeerId(std::string_view id);
+
+    // 服务端：把已认证会话的身份改成 newId，并把新身份通知对端。
+    //
+    // 只做会话自己知道的两件事：改 assignedId_、发 kAnswerId。
+    // **注册表（peers_/sessions_）的迁移是调用方的事**——Session 不持有
+    // 那张表，也不该猜它的锁与生命周期。
+    [[nodiscard]] Status assignPeerId(std::string newId);
+
     [[nodiscard]] bool authenticated() const noexcept
     {
         return authenticated_;
@@ -342,6 +358,17 @@ private:
     bool heartbeatTimerStarted_ = false;
     std::string assignedId_;
     std::string selfId_;  // 服务端自己的 id，来自配置
+
+    // 客户端发过 kClaimId、还在等应答。收到非零 status 时据此判定
+    // "是我的声明被拒了"，而不是把一切非零 status 都当成分配失败。
+    //
+    // 为什么还需要 claimTarget_：认证完成时服务端会先发一次"临时号"
+    // （client-N），而那条应答可能**晚于**我们的声明到达。只看
+    // claimPending_ 的话，临时号那条 status=0 的应答会把待办状态清掉，
+    // 紧接着的拒绝就被当成"与我无关的应答"忽略——症状是撞名的客户端
+    // 一直挂着，既不报错也不退出。
+    std::string claimTarget_;
+    bool claimPending_ = false;
 
     std::uint64_t framesIn_ = 0;
     std::uint64_t framesOut_ = 0;

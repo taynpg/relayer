@@ -108,6 +108,10 @@ struct Client::Impl
     // 的注释。
     bool startedOnce = false;
 
+    // 已经发过 kClaimId。声明成功后服务端会再回调一次 onAuthenticated
+    // （带新 id），没有这个标志就会无限声明。
+    bool claimSent = false;
+
     std::string assignedId;
 
     // 进度速率的基线。用"两次上报之间走了多少字节"算瞬时速度，比
@@ -389,19 +393,22 @@ struct Client::Impl
             authenticated = true;
             touch();
 
-            // expectId 只在自测时给。对不上时直接失败，而不是"将就用"：
-            // 拿着错的身份去传输，发出去的帧会被中继当成第三方投递，
-            // 表现是"对端一直没反应"，与网络问题无法区分。
+            // 声明标识：认证一过就发，只发一次。
             //
-            // **必须等 id 非空再比**。onAuthenticated 首次回调时身份还是空
-            // （见下面打印处的说明），此时比较必然不等——那样 --expect-id
-            // 会把每次正常连接都判成"身份不符"，而报错里"实际 "后面是空的，
-            // 看上去像服务端没给身份，排查方向直接跑偏。
-            if (!config.expectId.empty() && !assignedId.empty() && assignedId != config.expectId)
+            // 发在这一刻而不是"拿到 id 之后"：服务端在认证完成时就分配了
+            // 临时号并发 kAnswerId，两者到达顺序不确定；而 kClaimId 只要
+            // 在认证之后发就有效（服务端会做改名）。
+            //
+            // claimSent 防重入：声明成功后 assignPeerId 会再回调一次
+            // onAuthenticated（新身份），不设防就会无限声明。
+            if (!config.requestedId.empty() && !claimSent)
             {
-                finish(false, "身份不符：期望 " + config.expectId + "，实际 " + assignedId,
-                       Status::Fail(ErrorCode::kProtocol, "unexpected assigned id"));
-                return;
+                claimSent = true;
+                if (const auto st = self.claimPeerId(config.requestedId); !st.ok())
+                {
+                    finish(false, "声明标识失败：" + config.requestedId, st, true);
+                    return;
+                }
             }
 
             (void)self;
@@ -425,7 +432,13 @@ struct Client::Impl
             // 判据用"非空且与上次不同"而不是单纯的"非空"：服务端理论上可以
             // 改名再通知一次，那时该打新值；而重复通知同一个 id 时重复打印
             // 会让"第一行"这个契约失效。
-            if (!assignedId.empty() && assignedId != previous)
+            //
+            // 声明了标识时还要多一条：**临时号不算数**。认证后服务端先发
+            // client-N，改名成功后再发真正的名字；中间那个 N 一旦打出去，
+            // e2e 的 head -1 就会拿到它（"接收端 id 不是我要的那个"），
+            // GUI 也会闪一下错误的身份。所以只认"等于声明的那个"。
+            const bool identityFinal = config.requestedId.empty() || assignedId == config.requestedId;
+            if (!assignedId.empty() && assignedId != previous && identityFinal)
             {
                 std::printf("ASSIGNED_ID=%s\n", assignedId.c_str());
                 std::fflush(stdout);
@@ -466,6 +479,21 @@ struct Client::Impl
             if (!config.serverAllowNoAuth && st.message.find("non-auth frame") != std::string::npos)
             {
                 st.message += "（中继可能以 --allow-no-auth 启动，客户端请加 --no-auth 重试）";
+            }
+            // 声明标识被拒：这不是"网络断了"，措辞必须让用户知道该改什么。
+            // 两种原因的处置完全不同——被占用是要么换名字、要么关掉占用的
+            // 那台；不合法是名字本身不能用。
+            if (st.code == ErrorCode::kIdTaken)
+            {
+                finish(false, "标识「" + config.requestedId + "」已被占用，该标识同时只能有一条连接", std::move(st),
+                       true);
+                return;
+            }
+            if (st.code == ErrorCode::kIdInvalid)
+            {
+                finish(false, "标识「" + config.requestedId + "」不合法（不能为空/超长/含非法字符）", std::move(st),
+                       true);
+                return;
             }
             finish(false, "与中继的连接断开", std::move(st), true);
         };

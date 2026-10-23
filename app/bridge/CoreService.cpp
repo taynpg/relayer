@@ -84,6 +84,8 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
     cfg.port = conn.port;
     cfg.password = fromQt(conn.password);
     cfg.serverAllowNoAuth = conn.noAuth;
+    // 声明本机标识（PROTOCOL.md §11.7）：空则由中继分配 client-N。
+    cfg.requestedId = fromQt(conn.requestedId);
 
     // 记下这组参数（GUI 线程），供 refreshPeers 判断会话是否对应表单地址。
     activeConnKey_ = conn.host + QStringLiteral(":") + QString::number(conn.port) + QStringLiteral(":") +

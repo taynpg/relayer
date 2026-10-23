@@ -244,6 +244,8 @@ std::string_view toString(FrameType t) noexcept
         return "ask_archive_ready";
     case FrameType::kAnswerArchiveReady:
         return "answer_archive_ready";
+    case FrameType::kClaimId:
+        return "claim_id";
 
     case FrameType::kFileRequestSend:
         return "file_request_send";

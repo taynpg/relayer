@@ -15,6 +15,8 @@ namespace settings
 inline constexpr const char *kConnectorNoAuth = "connector/noAuth";
 inline constexpr const char *kConnectorRecent = "connector/recent";
 inline constexpr const char *kConnectorLast = "connector/last";
+// 本机标识（声明给中继的名字）。空 = 让中继分配。
+inline constexpr const char *kConnectorMyId = "connector/myId";
 
 // 接收
 inline constexpr const char *kReceiverDir = "receiver/dir";

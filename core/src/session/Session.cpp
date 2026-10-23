@@ -349,7 +349,37 @@ void Session::handleInbound(const Frame &frame)
             finish(failStatus(ErrorCode::kProtocol, "malformed answer_id: " + err), true);
             return;
         }
-        if (status == 0 && assignedId_ != id)
+        if (status != 0)
+        {
+            // 非零 status 有两种来源：认证后"没分配到 id"（既有语义，可以
+            // 容忍——服务端没配分配器时就是这样），以及我们自己刚发的
+            // kClaimId 被拒。后者必须当场失败：用户声明了身份，达不成就
+            // 没有可用的 id，继续跑只会拿着临时号发文件、发到错的人那里。
+            if (claimPending_)
+            {
+                claimPending_ = false;
+                claimTarget_.clear();
+                const bool taken = status == static_cast<std::uint8_t>(IdAnswerStatus::kTaken);
+                ++framesRejected_;
+                finish(failStatus(taken ? ErrorCode::kIdTaken : ErrorCode::kIdInvalid,
+                                  taken ? "requested id is already in use by another client"
+                                        : "requested id was rejected by the server"),
+                       true);
+            }
+            return;
+        }
+
+        // 声明成功（或服务端重新分配）：以服务端回的 id 为准。
+        //
+        // 只有在"拿到的就是这个声明的名字"时才算声明结束。服务端在认证
+        // 完成时已发过一次临时号，那条应答可能比声明还晚到——它同样是
+        // status=0，但显然不代表声明有了结果。
+        if (claimPending_ && (claimTarget_.empty() || id == claimTarget_))
+        {
+            claimPending_ = false;
+            claimTarget_.clear();
+        }
+        if (assignedId_ != id)
         {
             assignedId_ = id;
             // 身份变了要再通知一次：上层可能要在 UI 上显示它，或者
@@ -602,6 +632,73 @@ Status Session::send(const Frame &frame)
     return deliver(frame);
 }
 
+Status Session::claimPeerId(std::string_view id)
+{
+    if (config_.role != Role::kClient)
+    {
+        return failStatus(ErrorCode::kProtocol, "claimPeerId is client-only");
+    }
+    if (!authenticated_)
+    {
+        // 服务端只在认证完成后才处理业务帧；提前发会被当成相位错误断开。
+        return failStatus(ErrorCode::kAuthFailed, "claimPeerId requires an authenticated session");
+    }
+
+    Frame claim;
+    claim.type = FrameType::kClaimId;
+    // 本地先校验格式：非法 id 发出去也是被拒，早失败能指到调用点。
+    if (const auto st = encodeClaimId(id, claim.body); !st.ok())
+    {
+        return st;
+    }
+
+    // 先置位再发：应答可能在同一轮事件循环里就回来，顺序反了会漏判。
+    claimTarget_.assign(id);
+    claimPending_ = true;
+    const auto st = send(claim);
+    if (!st.ok())
+    {
+        claimPending_ = false;
+        claimTarget_.clear();
+    }
+    return st;
+}
+
+Status Session::assignPeerId(std::string newId)
+{
+    if (config_.role != Role::kServer)
+    {
+        return failStatus(ErrorCode::kProtocol, "assignPeerId is server-only");
+    }
+    if (!authenticated_)
+    {
+        return failStatus(ErrorCode::kAuthFailed, "assignPeerId requires an authenticated session");
+    }
+    if (!isValidPeerId(newId))
+    {
+        return failStatus(ErrorCode::kProtocol, "assigned id is not a valid routing field");
+    }
+
+    assignedId_ = std::move(newId);
+
+    Frame answer;
+    answer.type = FrameType::kAnswerId;
+    if (const auto st = encodeAnswerId(assignedId_, answer.body); !st.ok())
+    {
+        return st;
+    }
+    // 通知失败不当成致命错误：对端可能刚好断开，此时它已经收不到任何东西。
+    (void)deliver(answer);
+
+    // 上层（Server）靠这次回调把注册表里的键换掉。通知走的是同一条
+    // "身份变了要再说一次"的路径，客户端侧无需新增处理。
+    if (handler_.onAuthenticated)
+    {
+        handler_.onAuthenticated(*this, assignedId_);
+    }
+    return Status::Ok();
+}
+
 Status Session::forward(Frame frame, std::string_view authenticatedId)
 {
     if (finished_)
@@ -702,8 +799,7 @@ void Session::finish(Status status, bool closeTransport)
     // 投递而不是同步调用。finish() 有很多调用点（包括在 Connection 的帧
     // 回调里），同步通知会让上层在"会话还在处理这一帧"的栈上就把会话
     // 拆掉，之后本函数剩下的语句会访问已销毁的对象。
-    asio::post(ctx_,
-               [n = std::move(notify), id = std::move(id), s = std::move(status)]() mutable
+    asio::post(ctx_, [n = std::move(notify), id = std::move(id), s = std::move(status)]() mutable
                { n(std::move(id), std::move(s)); });
 }
 

@@ -255,13 +255,25 @@ std::vector<char> encodeAskId()
 
 Status encodeAnswerId(std::string_view assignedId, std::vector<char> &out)
 {
+    return encodeAnswerId(IdAnswerStatus::kOk, assignedId, out);
+}
+
+Status encodeAnswerId(IdAnswerStatus status, std::string_view assignedId, std::vector<char> &out)
+{
     out.clear();
+
+    if (status != IdAnswerStatus::kOk)
+    {
+        // 拒绝时只发状态码，不带 id：带了会让人以为"这个 id 也有效"。
+        putU8(out, static_cast<std::uint8_t>(status));
+        return Status::Ok();
+    }
 
     if (assignedId.empty())
     {
         // 空 id 表示"服务端没能给你分配"——用 status=1 表达，
         // 而不是发一个长度为 0 的 id（那会被对端当成"成功但身份空白"）。
-        putU8(out, 1);
+        putU8(out, static_cast<std::uint8_t>(IdAnswerStatus::kNotAssigned));
         return Status::Ok();
     }
 
@@ -270,10 +282,52 @@ Status encodeAnswerId(std::string_view assignedId, std::vector<char> &out)
         return Status::Fail(ErrorCode::kProtocol, "assigned id is not a valid routing field");
     }
 
-    putU8(out, 0);
+    putU8(out, static_cast<std::uint8_t>(IdAnswerStatus::kOk));
     putU8(out, static_cast<std::uint8_t>(assignedId.size()));
     out.insert(out.end(), assignedId.begin(), assignedId.end());
     return Status::Ok();
+}
+
+Status encodeClaimId(std::string_view id, std::vector<char> &out)
+{
+    out.clear();
+    if (!isValidPeerId(id))
+    {
+        return Status::Fail(ErrorCode::kProtocol, "claim id is not a valid routing field");
+    }
+    putU8(out, static_cast<std::uint8_t>(id.size()));
+    out.insert(out.end(), id.begin(), id.end());
+    return Status::Ok();
+}
+
+bool decodeClaimId(const std::vector<char> &body, std::string &id, std::string &err)
+{
+    id.clear();
+
+    Reader r(body);
+    const auto len = r.u8();
+    if (!r.ok())
+    {
+        err = "claim_id truncated: missing length byte";
+        return false;
+    }
+    if (len == 0)
+    {
+        err = "claim_id carries an empty id";
+        return false;
+    }
+    if (r.remaining() != len)
+    {
+        err = "claim_id length mismatch";
+        return false;
+    }
+    id = r.str(len);
+    if (!r.ok())
+    {
+        err = "claim_id truncated";
+        return false;
+    }
+    return true;
 }
 
 bool decodeAnswerId(const std::vector<char> &body, std::uint8_t &status, std::string &assignedId, std::string &err)

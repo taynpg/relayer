@@ -180,7 +180,12 @@ void Server::doAccept()
 
 void Server::registerPeer(session::Session &self, const std::string &id, const std::string &addrText)
 {
-    ++stats_.authenticated;
+    // 改名会再触发一次这个回调（assignPeerId → onAuthenticated），
+    // 但"认证成功"只发生了一次，计数不能跟着涨。
+    if (!renaming_)
+    {
+        ++stats_.authenticated;
+    }
 
     // 表满或重名：拒绝这条连接。
     //
@@ -279,6 +284,12 @@ void Server::onFrame(session::Session &self, const Frame &frame)
 
 void Server::handleLocal(session::Session &self, const Frame &frame)
 {
+    if (frame.type == FrameType::kClaimId)
+    {
+        handleClaimId(self, frame);
+        return;
+    }
+
     // 目前只有一件事需要服务端在本地回答：问在线列表。
     //
     // 问 id（kAskId）由 core 的握手阶段自动应答，走不到这里；心跳同理。
@@ -301,6 +312,84 @@ void Server::handleLocal(session::Session &self, const Frame &frame)
     out.to = self.assignedId();
     out.body = std::move(body);
     (void)self.send(out);
+}
+
+// 客户端声明标识（PROTOCOL.md §11.7）。
+//
+// 三种拒绝、一种幂等、一种接受：
+//   - 结构坏 / id 不合法（空、超长、含 NUL）/ 撞服务端自己的 id → kInvalid
+//   - 已被别人占用                                                  → kTaken
+//   - 就是自己现在这个名字                                          → 不作答（它已经知道了）
+//   - 空闲                                                          → 迁表 + assign
+//
+// 拒绝**不断开**（见头文件注释：先发后关会把理由吃掉）。本项目客户端
+// 收到非零 status 会自己关闭；不听话的客户端也就停在临时 id 上，
+// 不构成权限问题。
+void Server::handleClaimId(session::Session &self, const Frame &frame)
+{
+    auto reject = [&](session::IdAnswerStatus status)
+    {
+        Frame answer;
+        answer.type = FrameType::kAnswerId;
+        std::vector<char> body;
+        if (session::encodeAnswerId(status, std::string(), body).ok())
+        {
+            answer.body = std::move(body);
+            (void)self.send(answer);
+        }
+    };
+
+    std::string id;
+    std::string err;
+    if (!session::decodeClaimId(frame.body, id, err))
+    {
+        ++stats_.idConflicts;
+        reject(session::IdAnswerStatus::kInvalid);
+        return;
+    }
+
+    // 已经是这个名字：幂等返回。客户端重连后重复声明、或用户连点两次
+    // 都会走到这里，不该被当成冲突。
+    if (id == self.assignedId())
+    {
+        return;
+    }
+
+    if (!session::isValidPeerId(id) || id == config_.serverId)
+    {
+        // 撞服务端 id 必须单独拦：planRoute 里"to == 服务端 id"优先于
+        // "to == 自己 id"，一个叫 relayerd 的客户端永远收不到转发帧，
+        // 症状是"对方在线但发不过去"。
+        ++stats_.idConflicts;
+        reject(session::IdAnswerStatus::kInvalid);
+        return;
+    }
+
+    if (peers_.contains(id))
+    {
+        // 撞名：拒绝这次声明。**不**顶掉先到者（那等于允许后来者踢人），
+        // 也**不**自动改名（用户的对照表按 id 固定投递，改名比连不上危险）。
+        ++stats_.idConflicts;
+        reject(session::IdAnswerStatus::kTaken);
+        return;
+    }
+
+    // 迁表：先摘旧号，再让 assignPeerId → onAuthenticated → registerPeer
+    // 把新号登记进去。登记逻辑只保留一处（registerPeer），否则 peers_ /
+    // sessions_ 的一致性会有两条各自演化的维护路径。
+    const std::string oldId = self.assignedId();
+    peers_.remove(oldId);
+    sessions_.erase(oldId);
+
+    renaming_ = true;
+    const Status st = self.assignPeerId(id);
+    renaming_ = false;
+    if (!st.ok())
+    {
+        // 走到这里说明编码失败之类的内部问题（id 已经校验过）。会话此时
+        // 既没旧号也没新号，继续留着只会变成"在线但不可达"，直接断开。
+        self.close();
+    }
 }
 
 void Server::onClosed(std::string id, Status status)

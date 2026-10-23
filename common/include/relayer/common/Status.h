@@ -53,6 +53,8 @@ enum class ErrorCode
     // --- 协议与认证 ---
     kProtocol = 200,  // 对端发来的字节不符合协议（magic/版本/长度/CRC 不对）
     kAuthFailed,      // 口令错、proof 不匹配、重放
+    kIdTaken,         // 想用的标识已被占用（kClaimId 被拒，PROTOCOL.md §11.7）
+    kIdInvalid,       // 想用的标识不合法（空 / 超长 / 含 NUL）
 };
 
 // 错误码的稳定名称，用于日志。**不要**用于本地化 UI 文案：

@@ -44,6 +44,10 @@ std::string_view toString(ErrorCode code) noexcept
         return "protocol";
     case ErrorCode::kAuthFailed:
         return "auth_failed";
+    case ErrorCode::kIdTaken:
+        return "id_taken";
+    case ErrorCode::kIdInvalid:
+        return "id_invalid";
     }
 
     // 走到这里说明新增了枚举值却没更新本函数。

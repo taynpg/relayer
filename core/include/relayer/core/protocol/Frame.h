@@ -83,6 +83,10 @@ enum class FrameType : std::uint16_t
     kAskArchiveReady = 132,
     kAnswerArchiveReady = 133,
 
+    // 客户端声明"我要叫这个 id"（PROTOCOL.md §11.7）。
+    // 应答复用 kAnswerId 的 status + id 结构，不另开应答帧。
+    kClaimId = 134,
+
     // --- 文件传输会话管理（500..549） ---
     kFileRequestSend = 500,
     kFileAnswerSend = 501,

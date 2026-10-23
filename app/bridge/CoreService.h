@@ -47,11 +47,18 @@ struct ConnInfo
     quint16 port = 0;
     QString password;
 
-    // 显式声明"中继已关闭认证"（对应服务端 --allow-no-auth）。
+    // 声明"中继已关闭认证"（对应服务端 --allow-no-auth）。
     // 不从 password 为空自动推断：漏填口令应当报错，而不是静默降级成
     // 不认证——与服务端侧"要关认证必须显式 --allow-no-auth"是同一条
     // 原则在客户端的镜像。
     bool noAuth = false;
+
+    // 本机标识（PROTOCOL.md §11.7）。空 = 由中继分配 client-N。
+    //
+    // 非空时客户端认证后立刻声明它：接受则本机 id 固定下来（跨重连不变），
+    // 被占用则连接失败。对照表的对端 id 依赖这个稳定性——id 漂移会让
+    // "这行固定发 A"悄悄变成发给别人。
+    QString requestedId;
 };
 
 class CoreService : public QObject

@@ -78,6 +78,11 @@ struct ServerStats
     std::uint64_t unroutable = 0;     // 目标不在线
     std::uint64_t localFrames = 0;
 
+    // kClaimId 被拒的次数（标识被占用 / 非法 / 撞服务端自己的 id）。
+    // 运营上值得盯：正常用户不会反复抢同一个名字，非零往往意味着
+    // 两台机器配了同一个标识，或者有人在试探。
+    std::uint64_t idConflicts = 0;
+
     // 测试注入丢掉的数据帧数。生产环境恒为 0；非 0 就说明这个服务端
     // 不是按生产配置跑起来的——日志里必须能看出来。
     std::uint64_t droppedForTest = 0;
@@ -133,6 +138,14 @@ private:
     // 处理"发给服务端自己"的帧（问 id、问列表、心跳之外的东西）。
     void handleLocal(session::Session &self, const protocol::Frame &frame);
 
+    // 处理 kClaimId（客户端声明自己的标识，PROTOCOL.md §11.7）。
+    //
+    // 撞名时的语义来自 v1：**拒绝这次声明**，不顶掉先到者、不自动改名。
+    // 拒绝只回 kAnswerId(status) 而**不立刻断开**——Connection::doClose
+    // 会清空写队列，先发后关等于把拒绝理由吃掉，客户端只能看到"连接断了"。
+    // 由客户端收到拒绝后自己断开（本项目的 CLI/GUI 都会）。
+    void handleClaimId(session::Session &self, const protocol::Frame &frame);
+
     [[nodiscard]] std::string allocate();
 
     asio::io_context &ctx_;
@@ -143,6 +156,11 @@ private:
 
     session::PeerTable peers_;
     std::uint64_t nextIdHint_ = 1;
+
+    // 正在执行"声明改名"的登记。registerPeer 据此区分"第一次认证"与
+    // "改名后的重新登记"，避免把同一条连接计两次 authenticated。
+    // 只在 handleClaimId → assignPeerId 的同步回调链上为 true。
+    bool renaming_ = false;
 
     // 已转发的传输数据帧序号（从 1 开始），配合 config_.dropDataFrames
     // 决定"这一帧丢不丢"。与 nextIdHint_ 一样只在单线程上访问。

@@ -321,6 +321,82 @@ TEST_CASE("encodeAnswerId refuses an over-long id", "[peer][codec]")
 }
 
 // ===========================================================================
+// kClaimId 载荷（PROTOCOL.md §11.7）
+// ===========================================================================
+
+TEST_CASE("claim id roundtrip", "[peer][codec]")
+{
+    std::vector<char> body;
+    REQUIRE(encodeClaimId("alice", body).ok());
+    // len(1) + id(5)
+    REQUIRE(body.size() == 6);
+
+    std::string id;
+    std::string err;
+    REQUIRE(decodeClaimId(body, id, err));
+    REQUIRE(id == "alice");
+}
+
+TEST_CASE("claim id encodes UTF-8 names byte-wise", "[peer][codec]")
+{
+    // 长度是**字节数**不是字符数：中文名字按 UTF-8 编码后占 3 字节/字。
+    // 用字符数会让解码侧把 id 截断成半个汉字。
+    const std::string name = "小明";
+    std::vector<char> body;
+    REQUIRE(encodeClaimId(name, body).ok());
+    REQUIRE(body.size() == 1 + name.size());
+
+    std::string id;
+    std::string err;
+    REQUIRE(decodeClaimId(body, id, err));
+    REQUIRE(id == name);
+}
+
+TEST_CASE("claim id refuses empty and over-long ids", "[peer][codec]")
+{
+    std::vector<char> body;
+    REQUIRE_FALSE(encodeClaimId("", body).ok());
+    REQUIRE_FALSE(encodeClaimId(std::string(256, 'x'), body).ok());
+    // 含 NUL 的 id 会让"看起来相同"的两个名字不等，一律拒绝。
+    const std::string withNul("ab\0cd", 5);
+    REQUIRE_FALSE(encodeClaimId(withNul, body).ok());
+}
+
+TEST_CASE("claim id rejects malformed payloads", "[peer][codec]")
+{
+    std::string id;
+    std::string err;
+
+    // 空载荷：没有长度字节
+    REQUIRE_FALSE(decodeClaimId({}, id, err));
+    // 长度 0：声明"没有名字"没有意义
+    REQUIRE_FALSE(decodeClaimId({0}, id, err));
+    // 长度说 5 但只给 3 字节
+    REQUIRE_FALSE(decodeClaimId({5, 'a', 'b', 'c'}, id, err));
+    // 长度说 3 却给了 5 字节（尾部多余 = 结构不符，这里的严格是对称的：
+    // 发送方永远按同一张表编码，多出来的字节说明不是这张表）
+    REQUIRE_FALSE(decodeClaimId({3, 'a', 'b', 'c', 'd', 'e'}, id, err));
+}
+
+TEST_CASE("answer id carries claim rejection statuses without an id", "[peer][codec]")
+{
+    // 拒绝时只发状态码：带 id 会让客户端误以为"这个 id 也有效"。
+    for (const auto status : {IdAnswerStatus::kTaken, IdAnswerStatus::kInvalid})
+    {
+        std::vector<char> body;
+        REQUIRE(encodeAnswerId(status, "", body).ok());
+        REQUIRE(body.size() == 1);
+
+        std::uint8_t decoded = 0;
+        std::string id;
+        std::string err;
+        REQUIRE(decodeAnswerId(body, decoded, id, err));
+        REQUIRE(decoded == static_cast<std::uint8_t>(status));
+        REQUIRE(id.empty());
+    }
+}
+
+// ===========================================================================
 // kAnswerClientList 载荷
 // ===========================================================================
 
