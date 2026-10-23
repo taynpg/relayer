@@ -113,6 +113,21 @@ void MainWindow::wireSignals()
     connect(connector_, &ConnectorControl::logMessage, log_, &LogControl::appendLog);
     connect(connector_, &ConnectorControl::probeRequested, this, &MainWindow::onProbeRequested);
     connect(connector_, &ConnectorControl::disconnectRequested, this, &MainWindow::onDisconnectRequested);
+    connect(connector_, &ConnectorControl::browsePeerRequested, this, &MainWindow::onBrowsePeerRequested);
+    connect(connector_, &ConnectorControl::localBrowseRequested, this,
+            [this]()
+            {
+                explorer_->useLocalSource();
+                log_->appendLog(QStringLiteral("[浏览] 切回本地\n"));
+            });
+    connect(explorer_, &ExplorerControl::remoteListRequested, this,
+            [this](const QString &peer, const QString &relPath)
+            {
+                if (!core_->browsePeerOnSession(peer, relPath))
+                {
+                    explorer_->applyRemoteEntries(false, QStringLiteral("当前不能列举（会话不可用或正在传输）"), {});
+                }
+            });
 
     connect(comparison_, &ComparisonControl::logMessage, log_, &LogControl::appendLog);
     connect(comparison_, &ComparisonControl::exploreLocalRequested, explorer_,
@@ -443,6 +458,24 @@ void MainWindow::onRemoteCheckRequested(const relayer::app::RelayTaskItems &item
     remoteCheckIndex_ = 0;
     log_->appendLog(QStringLiteral("[检查] 开始检查 %1 项\n").arg(remoteChecks_.size()));
     nextRemoteCheck();
+}
+
+void MainWindow::onBrowsePeerRequested(const QString &peerId, const QString &peerName)
+{
+    if (peerId.isEmpty())
+    {
+        return;
+    }
+    if (!core_->busy())
+    {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请先连接中继——浏览对端要走常驻接收会话。"));
+        return;
+    }
+    // v1 的语义：浏览面板只有一套，切的是数据源（AskType → Source）。
+    // 不做独立窗口——那样会把表格/导航/筛选复制一遍，且以后做本地↔远端
+    // 拖拽时两个窗口之间没有共享状态可用。
+    explorer_->setRemotePeer(peerId, peerName);
+    log_->appendLog(QStringLiteral("[浏览] 切到 %1 的共享目录\n").arg(peerId));
 }
 
 void MainWindow::nextRemoteCheck()

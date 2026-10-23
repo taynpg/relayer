@@ -58,6 +58,7 @@ private slots:
     void onDisconnectRequested();
     void onTransTaskRun(const relayer::app::RelayTaskItems &items);
     void onRemoteCheckRequested(const relayer::app::RelayTaskItems &items);
+    void onBrowsePeerRequested(const QString &peerId, const QString &peerName);
     void onRemoteBrowseFinished(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows);
 
 private:

@@ -57,6 +57,13 @@ signals:
     // 右键"发送文件到此对端"。MainWindow 负责弹文件选择框并调 CoreService。
     void sendToPeerRequested(const QString &peerId, const QString &peerName);
 
+    // 右键"浏览此对端的目录"（PROTOCOL.md §11.8）。窗口由 MainWindow 建，
+    // 因为浏览要走 CoreService 的常驻会话。
+    void browsePeerRequested(const QString &peerId, const QString &peerName);
+
+    // 右键"回到本地浏览"：把浏览面板切回本地数据源（v1 的本地/远端切换）。
+    void localBrowseRequested();
+
     // 用户点了"连接"，参数校验通过。MainWindow 记住这组参数，供发送与
     // 自动接收复用（CoreService 一次一个操作，每次操作都要重新给参数）。
     void probeRequested(const relayer::app::ConnInfo &conn);

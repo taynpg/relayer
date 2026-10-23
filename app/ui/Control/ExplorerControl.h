@@ -1,10 +1,12 @@
 #pragma once
 
 #include <QDialog>
+#include <QList>
 #include <QStringList>
 #include <QVector>
 
 #include "OwnTableWidget.h"
+#include "bridge/CoreService.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui
@@ -15,29 +17,55 @@ QT_END_NAMESPACE
 
 class QComboBox;
 
-// 本地文件浏览面板（v1 ExplorerControl 的 v2 版）。
+// 文件浏览面板——**一套 UI，两种数据源**（v1 ExplorerControl 的形状）。
 //
-// **范围决定**（E3.3）：只做本地目录浏览。v1 的"远端面板"靠其私有协议的
-// 目录列举能力，v2 协议当前没有对应帧（PROTOCOL.md 26 帧里没有 list-dir），
-// 远端浏览属阶段 F / 协议扩展。因此：
-//   - 保留：导航（访问/家目录/上一级/双击进入）、表头排序（目录恒置顶）、
-//     名称模糊筛选 + 后缀多选筛选（清单同 v1）、拖出打包 InfoDrop、
-//     右键菜单（动作表写法，清单 #5）：打开/复制全路径/重命名/删除/新建文件夹
-//   - 未做（如实标注，不是已完成）：SHA256/粗校验/时间戳校验/压缩/解压/
-//     详细信息/远端面板——依赖协议扩展或 RelayTask，后续增量补
+// v1 用 `askType_` + `BaseAskDF::Create(AskType)` 区分本地/远端，UI 与交互
+// 完全共用（连跨面板拖拽都是同一套代码，见 v1 ExplorerControl.cpp 的 peerDf）。
+// v2 沿用这个结构，只把"数据源"换成同步/异步两条路：
 //
-// 与 v1 的结构差异：
-//   - 不用 WorkerThread/BaseAskDF/WaitDialog：本地目录列举同步完成（本地盘
-//     足够快；网络盘慢的场景等阶段 F 换 QtConcurrent，不预造）
-//   - 不用 v1 协议的 FileMeta：本地浏览是 GUI 的事，用自己的轻量 FileEntry
-//   - 表格行 = 源数据的投影：currentEntries_ 保存源数据，表格按筛选/排序
-//     条件重建（rebuildView），行号不作为持久状态
+//   - Local ：直接读盘（QDir），同步返回；
+//   - Remote：发 kAskFileList（PROTOCOL.md §11.8），结果经
+//             applyRemoteEntries() 异步送回。
+//
+// 两条路共用同一份表格、排序、筛选、导航逻辑——这正是"只换子类、不换 UI"
+// 的意义。差异只在三处，都有明确理由：
+//   1. 远端是**只读**：重命名/删除/新建文件夹都是本地文件系统操作，远端没有
+//      对应帧（要做得先有协议）；远端模式不显示这些动作。
+//   2. 远端不拖出：拖拽载荷是"本地路径"，远端条目没有本地路径。要支持得
+//      先做下载，那是另一件事。
+//   3. 远端路径是**相对共享根**（可能是另一个系统的路径规则），显示成
+//      `peer:/rel`，且不可手输。
+//
+// 与 v1 的另一处差异：不用 WorkerThread/BaseAskDF/WaitDialog。本地列举同步
+// 完成（本地盘足够快）；远端本身就是异步的，等信号即可，不需要等待窗口。
 class ExplorerControl : public QDialog
 {
     Q_OBJECT
 
 public:
+    // 数据源。与 v1 的 AskType 等价，只是 v2 只有两个。
+    enum class Source
+    {
+        Local,
+        Remote,
+    };
+
     explicit ExplorerControl(QWidget *parent = nullptr);
+
+    // 切到远端：browse 该对端的共享根。同一个控件，UI 不变（v1 语义）。
+    void setRemotePeer(const QString &peerId, const QString &peerName);
+
+    // 切回本地浏览。
+    void useLocalSource();
+
+    [[nodiscard]] Source source() const
+    {
+        return source_;
+    }
+
+    // 远端列举的结果（MainWindow 从 CoreService 送回来）。
+    // ok=false 时 summary 说明原因（未开共享 / 目录不存在 / 会话不可用）。
+    void applyRemoteEntries(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows);
 
     // 当前浏览的目录（空 = 尚未进入任何目录）。
     QString currentPath() const
@@ -60,6 +88,10 @@ public:
 signals:
     // 目录浏览失败的提示（进入失败、删除失败等）。MainWindow 转发到日志。
     void notice(const QString &msg);
+
+    // 远端模式下的列举请求（relPath 相对对端共享根，空 = 根）。
+    // 本控件不碰网络：只发请求，结果由 applyRemoteEntries 送回。
+    void remoteListRequested(const QString &peerId, const QString &relPath);
 
 private:
     struct FileEntry
@@ -97,6 +129,16 @@ private:
     void onNewDir();
 
     static bool lessThan(const FileEntry &a, const FileEntry &b, int column);
+
+    // 数据源状态。remotePendingPath_ 记"这次请求要去的路径"——远端是异步的，
+    // 回来之前 currentPath_ 不能改，否则中途失败会把界面停在一个没进去的目录上。
+    Source source_ = Source::Local;
+    QString peerId_;
+    QString peerName_;
+    QString remotePendingPath_;
+
+    // 远端模式下把 relPath 显示成 `peer:/rel`（用户要能一眼看出这是远端）。
+    [[nodiscard]] QString displayPath() const;
 
     Ui::ExplorerControl *ui_ = nullptr;
     ExpDropTable *table_ = nullptr;  // 表格本体由 initControl 动态创建，塞进 .ui 的占位 widget

@@ -23,6 +23,19 @@
 
 namespace
 {
+// 远端路径一律用 `a/b`（协议里也是这个形式），不套用本地平台规则：
+// 对端可能是另一个系统，本地规则未必适用。
+QString joinRel(const QString &base, const QString &name)
+{
+    return base.isEmpty() ? name : base + QLatin1Char('/') + name;
+}
+
+QString parentRel(const QString &path)
+{
+    const auto slash = path.lastIndexOf(QLatin1Char('/'));
+    return slash < 0 ? QString() : path.left(slash);
+}
+
 // 后缀筛选里代表"无后缀文件"的特殊标签。
 constexpr const char *kNoExtLabel = "(无后缀)";
 
@@ -137,6 +150,20 @@ bool ExplorerControl::listDir(const QString &dir, QVector<FileEntry> &entries) c
 
 void ExplorerControl::enterPath(const QString &path)
 {
+    if (source_ == Source::Remote)
+    {
+        // 远端：异步。只发请求，等 applyRemoteEntries 回来才动 currentPath_。
+        const QString rel = path;
+        remotePendingPath_ = rel;
+        // 先显示"要去的地方"，回来再以 currentPath_ 为准（失败时停在原地）。
+        ui_->cbPath->setCurrentText(QStringLiteral("%1:/%2").arg(peerId_, rel));
+        table_->setRowCount(0);
+        emit notice(
+            QStringLiteral("[浏览] 读取 %1:%2 …").arg(peerId_, rel.isEmpty() ? QStringLiteral("<共享根>") : rel));
+        emit remoteListRequested(peerId_, rel);
+        return;
+    }
+
     const QString cleaned = QDir::cleanPath(path);
     if (cleaned.isEmpty())
     {
@@ -157,11 +184,24 @@ void ExplorerControl::enterPath(const QString &path)
 
 void ExplorerControl::onEnter()
 {
+    if (source_ == Source::Remote)
+    {
+        // 远端路径不可手输：它相对对端共享根，手敲绝对路径没有意义。
+        // 导航靠双击、上一级与"根目录"按钮。
+        return;
+    }
     enterPath(ui_->cbPath->currentText().trimmed());
 }
 
 void ExplorerControl::onHome()
 {
+    if (source_ == Source::Remote)
+    {
+        // 远端模式下这个按钮是"回到共享根"（按钮文字在 setRemotePeer 里改）。
+        enterPath(QString());
+        return;
+    }
+
     // 家目录 + 本机盘符列表进下拉，覆盖"换盘"的入口（v1 的 AskHomeAndDriver）。
     const QString home = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
     ui_->cbPath->clear();
@@ -176,6 +216,15 @@ void ExplorerControl::onHome()
 
 void ExplorerControl::onUp()
 {
+    if (source_ == Source::Remote)
+    {
+        if (currentPath_.isEmpty())
+        {
+            return;  // 已在根
+        }
+        enterPath(parentRel(currentPath_));
+        return;
+    }
     if (currentPath_.isEmpty())
     {
         return;
@@ -199,7 +248,92 @@ void ExplorerControl::onDoubleClick(int row)
     {
         return;  // 只有目录可进入；文件的"打开"在右键菜单里
     }
+    if (source_ == Source::Remote)
+    {
+        enterPath(joinRel(currentPath_, nameItem->text()));
+        return;
+    }
     enterPath(QDir(currentPath_).filePath(nameItem->text()));
+}
+
+QString ExplorerControl::displayPath() const
+{
+    if (source_ == Source::Local)
+    {
+        return currentPath_;
+    }
+    return QStringLiteral("%1:/%2").arg(peerId_, currentPath_);
+}
+
+void ExplorerControl::setRemotePeer(const QString &peerId, const QString &peerName)
+{
+    source_ = Source::Remote;
+    peerId_ = peerId;
+    peerName_ = peerName;
+    currentPath_.clear();
+    entries_.clear();
+    remotePendingPath_.clear();
+
+    // 远端只读：拖出（载荷是本地路径）与文件系统操作都不适用，
+    // 直接关掉入口，而不是留着能点但点了报错。
+    table_->setDragEnabled(false);
+    ui_->cbPath->setEditable(false);
+    ui_->btnEnter->setEnabled(false);
+    ui_->btnHome->setText(QStringLiteral("共享根"));
+    ui_->filterWidget->setVisible(ui_->btnFilter->isChecked());
+
+    ui_->cbPath->setCurrentText(displayPath());
+    rebuildView();
+    enterPath(QString());
+}
+
+void ExplorerControl::useLocalSource()
+{
+    source_ = Source::Local;
+    peerId_.clear();
+    peerName_.clear();
+    currentPath_.clear();
+    entries_.clear();
+
+    table_->setDragEnabled(true);
+    ui_->cbPath->setEditable(true);
+    ui_->btnEnter->setEnabled(true);
+    ui_->btnHome->setText(QStringLiteral("家目录"));
+    rebuildView();
+    onHome();
+}
+
+void ExplorerControl::applyRemoteEntries(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows)
+{
+    if (source_ != Source::Remote)
+    {
+        return;  // 用户已经切回本地，迟到的应答丢掉
+    }
+    if (!ok)
+    {
+        // 失败时不要停在"没进去的目录"上：路径保持原样，表格清空并说明原因。
+        entries_.clear();
+        rebuildView();
+        ui_->cbPath->setCurrentText(displayPath());
+        emit notice(QStringLiteral("[浏览] %1").arg(summary));
+        return;
+    }
+
+    currentPath_ = remotePendingPath_;
+    entries_.clear();
+    entries_.reserve(rows.size());
+    for (const auto &r : rows)
+    {
+        FileEntry e;
+        e.name = r.name;
+        e.isDir = r.isDir;
+        e.size = static_cast<qint64>(r.size);
+        e.modifiedMs = r.mtime > 0 ? r.mtime * 1000 : 0;
+        entries_.push_back(e);
+    }
+    ui_->cbPath->setCurrentText(displayPath());
+    updateExtOptions();
+    rebuildView();
 }
 
 void ExplorerControl::onHeaderClicked(int index)
@@ -409,6 +543,15 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
         singleRow ? QDir(currentPath_).filePath(table_->item(rows[0], toInt(ExpColumn::Name))->text()) : QString();
 
     QMenu menu(this);
+    if (source_ == Source::Remote)
+    {
+        // 远端只读：本地那套（打开/复制路径/重命名/删除/新建）全不适用。
+        // 留一个刷新，够用且不会让人误以为能改对方磁盘。
+        connect(menu.addAction(QStringLiteral("刷新")), &QAction::triggered, this,
+                [this]() { enterPath(currentPath_); });
+        menu.exec(table_->viewport()->mapToGlobal(pos));
+        return;
+    }
     const struct
     {
         bool visible;

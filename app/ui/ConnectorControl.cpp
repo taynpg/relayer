@@ -354,6 +354,8 @@ void ConnectorControl::onTableContextMenu(const QPoint &pos)
              ui_->edCurrentClient->setText(QStringLiteral("%1（%2）").arg(id, address));
          }},
         {QStringLiteral("发送文件到此对端"), [this, id, address]() { emit sendToPeerRequested(id, address); }},
+        {QStringLiteral("浏览此对端的目录"), [this, id, address]() { emit browsePeerRequested(id, address); }},
+        {QStringLiteral("回到本地浏览"), [this]() { emit localBrowseRequested(); }},
     };
 
     for (const auto &a : actions)
