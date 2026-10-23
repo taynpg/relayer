@@ -12,6 +12,34 @@ using detail::putU32;
 using detail::putU64;
 using detail::putU8;
 using detail::Reader;
+
+// 条目名必须是**单段**：不是路径、不是 `.`/`..`、不含分隔符。
+//
+// 为什么要在解码层拦，而不是等 UI 双击时再检查：应答来自对端，那里的
+// 文件名不在我们控制之内（对端可能被改过、也可能有 bug）。一条名叫
+// `../..` 的条目一旦进了列表，UI 双击就会把它拼进当前路径——虽然服务端
+// 会再拒一次，但客户端不该把这种请求发出去。放在这里，所有消费者
+// （GUI / CLI / 将来别的）一次受保护。
+//
+// **只拦 `/`，不拦 `\\`**：Unix 允许文件名含反斜杠，那是合法文件；
+// Windows 上它才是分隔符，那层判断属于 UI 的平台语义，不在这里做
+// （见 ExplorerControl 双击处的检查）。
+bool isSingleSegmentName(std::string_view name)
+{
+    if (name.empty() || name == "." || name == "..")
+    {
+        return false;
+    }
+    if (name.find('/') != std::string_view::npos)
+    {
+        return false;
+    }
+    if (name.find('\0') != std::string_view::npos)
+    {
+        return false;
+    }
+    return true;
+}
 }  // namespace
 
 std::vector<char> encodeAskFileList(std::string_view relPath)
@@ -78,12 +106,19 @@ Status encodeAnswerFileList(FileListStatus status, const std::vector<RemoteEntry
     for (std::size_t i = 0; i < count; ++i)
     {
         const auto &e = entries[i];
-        if (e.name.empty() || e.name.size() > 255)
+        if (e.name.size() > 255)
         {
             // 名字长度用 u8（与路径一致）。超长名字在 Windows 上几乎不可能
             // （上限 255 UTF-16 单元），但真出现时宁可在编码处失败，也不
             // 静默截断——截断后的名字指向的是另一个文件。
-            return Status::Fail(ErrorCode::kProtocol, "file list entry name is empty or too long");
+            return Status::Fail(ErrorCode::kProtocol, "file list entry name is too long");
+        }
+        if (!isSingleSegmentName(e.name))
+        {
+            // 与解码侧同一条规则：名字必须是单段。编码处出现这种值说明
+            // 本地列举的实现有问题（DirEntry.name 不该含分隔符），早失败
+            // 比发出去让对方拒收更靠近肇事点。
+            return Status::Fail(ErrorCode::kProtocol, "file list entry name is not a single path segment");
         }
         putU8(out, static_cast<std::uint8_t>(e.name.size()));
         out.insert(out.end(), e.name.begin(), e.name.end());
@@ -149,6 +184,16 @@ bool decodeAnswerFileList(const std::vector<char> &body, FileListStatus &status,
             return false;
         }
         e.isDir = (type == 1);
+
+        // 整份拒绝而不是跳过这一条：合法对端不可能发出这种名字，出现即
+        // 说明对端有 bug 或被动过，此时整份列表都不值得信。放过坏条目、
+        // 只丢一条会变成"目录里莫名少了个文件"，比明确报错更难查。
+        if (!isSingleSegmentName(e.name))
+        {
+            err = "answer_file_list entry name is not a single path segment";
+            entries.clear();
+            return false;
+        }
         entries.push_back(std::move(e));
     }
 

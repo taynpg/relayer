@@ -30,6 +30,32 @@ QString joinRel(const QString &base, const QString &name)
     return base.isEmpty() ? name : base + QLatin1Char('/') + name;
 }
 
+// 条目名能不能当成"一个目录名"往当前路径上拼。
+//
+// core 的 decodeAnswerFileList 已经拦了空名 / `.` / `..` / 含 `/` 的条目
+// （那是协议层的输入合法性，所有消费者都受保护）。这里补的是**本平台的**
+// 分隔符语义：Windows 上反斜杠也是分隔符，而 Unix 允许文件名含它。
+// 不按平台区分的话，要么 Windows 上会把名字拆成两段（可能走到共享根之外），
+// 要么 Unix 上点不进一个合法目录。
+bool isPathLikeName(const QString &name)
+{
+    if (name.isEmpty() || name == QLatin1String(".") || name == QLatin1String(".."))
+    {
+        return true;
+    }
+    if (name.contains(QLatin1Char('/')))
+    {
+        return true;
+    }
+#ifdef Q_OS_WIN
+    if (name.contains(QLatin1Char('\\')))
+    {
+        return true;
+    }
+#endif
+    return false;
+}
+
 QString parentRel(const QString &path)
 {
     const auto slash = path.lastIndexOf(QLatin1Char('/'));
@@ -274,7 +300,15 @@ void ExplorerControl::onDoubleClick(int row)
     }
     if (source_ == Source::Remote)
     {
-        enterPath(joinRel(currentPath_, nameItem->text()));
+        const QString name = nameItem->text();
+        if (isPathLikeName(name))
+        {
+            // 拒绝进入而不是"尽力拼一下"：拼出来的路径可能指向共享根之外，
+            // 服务端会再拒一次，但客户端不该把这种请求发出去。
+            emit notice(QStringLiteral("[浏览] 条目名不是单段，拒绝进入：%1").arg(name));
+            return;
+        }
+        enterPath(joinRel(currentPath_, name));
         return;
     }
     enterPath(QDir(currentPath_).filePath(nameItem->text()));

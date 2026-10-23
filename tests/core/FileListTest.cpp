@@ -167,3 +167,77 @@ TEST_CASE("answer file list refuses empty entry names", "[filelist][codec]")
     REQUIRE_FALSE(st.ok());
     REQUIRE(st.code == relayer::ErrorCode::kProtocol);
 }
+
+// ---------------------------------------------------------------------------
+// 条目名必须是单段（防不可信对端把路径拼进来）
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+// 手工拼 body：encode 会拒绝非法名字，测解码侧只能自己造字节。
+// 布局见 PROTOCOL.md §11.8：status(u8) count(u32) 后跟 count 个条目。
+std::vector<char> rawAnswer(const std::vector<std::string> &names)
+{
+    std::vector<char> out;
+    out.push_back(0);  // status = kOk
+    const auto count = static_cast<std::uint32_t>(names.size());
+    for (int i = 0; i < 4; ++i)
+    {
+        out.push_back(static_cast<char>((count >> (8 * i)) & 0xFF));  // 小端
+    }
+    for (const auto &n : names)
+    {
+        out.push_back(static_cast<char>(n.size()));
+        out.insert(out.end(), n.begin(), n.end());
+        out.push_back(0);  // type = 文件
+        out.insert(out.end(), 8, 0);
+        out.insert(out.end(), 8, 0);
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("answer file list rejects a parent-directory entry name", "[filelist][codec]")
+{
+    // 名为 `..` 的条目一旦进列表，UI 双击就会把它拼进当前路径。
+    // 合法对端不可能发出来，整份应答都不可信。
+    FileListStatus status = FileListStatus::kOk;
+    std::vector<RemoteEntry> out;
+    std::string err;
+    REQUIRE_FALSE(decodeAnswerFileList(rawAnswer({".."}), status, out, err));
+    REQUIRE_FALSE(err.empty());
+    REQUIRE(out.empty());
+}
+
+TEST_CASE("answer file list rejects an entry name containing a slash", "[filelist][codec]")
+{
+    FileListStatus status = FileListStatus::kOk;
+    std::vector<RemoteEntry> out;
+    std::string err;
+    REQUIRE_FALSE(decodeAnswerFileList(rawAnswer({"a/b"}), status, out, err));
+    REQUIRE_FALSE(err.empty());
+    REQUIRE(out.empty());
+}
+
+TEST_CASE("answer file list keeps a backslash because it is a legal filename", "[filelist][codec]")
+{
+    // Unix 允许文件名含反斜杠。core 层只按协议判"是不是路径"，Windows 上
+    // 它才是分隔符——那层平台判断在 UI（ExplorerControl 双击处）做，
+    // 不能在这里把合法文件当成攻击拦掉。
+    FileListStatus status = FileListStatus::kOk;
+    std::vector<RemoteEntry> out;
+    std::string err;
+    REQUIRE(decodeAnswerFileList(rawAnswer({"a\\b.txt"}), status, out, err));
+    REQUIRE(out.size() == 1);
+    REQUIRE(out[0].name == "a\\b.txt");
+}
+
+TEST_CASE("encodeAnswerFileList refuses a path-like entry name", "[filelist][codec]")
+{
+    std::vector<char> body;
+    const auto st = encodeAnswerFileList(FileListStatus::kOk, {entry("x/../y", false, 1, 2)}, body);
+    REQUIRE_FALSE(st.ok());
+    REQUIRE(st.code == relayer::ErrorCode::kProtocol);
+}
