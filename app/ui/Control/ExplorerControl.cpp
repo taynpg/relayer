@@ -19,6 +19,7 @@
 #include <QUrl>
 #include <algorithm>
 
+#include "relayer/common/crypto/Sha256.h"
 #include "ui_ExplorerControl.h"
 
 namespace
@@ -54,6 +55,42 @@ bool isPathLikeName(const QString &name)
     }
 #endif
     return false;
+}
+
+// 本地文件的 SHA-256（流式读，不整个进内存）。
+//
+// 上限 512 MiB：这是**在 GUI 线程同步算**的（见下面菜单项），超过这个
+// 体积的等待会让人以为程序挂了。真要算更大的文件，用 relayer-cli 或系统
+// 工具的 certutil/sha256sum。
+QString fileSha256(const QString &path)
+{
+    constexpr qint64 kLimit = 512LL * 1024 * 1024;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+    {
+        return QString();
+    }
+    if (file.size() > kLimit)
+    {
+        return QStringLiteral("too-large");
+    }
+
+    relayer::crypto::Sha256 hash;
+    QByteArray buffer(1 << 20, Qt::Uninitialized);
+    while (true)
+    {
+        const qint64 n = file.read(buffer.data(), buffer.size());
+        if (n < 0)
+        {
+            return QString();
+        }
+        if (n == 0)
+        {
+            break;
+        }
+        hash.update(buffer.constData(), static_cast<std::size_t>(n));
+    }
+    return QString::fromStdString(relayer::crypto::Sha256::hex(hash.digest()));
 }
 
 QString parentRel(const QString &path)
@@ -312,6 +349,32 @@ void ExplorerControl::onDoubleClick(int row)
         return;
     }
     enterPath(QDir(currentPath_).filePath(nameItem->text()));
+}
+
+QStringList ExplorerControl::selectedLocalPaths() const
+{
+    if (source_ != Source::Local)
+    {
+        return {};  // 远端条目的"路径"相对共享根，不是本地路径
+    }
+    QSet<int> rowSet;
+    for (auto *it : table_->selectedItems())
+    {
+        rowSet.insert(it->row());
+    }
+    QVector<int> rows(rowSet.cbegin(), rowSet.cend());
+    std::sort(rows.begin(), rows.end());  // 保持表格顺序，任务表按它排队
+
+    QStringList out;
+    out.reserve(rows.size());
+    for (int r : rows)
+    {
+        if (auto *item = table_->item(r, toInt(ExpColumn::Name)))
+        {
+            out << QDir(currentPath_).filePath(item->text());
+        }
+    }
+    return out;
 }
 
 void ExplorerControl::showPath(const QString &text)
@@ -692,6 +755,10 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
         QString label;
         std::function<void()> run;
     } actions[] = {
+        // v1 的顺序：传输在第一项（有选中项时才出现）。它把"看到文件"和
+        // "发出去"接起来——没有它，用户只能去对照表手工加行。
+        {!rows.isEmpty(), QStringLiteral("传输（发送到当前通信对象）"),
+         [this]() { emit localTransferRequested(selectedLocalPaths()); }},
         {true, QStringLiteral("新建文件夹"), [this]() { onNewDir(); }},
         {singleRow, QStringLiteral("打开"),
          [this, selectedPath, rows]()
@@ -701,6 +768,28 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
          }},
         {singleRow, QStringLiteral("复制全路径"),
          [this, selectedPath]() { QApplication::clipboard()->setText(selectedPath); }},
+        {singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir"),
+         QStringLiteral("SHA256"),
+         [this, selectedPath]()
+         {
+             setStatus(QStringLiteral("正在计算 SHA-256 …"));
+             // 让状态行先画出来再开始算，否则界面会静默卡住几秒。
+             QCoreApplication::processEvents();
+             const QString hex = fileSha256(selectedPath);
+             if (hex.isEmpty())
+             {
+                 setStatus(QStringLiteral("SHA-256 计算失败（文件打不开）"), true);
+                 return;
+             }
+             if (hex == QStringLiteral("too-large"))
+             {
+                 setStatus(QStringLiteral("文件超过 512 MiB，请用 relayer-cli 或系统工具计算"), true);
+                 return;
+             }
+             QApplication::clipboard()->setText(hex);
+             setStatus(QStringLiteral("SHA-256（已复制到剪贴板）：%1").arg(hex));
+             emit notice(QStringLiteral("[校验] %1\n  SHA-256 = %2").arg(selectedPath, hex));
+         }},
         {singleRow, QStringLiteral("重命名"), [this, rows]() { onRename(rows[0]); }},
         {!rows.isEmpty(), QStringLiteral("删除"), [this, rows]() { onDelete(rows); }},
     };

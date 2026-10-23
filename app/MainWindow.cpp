@@ -142,6 +142,34 @@ void MainWindow::wireSignals()
     connect(connector_, &ConnectorControl::probeRequested, this, &MainWindow::onProbeRequested);
     connect(connector_, &ConnectorControl::disconnectRequested, this, &MainWindow::onDisconnectRequested);
     connect(connector_, &ConnectorControl::browsePeerRequested, this, &MainWindow::onBrowsePeerRequested);
+    connect(explorer_, &ExplorerControl::localTransferRequested, this,
+            [this](const QStringList &paths)
+            {
+                if (paths.isEmpty())
+                {
+                    return;
+                }
+                relayer::app::RelayTaskItems items;
+                for (const QString &p : paths)
+                {
+                    const QFileInfo info(p);
+                    if (info.fileName().isEmpty())
+                    {
+                        continue;  // 盘根之类没有名字的条目
+                    }
+                    relayer::app::RelayTaskItem item;
+                    item.name = info.fileName();
+                    item.isDir = info.isDir();
+                    // 两种形状（与 RelayTaskControl::startTasks 的展开逻辑对应）：
+                    //   - 文件：localDir 给父目录，它会拼上 name；
+                    //   - 目录：localDir 给目录本身，它会递归展开。
+                    item.localDir = info.isDir() ? info.absoluteFilePath() : info.absolutePath();
+                    item.peerId = QString();  // 空 = 用连接面板选定的"当前通信对象"
+                    items.append(item);
+                }
+                // 复用对照表那条入口：忙检查、对端校验、批次启动都在里面。
+                onTransTaskRun(items);
+            });
     connect(remoteExplorer_, &ExplorerControl::remotePullRequested, this,
             [this](const QString &peer, const QString &relPath, bool asArchive)
             {

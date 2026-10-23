@@ -98,6 +98,11 @@ signals:
     // asArchive=true 表示选中的是目录，请对端打包（PROTOCOL.md §11.10）。
     void remotePullRequested(const QString &peerId, const QString &relPath, bool asArchive);
 
+    // 本地模式下右键「传输」：把选中项的**本地绝对路径**交给 MainWindow。
+    // 本控件不碰网络与任务表；路径怎么变成任务项由 MainWindow 决定
+    // （目录要递归展开、文件用"父目录 + 文件名"两种形状）。
+    void localTransferRequested(const QStringList &paths);
+
 private:
     struct FileEntry
     {
@@ -149,6 +154,9 @@ private:
     // 非可编辑的 QComboBox 只会在已有项里查找，找不到就什么都不做——这正是
     // "点了浏览但控件毫无变化"的根因（路径框停在旧值，表格本来就是空的）。
     void showPath(const QString &text);
+
+    // 当前选中的本地绝对路径（去重、保持表格顺序）。远端模式返回空。
+    [[nodiscard]] QStringList selectedLocalPaths() const;
 
     // 状态行。每一次列举都必须留下可见结果（读取中 / 共 N 项 / 失败原因），
     // 否则失败与"没反应"在界面上无法区分。
