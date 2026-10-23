@@ -233,7 +233,8 @@ void MainWindow::wireSignals()
             if (remoteExplorer_->source() != ExplorerControl::Source::Remote ||
                 remoteExplorer_->remotePeerId().isEmpty())
             {
-                log_->appendLog(QStringLiteral("[拖拽] 远端面板还没有对端，无法下载（先右键对端「浏览此对端的目录」）\n"));
+                log_->appendLog(
+                    QStringLiteral("[拖拽] 远端面板还没有对端，无法下载（先右键对端「浏览此对端的目录」）\n"));
                 return;
             }
             const QString peer = remoteExplorer_->remotePeerId();
@@ -246,14 +247,14 @@ void MainWindow::wireSignals()
                 item.name = it.fileName;
                 item.isDir = it.type == 0;
                 item.peerId = peer;
-                item.relDir = relFrom;                      // 从对端的这一层取
-                item.localDir = explorer_->currentPath();   // 落到本地的这一层
+                item.relDir = relFrom;                     // 从对端的这一层取
+                item.localDir = explorer_->currentPath();  // 落到本地的这一层
                 items.append(item);
             }
-            log_->appendLog(QStringLiteral("[拖拽] 下载 %1 项：%2 → %3\n")
-                                .arg(items.size())
-                                .arg(relFrom.isEmpty() ? QStringLiteral("<共享根>") : relFrom,
-                                     explorer_->currentPath()));
+            log_->appendLog(
+                QStringLiteral("[拖拽] 下载 %1 项：%2 → %3\n")
+                    .arg(items.size())
+                    .arg(relFrom.isEmpty() ? QStringLiteral("<共享根>") : relFrom, explorer_->currentPath()));
             onDownloadRequested(items);
         });
 
@@ -304,6 +305,20 @@ void MainWindow::wireSignals()
             {
                 explorer_->navigateTo(path);
                 log_->appendLog(QStringLiteral("[浏览] 已跳转 %1\n").arg(path));
+            });
+    connect(comparison_, &ComparisonControl::exploreRemoteRequested, this,
+            [this](const QString &peer, const QString &relDir)
+            {
+                // 对端留空 = "当前通信对象"（与发送的解析规则一致）。
+                const QString target = peer.isEmpty() ? connector_->currentPeerId() : peer;
+                if (target.isEmpty())
+                {
+                    log_->appendLog(QStringLiteral("[浏览] 该行没填对端，也没有选「当前通信对象」\n"));
+                    QMessageBox::warning(this, QStringLiteral("提示"),
+                                         QStringLiteral("该行没有填对端，也没有设「当前通信对象」。"));
+                    return;
+                }
+                switchRemotePeer(target, target, relDir);
             });
     connect(comparison_, &ComparisonControl::transTaskRun, this, &MainWindow::onTransTaskRun);
     connect(comparison_, &ComparisonControl::remoteCheckRequested, this, &MainWindow::onRemoteCheckRequested);
@@ -797,8 +812,8 @@ void MainWindow::onDownloadRequested(const relayer::app::RelayTaskItems &items)
             }
             else
             {
-                log_->appendLog(QStringLiteral("[下载] %1：本地目录不存在（%2），改落接收目录\n")
-                                    .arg(it.name, it.localDir));
+                log_->appendLog(
+                    QStringLiteral("[下载] %1：本地目录不存在（%2），改落接收目录\n").arg(it.name, it.localDir));
             }
         }
         downloads_.append(job);
@@ -883,6 +898,11 @@ void MainWindow::onRemotePullFinished(bool ok, const QString &summary)
 
 void MainWindow::onBrowsePeerRequested(const QString &peerId, const QString &peerName)
 {
+    switchRemotePeer(peerId, peerName);
+}
+
+void MainWindow::switchRemotePeer(const QString &peerId, const QString &peerName, const QString &relPath)
+{
     if (peerId.isEmpty())
     {
         return;
@@ -896,16 +916,18 @@ void MainWindow::onBrowsePeerRequested(const QString &peerId, const QString &pee
         return;
     }
     // v1 的语义：浏览面板只有一套，切的是数据源（AskType → Source）。
-    // 不做独立窗口——那样会把表格/导航/筛选复制一遍，且以后做本地↔远端
-    // 拖拽时两个窗口之间没有共享状态可用。
-    remoteExplorer_->setRemotePeer(peerId, peerName);
+    // 不做独立窗口——那样会把表格/导航/筛选复制一遍，且两个窗口之间
+    // 没有共享状态可用（跨面板拖拽正是靠这个）。
+    remoteExplorer_->setRemotePeer(peerId, peerName, relPath);
     // 标题带对端名：切换成功与否一眼可见（面板内容可能因对方未开共享而为空，
     // 只靠表格判断不了"到底切没切"）。
     if (remoteBox_)
     {
         remoteBox_->setTitle(QStringLiteral("远端 —— %1").arg(peerName.isEmpty() ? peerId : peerName));
     }
-    log_->appendLog(QStringLiteral("[浏览] 远端面板切到 %1 的共享目录\n").arg(peerId));
+    log_->appendLog(
+        QStringLiteral("[浏览] 远端面板切到 %1%2\n")
+            .arg(peerId, relPath.isEmpty() ? QStringLiteral(" 的共享目录") : QStringLiteral(" 的 ").append(relPath)));
 }
 
 void MainWindow::nextRemoteCheck()

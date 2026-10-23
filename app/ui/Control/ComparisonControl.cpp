@@ -639,10 +639,12 @@ void ComparisonControl::onTableContextMenu(const QPoint &pos)
     }
 
     QAction *accessAction = nullptr;
+    QAction *remoteAccessAction = nullptr;
     QAction *openAction = nullptr;
     if (selected.size() == 1)
     {
         accessAction = menu.addAction(MenuIcons::accessLocal(), QStringLiteral("访问本地目录"));
+        remoteAccessAction = menu.addAction(MenuIcons::accessRemote(), QStringLiteral("访问对端目录"));
         openAction = menu.addAction(MenuIcons::openDir(), QStringLiteral("打开本地所在目录"));
     }
 
@@ -706,6 +708,21 @@ void ComparisonControl::onTableContextMenu(const QPoint &pos)
         {
             QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
         }
+        return;
+    }
+    if (ret == remoteAccessAction && !selected.isEmpty())
+    {
+        const int row = selected.first()->row();
+        const auto peer = table_->item(row, toInt(ComColumn::Peer))->text().trimmed();
+        const auto relDir = table_->item(row, toInt(ComColumn::RelDir))->text().trimmed();
+        if (peer.isEmpty())
+        {
+            // 对端留空 = "当前通信对象"。本控件不知道那是谁（不碰连接状态），
+            // 交给 MainWindow 解析与提示。
+            emit logMessage(QStringLiteral("[浏览] 该行没有填对端（空 = 当前通信对象），"
+                                           "请确认远端面板正对着谁\n"));
+        }
+        emit exploreRemoteRequested(peer, relDir);
     }
 }
 

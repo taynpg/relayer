@@ -15,7 +15,9 @@ namespace
 constexpr int kHintMs = 1500;
 }  // namespace
 
-FileMetaInfo::FileMetaInfo(QWidget *parent) : QDialog(parent), ui_(new Ui::FileMetaInfo)
+FileMetaInfo::FileMetaInfo(QWidget *parent)
+    : QDialog(parent)
+    , ui_(new Ui::FileMetaInfo)
 {
     ui_->setupUi(this);
 
@@ -37,8 +39,7 @@ FileMetaInfo::FileMetaInfo(QWidget *parent) : QDialog(parent), ui_(new Ui::FileM
                 // 远端路径是 `peer:/rel` 形状，不能再拼本地分隔符（拼出来
                 // 是 `peer:/rel\name`，哪一侧都不认）。协议里的路径本来就是
                 // POSIX 形状，这里也用 '/'。
-                const QString sep =
-                    remote_ ? QStringLiteral("/") : QString(QDir::separator());
+                const QString sep = remote_ ? QStringLiteral("/") : QString(QDir::separator());
                 QString full = dirText_;
                 if (!full.isEmpty() && !full.endsWith(QLatin1Char('/')) && !full.endsWith(QLatin1Char('\\')))
                 {
@@ -88,10 +89,9 @@ void FileMetaInfo::applyMeta()
     ui_->lbSize->setText(size_ >= 0 ? relayer::app::humanBytes(static_cast<std::uint64_t>(size_))
                                     : QStringLiteral("-"));
 
-    ui_->lbTime->setText(modifiedMs_ > 0
-                             ? QDateTime::fromMSecsSinceEpoch(modifiedMs_)
-                                   .toString(QStringLiteral("yyyy-MM-dd hh:mm:ss"))
-                             : QStringLiteral("-"));
+    ui_->lbTime->setText(
+        modifiedMs_ > 0 ? QDateTime::fromMSecsSinceEpoch(modifiedMs_).toString(QStringLiteral("yyyy-MM-dd hh:mm:ss"))
+                        : QStringLiteral("-"));
 
     ui_->lblHint->clear();
 }
@@ -106,7 +106,8 @@ void FileMetaInfo::copyToClipboard(const QString &text, const QString &what)
     QGuiApplication::clipboard()->setText(text);
     ui_->lblHint->setText(QStringLiteral("已复制%1").arg(what));
     // 定时清空：不依赖下一次点击，否则对话框停在那里会一直显示"已复制"。
-    QTimer::singleShot(kHintMs, ui_->lblHint, [this]()
+    QTimer::singleShot(kHintMs, ui_->lblHint,
+                       [this]()
                        {
                            // 期间可能又复制了一次（新提示），那就别擦掉它。
                            // 用"当前文本是否还是我写的"来判断代价太高，直接

@@ -517,7 +517,8 @@ bool CoreService::browsePeerOnSession(const QString &peerId, const QString &relP
     return true;
 }
 
-bool CoreService::pullFileFromPeer(const QString &peerId, const QString &relPath, bool asArchive, const QString &intoDir)
+bool CoreService::pullFileFromPeer(const QString &peerId, const QString &relPath, bool asArchive,
+                                   const QString &intoDir)
 {
     if (peerId.isEmpty() || relPath.isEmpty())
     {

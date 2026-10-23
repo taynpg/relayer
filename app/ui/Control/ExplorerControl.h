@@ -56,7 +56,12 @@ public:
     explicit ExplorerControl(QWidget *parent = nullptr);
 
     // 切到远端：browse 该对端的共享根。同一个控件，UI 不变（v1 语义）。
-    void setRemotePeer(const QString &peerId, const QString &peerName);
+    //
+    // relPath 非空时直接进那一层（对照表"访问远程目录"：那一行说的就是
+    // peer:relDir，跳过去才看得出"到底传到了对方哪个目录"）。不能先
+    // setRemotePeer 再 navigateTo——两次列举请求会撞在 Client 的
+    // browseActive 上，第二个被拒。
+    void setRemotePeer(const QString &peerId, const QString &peerName, const QString &relPath = QString());
 
     // 切回本地浏览。
     void useLocalSource();
@@ -161,8 +166,11 @@ private:
     void onTableContextMenu(const QPoint &pos);
 
     // 右键动作（局部操作，成功后重列当前目录）。
-    void onOpenInExplorer();
-    void onCopyFullPath();
+    //
+    // 没有 onOpenInExplorer / onCopyFullPath：v1 的"在资源管理器中打开当前
+    // 目录"就是 v2 的「打开」（目录项 openUrl(dir)，文件项 openUrl(currentPath_)），
+    // "复制全路径"是动作表里的一行内联代码。曾经在这里留过两个空声明，
+    // 永远不会实现也永远不会报错——删掉。
     void onRename(int row);
     void onDelete(const QVector<int> &rows);
     void onNewDir();

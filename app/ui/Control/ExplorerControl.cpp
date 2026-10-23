@@ -408,7 +408,7 @@ QString ExplorerControl::displayPath() const
     return QStringLiteral("%1:/%2").arg(peerId_, currentPath_);
 }
 
-void ExplorerControl::setRemotePeer(const QString &peerId, const QString &peerName)
+void ExplorerControl::setRemotePeer(const QString &peerId, const QString &peerName, const QString &relPath)
 {
     source_ = Source::Remote;
     peerId_ = peerId;
@@ -438,7 +438,8 @@ void ExplorerControl::setRemotePeer(const QString &peerId, const QString &peerNa
         setStatus(QStringLiteral("未选择对端——在上方对端表右键「浏览此对端的目录」。"));
         return;
     }
-    enterPath(QString());
+    // 不在这里再调 navigateTo：一次切换只发一个列举请求（见头文件）。
+    enterPath(relPath);
 }
 
 void ExplorerControl::useLocalSource()

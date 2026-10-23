@@ -32,8 +32,7 @@ public:
 
     // dirText：本地绝对路径，或远端的 `peer:/rel`（空 = 未知）。
     // size / modifiedMs 传 -1 表示"不适用"（目录的大小、远端没给时间）。
-    void setMeta(const QString &dirText, const QString &name, bool isDir, qint64 size, qint64 modifiedMs,
-                 bool remote);
+    void setMeta(const QString &dirText, const QString &name, bool isDir, qint64 size, qint64 modifiedMs, bool remote);
 
 private:
     void applyMeta();

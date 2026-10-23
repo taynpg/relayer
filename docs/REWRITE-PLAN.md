@@ -850,20 +850,31 @@ socket 回调里写就没法把每种组合都测到。
 | F1 | 远端目录列举：`kAskFileList`/`kAnswerFileList`（`PROTOCOL.md` §11.8）、`core/session/FileList` 编解码、客户端侧服务（共享根 + `resolveWithin`）、CLI `ls`、GUI：`ExplorerControl` 的本地/远端双数据源（v1 形状，同一个控件切数据源）+ 共享目录设置 + 对照表右键"检查远端"、e2e `remote-list` | ✅ 完成 |
 | F2 | 远端取回（下载）：`kAskFilePull`/`kAnswerFilePull`（`PROTOCOL.md` §11.9）、`FilePullStatus` 编解码、客户端侧服务（共享根 + `resolveWithin`）、复用 500-509 推流程、CLI `recv --pull-from/--pull-path`、GUI 远端面板右键「下载到接收目录」、e2e `pull-file` | ✅ 完成（目录取回见 F3） |
 | F3 | 目录取回（打包）：`kAskArchivePull`（`PROTOCOL.md` §11.10）、tar.xz 打包（级别 1、上限 20000 文件 / 256 MiB）、临时包在系统 temp 并传完即删、复用 500-509 推流程、CLI `--pull-dir`、GUI 右键「下载目录（打包为 tar.xz）」、e2e `pull-dir` | ✅ 完成（含自动解包，见 §11.10.6） |
-| F4 | 批量发送并发：`CoreService::sendFileTask`（每任务一个 Client，不占常驻会话）+ 任务表并发窗口（`kConcurrency=3`，**同一对端串行**）+ 带 taskId 的进度/结论信号 + `cancelSendTask` | ✅ 完成（GUI 路径无自动化覆盖，见 HANDOFF §0.8 第 14 条） |
+| F4 | 批量发送并发：`CoreService::sendFileTask`（每任务一个 Client，不占常驻会话）+ 任务表并发窗口（`kConcurrency=3`，**同一对端串行**）+ 带 taskId 的进度/结论信号 + `cancelSendTask` | ✅ 完成（GUI 路径无自动化覆盖，见 HANDOFF §0.8 第 17 条） |
+| F5 | 对照表行级下载：`downloadRequested` 逐行队列 + `CoreService::pullFileFromPeer` 的 `intoDir`（临时改常驻会话落点，落地/失败后自动还原）+ `Client::setReceiveDirOnSession`（只改内存里的 targetPath，不重连）。落到**该行自己的本地目录**（v1 语义），逐项串行且等文件落地才发下一项 | ✅ 完成（无自动化覆盖，见 HANDOFF §0.8 第 18 条） |
+| F6 | 浏览面板「详细信息」：`ui/FileMetaInfo.{h,cpp}`（`.ui` 早在 E1 迁过来了，一直没有实现）。本地/远端共用，远端标「（远端）」、目录栏 `peer:/rel`；数据取自 `entries_` 而非重新 stat | ✅ 完成 |
+| F7 | 跨面板拖拽：`ExpDropTable` 的拖出早就有了，`setOnInfoDropped` 从没接过（出口有、入口没有）。本地→远端=上传（落到远端当前目录）、远端→本地=下载（复用 F5 的队列）；远端载荷带标记 MIME，对照表据此拒收；拖到谁的面板就把通信对象切到谁 | ✅ 完成（见 HANDOFF §0.8 第 20 条） |
+| F8 | 对照表「访问对端目录」：远端面板直跳该行的 `peer:relDir`（`setRemotePeer` 新增 `relPath` 参数，一次切换只发一个列举请求）；`MainWindow::switchRemotePeer` 收拢两个入口 | ✅ 完成（见 HANDOFF §0.8 第 21 条） |
+
 剩余（下一次从这里接）：
 
 1. **E4 验收**——GUI 已在本机中继 + loopback 上完成收发，还缺一次**真实链路**
    （两台机器经中继）的完整记录。e2e 的 no-auth 缺口已补（见 §4.1 上方场景表）。
    这是唯一无法用测试替代、且可能推翻其他结论的一项。
-2. **对端打包归档（tar.xz）**——`kAskArchivePack` 等 130-133 帧仍是占位。
-   它是**目录取回**的前置：没有它，取回一个目录就是 N 次独立请求。
-3. **P2P 直连**——550/551 仍是占位；收益取决于网络环境（同局域网才有意义）。
-4. **并发度可配置**——`kConcurrency` 现在写死 3（`RelayTaskControl.cpp`）。
+2. **P2P 直连**——550/551 仍是占位；用户明确**不做**。
+3. **并发度可配置**——`kConcurrency` 现在写死 3（`RelayTaskControl.cpp`）。
    要先有一次真实链路测量再决定要不要做成设置项，否则只是多一个用户会
    调错的旋钮。
 
-远端浏览与下载已在 F1/F2 完成，不再列为剩余项。
+远端浏览、下载、目录打包已在 F1/F2/F3 完成；v1 的其余常用入口（压缩解压、
+粗校验、时间戳校验、行级下载、详细信息、拖拽、访问对端目录）在 F5-F8 补齐，
+P2P 之外不再有"v1 有、v2 没有"的功能。
+
+**130-133 仍是 v1 遗留占位**（`kAskArchivePack` / `kAnswerArchivePack` /
+`kAskArchiveReady` / `kAnswerArchiveReady`）。v1 用它们做"先请对端打包、
+再单独请求下载那个包"的两步流程；v2 用 `kAskArchivePull`(137) 一步完成
+（`PROTOCOL.md` §11.10），所以这四个号不再需要。**别把它们复用成别的意思**
+——对接 v1 客户端时那几个号还有旧含义。
 
 上次的收尾三项（Setting / ReplaceArea / ProgressTracker）已全部完成，
 提交 `beb6d63` / `c118c06` / `32500f6`。

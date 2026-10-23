@@ -46,6 +46,11 @@ signals:
     // 右键"访问本地目录"：让浏览面板跳到该行的本地目录。
     void exploreLocalRequested(const QString &path);
 
+    // 右键"访问对端目录"：让**远端**面板切到该行的 peer + relDir。
+    // 这是排查"发错人/发错目录"的核心动作——一行到底指向对方哪个目录，
+    // 只有跳过去看一眼才知道。
+    void exploreRemoteRequested(const QString &peer, const QString &relDir);
+
     // 右键"检查远端"：问对端"这些行要发的东西对方是不是已经有了"。
     // 本控件不碰网络（只做显示与转发），实际请求由 MainWindow 逐行发起。
     void remoteCheckRequested(const relayer::app::RelayTaskItems &items);

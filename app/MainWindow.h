@@ -74,6 +74,10 @@ private:
     void wireSignals();
     void startAutoReceive();
 
+    // 把远端面板切到某个对端的某一层（空 = 共享根）。
+    // 两个入口共用：对端表右键「浏览此对端的目录」、对照表右键「访问对端目录」。
+    void switchRemotePeer(const QString &peerId, const QString &peerName, const QString &relPath = QString());
+
     // "检查远端"的逐行队列：CoreService 一次只跑一个列举，所以一行一行来。
     struct RemoteCheck
     {
@@ -107,7 +111,7 @@ private:
     void finishDownloadStep();
 
     QList<DownloadJob> downloads_;
-    int downloadIndex_ = -1;       // -1 = 空闲；否则是"已发请求、等接受"的下标
+    int downloadIndex_ = -1;        // -1 = 空闲；否则是"已发请求、等接受"的下标
     bool downloadWaiting_ = false;  // 已接受，等文件落地
 
     // 一次待完成的比对。远端那一侧要先列举才能拿到 size/mtime，所以这里
