@@ -1817,7 +1817,69 @@ bool Client::browseOnSession(std::string peerId, std::string relPath, std::funct
     return impl_->startBrowseOnSession(std::move(peerId), std::move(relPath), std::move(done));
 }
 
-std::string Client::unpackArchive(const std::string &archivePath)
+bool Client::createArchive(const std::vector<std::string> &sources, const std::string &archivePath, std::string &err)
+{
+    std::vector<filestore::ArchiveItem> items;
+    for (const auto &src : sources)
+    {
+        std::error_code ec;
+        const std::filesystem::path p(src);
+        if (!std::filesystem::exists(p, ec))
+        {
+            err = "路径不存在：" + src;
+            return false;
+        }
+        // 相对**父目录**：包内有顶层目录，解压时配 unpackArchive(path, false)。
+        const auto base = p.parent_path();
+        if (std::filesystem::is_directory(p, ec))
+        {
+            for (auto it = std::filesystem::recursive_directory_iterator(
+                     p, std::filesystem::directory_options::skip_permission_denied, ec);
+                 it != std::filesystem::recursive_directory_iterator(); it.increment(ec))
+            {
+                if (ec)
+                {
+                    break;
+                }
+                const auto rel = std::filesystem::relative(it->path(), base, ec);
+                if (ec || rel.empty())
+                {
+                    continue;
+                }
+                filestore::ArchiveItem item;
+                item.sourcePath = it->path().string();
+                item.entryName = rel.generic_string() + (it->is_directory() ? "/" : "");
+                items.push_back(std::move(item));
+            }
+        }
+        else
+        {
+            items.push_back(filestore::ArchiveItem{src, p.filename().string()});
+        }
+    }
+
+    if (items.empty())
+    {
+        err = "没有可压缩的内容";
+        return false;
+    }
+
+    filestore::StdFileStore store;
+    filestore::TarXzArchiver archiver(store);
+    filestore::ArchiveOptions options;
+    // 与 §11.10.3 同一条理由：传输/存储场景里，压缩比的边际收益不值多等。
+    options.compressionLevel = 1;
+    std::vector<std::string> skipped;
+    const auto st = archiver.create(archivePath, items, options, skipped);
+    if (!st.ok())
+    {
+        err = st.message;
+        return false;
+    }
+    return true;
+}
+
+std::string Client::unpackArchive(const std::string &archivePath, bool intoSubdir)
 {
     static const std::string kSuffix = ".tar.xz";
     if (archivePath.size() <= kSuffix.size() ||
@@ -1829,7 +1891,7 @@ std::string Client::unpackArchive(const std::string &archivePath)
     const std::filesystem::path pack(archivePath);
     const std::string name = pack.filename().string();
     const std::string dirName = name.substr(0, name.size() - kSuffix.size());
-    const auto dest = pack.parent_path() / dirName;
+    const auto dest = intoSubdir ? (pack.parent_path() / dirName) : pack.parent_path();
 
     // 用局部 store：解包是"一次性文件操作"，不该为此在类里再挂一个成员。
     // StdFileStore 本身很轻（只是路径到系统调用的映射）。

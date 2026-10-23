@@ -343,7 +343,21 @@ public:
     // 为什么不直接解到 `<dir>/`：包内路径是"相对被请求的那个目录"的
     // （§11.10.3），没有顶层目录。解到 `<dir>/` 会让 a.txt、nested/ 散在
     // 接收目录里，与对方看到的层次不一致。
-    static std::string unpackArchive(const std::string &archivePath);
+    // intoSubdir=true 时解到 `<父目录>/<包名去 .tar.xz>/`。
+    //
+    // 两种包的形状不同，所以要有这个开关：
+    //   - 取回目录（§11.10）的包**无顶层目录**（entryName 相对被请求的目录），
+    //     必须解到子目录里，否则内容散在接收目录；
+    //   - 手动压缩的包**有顶层目录**（entryName 含源名），解到父目录即可；
+    //     再套一层会变成 a/a/。
+    static std::string unpackArchive(const std::string &archivePath, bool intoSubdir = true);
+
+    // 把若干本地路径打成 tar.xz（手动压缩，GUI 右键用）。
+    //
+    // 包内路径相对**各源的父目录**，所以包里有顶层目录——与取回目录的包相反，
+    // 解压时要配 unpackArchive(path, false)。
+    static bool createArchive(const std::vector<std::string> &sources, const std::string &archivePath,
+                              std::string &err);
 
     // 取消正在进行的"会话内发送"（对端的收尾会看到 kLocalCancelled）。
     // 会话本身不受影响——接收继续等下一个文件。

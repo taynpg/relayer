@@ -5,6 +5,7 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDesktopServices>
+#include <QFileDialog>
 #include <QDir>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -19,6 +20,7 @@
 #include <QUrl>
 #include <algorithm>
 
+#include "relayer/cli/Client.h"
 #include "relayer/common/crypto/Sha256.h"
 #include "ui_ExplorerControl.h"
 
@@ -768,6 +770,65 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
          }},
         {singleRow, QStringLiteral("复制全路径"),
          [this, selectedPath]() { QApplication::clipboard()->setText(selectedPath); }},
+        // 压缩 / 解压缩（v1 有、v2 之前只有后端能力没有入口）。
+        //
+        // 压缩的方向：包内**带顶层目录**（entryName 相对各源的父目录），
+        // 所以解压时用 unpackArchive(path, false) 解到父目录；取回目录的包
+        // 是无顶层的，那个走 true。两种形状不能混。
+        {!rows.isEmpty(), QStringLiteral("压缩为 tar.xz…"),
+         [this]()
+         {
+             const QStringList paths = selectedLocalPaths();
+             if (paths.isEmpty())
+             {
+                 return;
+             }
+             QString suggested = QStringLiteral("archive.tar.xz");
+             if (paths.size() == 1)
+             {
+                 suggested = QFileInfo(paths.first()).fileName() + QStringLiteral(".tar.xz");
+             }
+             const QString out =
+                 QFileDialog::getSaveFileName(this, QStringLiteral("压缩为"), QDir(currentPath()).filePath(suggested),
+                                              QStringLiteral("tar.xz (*.tar.xz)"));
+             if (out.isEmpty())
+             {
+                 return;
+             }
+             setStatus(QStringLiteral("正在压缩 %1 项 …").arg(paths.size()));
+             QCoreApplication::processEvents();
+             std::vector<std::string> sources;
+             sources.reserve(static_cast<std::size_t>(paths.size()));
+             for (const auto &p : paths)
+             {
+                 sources.push_back(p.toStdString());
+             }
+             std::string err;
+             if (!relayer::cli::Client::createArchive(sources, out.toStdString(), err))
+             {
+                 setStatus(QStringLiteral("压缩失败：%1").arg(QString::fromStdString(err)), true);
+                 return;
+             }
+             setStatus(QStringLiteral("已压缩为 %1").arg(QFileInfo(out).fileName()));
+             emit notice(QStringLiteral("[压缩] %1（%2 项）").arg(out).arg(paths.size()));
+             enterPath(currentPath_);  // 刷新，让新包出现
+         }},
+        {singleRow && selectedPath.endsWith(QStringLiteral(".tar.xz"), Qt::CaseInsensitive), QStringLiteral("解压缩"),
+         [this, selectedPath]()
+         {
+             setStatus(QStringLiteral("正在解压 %1 …").arg(QFileInfo(selectedPath).fileName()));
+             QCoreApplication::processEvents();
+             // false：手动压缩的包有顶层目录，解到父目录即可，再套一层会变成 a/a/。
+             const auto dir = relayer::cli::Client::unpackArchive(selectedPath.toStdString(), false);
+             if (dir.empty())
+             {
+                 setStatus(QStringLiteral("解压失败（包可能损坏）"), true);
+                 return;
+             }
+             setStatus(QStringLiteral("已解压到 %1").arg(QString::fromStdString(dir)));
+             emit notice(QStringLiteral("[解压] %1").arg(QString::fromStdString(dir)));
+             enterPath(currentPath_);
+         }},
         {singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir"),
          QStringLiteral("SHA256"),
          [this, selectedPath]()
