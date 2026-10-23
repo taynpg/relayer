@@ -45,6 +45,10 @@ signals:
     // 右键"访问本地目录"：让浏览面板跳到该行的本地目录。
     void exploreLocalRequested(const QString &path);
 
+    // 右键"检查远端"：问对端"这些行要发的东西对方是不是已经有了"。
+    // 本控件不碰网络（只做显示与转发），实际请求由 MainWindow 逐行发起。
+    void remoteCheckRequested(const relayer::app::RelayTaskItems &items);
+
 private:
     // ---- 内存模型 ----
     struct Row
@@ -87,6 +91,9 @@ private:
     void onTrans();
 
     [[nodiscard]] QList<QTableWidgetItem *> selectedRowItems() const;
+
+    // 把选中行读成任务项（onTrans 与"检查远端"共用同一份读取逻辑）。
+    [[nodiscard]] relayer::app::RelayTaskItems selectedItems() const;
 
     Ui::ComparisonControl *ui_ = nullptr;
     ComDropTable *table_ = nullptr;

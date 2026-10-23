@@ -87,6 +87,10 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
     // 声明本机标识（PROTOCOL.md §11.7）：空则由中继分配 client-N。
     cfg.requestedId = fromQt(conn.requestedId);
 
+    // 共享目录（PROTOCOL.md §11.8）：对端能列举的范围。空 = 不响应。
+    // 只对接收会话有意义，但设在 cfg 上成本为零（list/send 用不到）。
+    cfg.shareRoot = fromQt(QSettings().value(relayer::app::settings::kReceiverShareRoot).toString());
+
     // 记下这组参数（GUI 线程），供 refreshPeers 判断会话是否对应表单地址。
     activeConnKey_ = conn.host + QStringLiteral(":") + QString::number(conn.port) + QStringLiteral(":") +
                      (conn.noAuth ? QStringLiteral("N") : QStringLiteral("P")) + QStringLiteral(":") + conn.password;
@@ -378,6 +382,53 @@ bool CoreService::refreshPeers(const ConnInfo &conn)
     // 这一次仍会消耗一个新 id，但那是"建立在线状态"的必要代价；建立
     // 之后刷新就不再换 id。
     return listPeers(conn);
+}
+
+bool CoreService::browsePeerOnSession(const QString &peerId, const QString &relPath)
+{
+    if (peerId.isEmpty())
+    {
+        return false;
+    }
+    // 没有常驻会话就没有"搭车"的可能。这里**不**回落成新连接：新连接会
+    // 顶掉接收会话并换掉本机 id（见头文件）。
+    if (!busy_)
+    {
+        return false;
+    }
+
+    runOnIo(
+        [this, peer = fromQt(peerId), path = fromQt(relPath)]
+        {
+            if (!client_)
+            {
+                emit remoteBrowseFinished(false, QStringLiteral("没有可用的常驻会话"), {});
+                return;
+            }
+            const bool started = client_->browseOnSession(peer, path,
+                                                          [this](const cli::Outcome &o)
+                                                          {
+                                                              QList<relayer::app::RemoteRow> rows;
+                                                              rows.reserve(static_cast<int>(o.remoteEntries.size()));
+                                                              for (const auto &e : o.remoteEntries)
+                                                              {
+                                                                  relayer::app::RemoteRow r;
+                                                                  r.name = toQt(e.name);
+                                                                  r.isDir = e.isDir;
+                                                                  r.size = e.size;
+                                                                  r.mtime = e.mtime;
+                                                                  rows.append(r);
+                                                              }
+                                                              // 从 io 线程 emit
+                                                              // 跨线程信号是安全的（QueuedConnection）。
+                                                              emit remoteBrowseFinished(o.ok, toQt(o.summary), rows);
+                                                          });
+            if (!started)
+            {
+                emit remoteBrowseFinished(false, QStringLiteral("当前不能列举（正在传输或会话不可用）"), {});
+            }
+        });
+    return true;
 }
 
 void CoreService::cancelCurrent()

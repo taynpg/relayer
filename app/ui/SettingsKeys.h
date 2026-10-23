@@ -21,6 +21,8 @@ inline constexpr const char *kConnectorMyId = "connector/myId";
 // 接收
 inline constexpr const char *kReceiverDir = "receiver/dir";
 inline constexpr const char *kReceiverOverwrite = "receiver/overwrite";
+// 共享目录（对端可列举的范围，PROTOCOL.md §11.8）。空 = 不响应列举。
+inline constexpr const char *kReceiverShareRoot = "receiver/shareRoot";
 inline constexpr bool kReceiverOverwriteDefault = true;
 // 自动接收失败重试（Setting 对话框；MainWindow 消费）
 inline constexpr const char *kReceiverAutoRetry = "receiver/autoRetry";          // bool

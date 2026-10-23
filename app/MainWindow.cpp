@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QMessageBox>
 #include <QSettings>
 #include <QSplitter>
@@ -11,6 +12,7 @@
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <algorithm>
 
 #include "model/ProgressTracker.h"
 #include "ui/ConnectorControl.h"
@@ -120,6 +122,8 @@ void MainWindow::wireSignals()
                 log_->appendLog(QStringLiteral("[浏览] 已跳转 %1\n").arg(path));
             });
     connect(comparison_, &ComparisonControl::transTaskRun, this, &MainWindow::onTransTaskRun);
+    connect(comparison_, &ComparisonControl::remoteCheckRequested, this, &MainWindow::onRemoteCheckRequested);
+    connect(core_, &relayer::app::CoreService::remoteBrowseFinished, this, &MainWindow::onRemoteBrowseFinished);
     connect(taskControl_, &relayer::app::RelayTaskControl::logMessage, log_, &LogControl::appendLog);
     connect(taskControl_, &relayer::app::RelayTaskControl::batchFinished, this,
             [this](bool)
@@ -320,6 +324,15 @@ void MainWindow::onSendFinished(bool ok, const QString &summary, const QString &
 
 void MainWindow::onOperationFinished(bool ok, const QString &summary, const QString &detail)
 {
+    // 检查远端的队列挂在常驻会话上：会话一结束，队列里的请求就不会再有
+    // 回音了。不清掉的话界面会永远停在"检查中"。
+    if (remoteCheckIndex_ >= 0)
+    {
+        remoteChecks_.clear();
+        remoteCheckIndex_ = -1;
+        log_->appendLog(QStringLiteral("[检查] 会话结束，检查中止\n"));
+    }
+
     // wasReceiving：结束的是不是接收会话本身（失败重试只对它计数）。
     const bool wasReceiving = receiveActive_;
     if (receiveActive_)
@@ -377,6 +390,116 @@ void MainWindow::onOperationFinished(bool ok, const QString &summary, const QStr
 // ---------------------------------------------------------------------------
 // 任务入口（E3.5）：只做闸门检查，展示与执行交给 RelayTaskControl。
 // ---------------------------------------------------------------------------
+
+// 对照表右键"检查远端"：逐行问对方"这个文件在不在这、大小对不对"。
+//
+// 这是"粗校验"——比对的是文件名 + 大小，不是内容哈希。理由：哈希要对方
+// 读整个文件，成本与传一遍差不多；而"发错人 / 发错目录"这类事故里，
+// 文件在不在这、大小对不对已经能看出来。内容级校验留给传输后的校验和。
+void MainWindow::onRemoteCheckRequested(const relayer::app::RelayTaskItems &items)
+{
+    if (!core_->busy())
+    {
+        QMessageBox::warning(this, QStringLiteral("提示"),
+                             QStringLiteral("请先连接中继——检查远端要靠常驻接收会话，"
+                                            "新开连接会把本机 id 换掉。"));
+        return;
+    }
+    if (remoteCheckIndex_ >= 0)
+    {
+        log_->appendLog(QStringLiteral("[检查] 上一批还没跑完，请等它结束\n"));
+        return;
+    }
+
+    const QString defaultPeer = connector_->currentPeerId();
+    remoteChecks_.clear();
+    for (const auto &it : items)
+    {
+        const QString peer = it.peerId.isEmpty() ? defaultPeer : it.peerId;
+        if (peer.isEmpty())
+        {
+            log_->appendLog(QStringLiteral("[检查] %1：没有指定对端，跳过\n").arg(it.name));
+            continue;
+        }
+        if (it.isDir)
+        {
+            // 目录的"是否已有"没有意义（对方可能只收到一半）。真要支持，
+            // 得递归比对，那是另一件事。
+            log_->appendLog(QStringLiteral("[检查] %1：目录行暂不支持，跳过\n").arg(it.name));
+            continue;
+        }
+        RemoteCheck rc;
+        rc.peer = peer;
+        rc.relDir = it.relDir;
+        rc.name = it.name;
+        rc.localSize = QFileInfo(QDir(it.localDir).filePath(it.name)).size();
+        remoteChecks_.append(rc);
+    }
+
+    if (remoteChecks_.isEmpty())
+    {
+        return;
+    }
+    remoteCheckIndex_ = 0;
+    log_->appendLog(QStringLiteral("[检查] 开始检查 %1 项\n").arg(remoteChecks_.size()));
+    nextRemoteCheck();
+}
+
+void MainWindow::nextRemoteCheck()
+{
+    while (remoteCheckIndex_ < remoteChecks_.size())
+    {
+        const auto &rc = remoteChecks_.at(remoteCheckIndex_);
+        if (core_->browsePeerOnSession(rc.peer, rc.relDir))
+        {
+            return;  // 等 remoteBrowseFinished
+        }
+        log_->appendLog(QStringLiteral("[检查] %1：当前无法列举（会话不可用或正忙）\n").arg(rc.name));
+        ++remoteCheckIndex_;
+    }
+    remoteChecks_.clear();
+    remoteCheckIndex_ = -1;
+    log_->appendLog(QStringLiteral("[检查] 结束\n"));
+}
+
+void MainWindow::onRemoteBrowseFinished(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows)
+{
+    if (remoteCheckIndex_ < 0 || remoteCheckIndex_ >= remoteChecks_.size())
+    {
+        return;
+    }
+    const auto rc = remoteChecks_.at(remoteCheckIndex_);
+    ++remoteCheckIndex_;
+
+    if (!ok)
+    {
+        // 最常见的两种：对方没开共享（拒绝），或目录不存在。两者都让
+        // "对方没有这个文件"成立，但原因要写清楚，否则用户会以为传失败了。
+        log_->appendLog(QStringLiteral("[检查] %1：无法确认（%2）\n").arg(rc.name, summary));
+        nextRemoteCheck();
+        return;
+    }
+
+    const auto it =
+        std::find_if(rows.begin(), rows.end(), [&](const relayer::app::RemoteRow &r) { return r.name == rc.name; });
+    if (it == rows.end())
+    {
+        log_->appendLog(QStringLiteral("[检查] %1：对方没有（%2:%3 下未找到）\n")
+                            .arg(rc.name, rc.peer, rc.relDir.isEmpty() ? QStringLiteral("<根>") : rc.relDir));
+    }
+    else if (static_cast<qint64>(it->size) != rc.localSize)
+    {
+        log_->appendLog(QStringLiteral("[检查] %1：大小不符（本地 %2，对方 %3）\n")
+                            .arg(rc.name)
+                            .arg(rc.localSize)
+                            .arg(static_cast<qint64>(it->size)));
+    }
+    else
+    {
+        log_->appendLog(QStringLiteral("[检查] %1：已存在且大小一致\n").arg(rc.name));
+    }
+    nextRemoteCheck();
+}
 
 void MainWindow::onTransTaskRun(const relayer::app::RelayTaskItems &items)
 {

@@ -284,6 +284,14 @@ public:
     bool sendOnSession(std::string sourcePath, std::string remoteName, std::string toPeerId,
                        std::function<void(const Outcome &)> done);
 
+    // 在**现有常驻会话**上问一次远端目录（PROTOCOL.md §11.8）。
+    //
+    // GUI 专用：新开连接会顶掉常驻接收会话、把自己的 id 换掉（文档里反复
+    // 警告的那类回归）。done 在这一次列举结束时调用，会话继续存活。
+    // 返回 false = 当前没有可用的常驻会话（没连上 / 正在跑别的操作），
+    // 调用方应提示"先连接"而不是偷偷降级成新连接。
+    bool browseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done);
+
     // 取消正在进行的"会话内发送"（对端的收尾会看到 kLocalCancelled）。
     // 会话本身不受影响——接收继续等下一个文件。
     void cancelSend();

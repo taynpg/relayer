@@ -603,6 +603,8 @@ void ComparisonControl::onTableContextMenu(const QPoint &pos)
 
     QAction *transAction = menu.addAction(MenuIcons::upload(), QStringLiteral("发送到对端"));
     transAction->setEnabled(!selected.isEmpty());
+    QAction *checkAction = menu.addAction(QStringLiteral("检查远端（对方是否已有）"));
+    checkAction->setEnabled(!selected.isEmpty());
     QAction *newRowAction = menu.addAction(MenuIcons::newRow(), QStringLiteral("新行"));
     QAction *deleteAction = menu.addAction(MenuIcons::del(), QStringLiteral("删除选中行"));
     deleteAction->setEnabled(!selected.isEmpty());
@@ -650,6 +652,13 @@ void ComparisonControl::onTableContextMenu(const QPoint &pos)
     if (ret == transAction)
     {
         onTrans();
+        return;
+    }
+    if (ret == checkAction)
+    {
+        // 只把行数据交给 MainWindow：它才有 CoreService（本控件不碰网络）。
+        // 对端留空的行由 MainWindow 用"当前通信对象"补，与发送一致。
+        emit remoteCheckRequested(selectedItems());
         return;
     }
     if (ret == newRowAction)
@@ -800,6 +809,29 @@ void ComparisonControl::onReplace()
 // ---------------------------------------------------------------------------
 // 发送
 // ---------------------------------------------------------------------------
+
+RelayTaskItems ComparisonControl::selectedItems() const
+{
+    RelayTaskItems items;
+    for (auto *it : selectedRowItems())
+    {
+        const int row = it->row();
+        const auto name = table_->item(row, toInt(ComColumn::Name))->text().trimmed();
+        const auto type = table_->item(row, toInt(ComColumn::Type))->text().trimmed();
+        const auto localDir = table_->item(row, toInt(ComColumn::LocalDir))->text().trimmed();
+        const auto peer = table_->item(row, toInt(ComColumn::Peer))->text().trimmed();
+        const auto relDir = table_->item(row, toInt(ComColumn::RelDir))->text().trimmed();
+
+        RelayTaskItem item;
+        item.name = name;
+        item.isDir = type == QStringLiteral("Dir");
+        item.localDir = localDir;
+        item.peerId = peer;
+        item.relDir = relDir;
+        items.append(item);
+    }
+    return items;
+}
 
 void ComparisonControl::onTrans()
 {

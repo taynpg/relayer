@@ -103,6 +103,11 @@ struct Client::Impl
     // kBrowse 的目标与相对路径（PROTOCOL.md §11.8）。
     std::string browsePeerId;
     std::string browseRelPath;
+
+    // 常驻会话上的列举（GUI 用，见 Client::browseOnSession）。与 sendActive
+    // 同一套思路：会话不结束，只把这一次的结论回调给上层。
+    bool browseActive = false;
+    std::function<void(const Outcome &)> onBrowseDone;
     std::string targetPath;
 
     bool authenticated = false;
@@ -162,6 +167,10 @@ struct Client::Impl
         // Impl 一起释放。
         sendActive = false;
         onSendDone = nullptr;
+        // 挂起的列举同理：会话结束时上层已经收到 onDone，这次列举的回调
+        // 不能再单独发（否则上层会收到两个结论）。
+        browseActive = false;
+        onBrowseDone = nullptr;
 
         if (!ok)
         {
@@ -816,6 +825,57 @@ struct Client::Impl
         return !finished && authenticated && session && action == Action::kReceive;
     }
 
+    // 常驻会话上问一次远端目录。会话继续活着（id 不变、接收不中断），
+    // 这与 Client::browsePeer 的一次性连接是两条路：后者给 CLI 用，前者
+    // 给 GUI——GUI 一旦新开连接就会顶掉常驻接收会话、把自己的 id 换掉。
+    bool startBrowseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done)
+    {
+        if (!canSendOnSession() || browseActive)
+        {
+            return false;
+        }
+        browseActive = true;
+        onBrowseDone = std::move(done);
+        browsePeerId = std::move(peerId);
+        browseRelPath = std::move(relPath);
+
+        Frame f;
+        f.type = FrameType::kAskFileList;
+        f.to = browsePeerId;
+        f.body = core::session::encodeAskFileList(browseRelPath);
+
+        touch();
+        if (const auto st = session->send(f); !st.ok())
+        {
+            finishBrowse(false, "远端列举请求发送失败", st);
+            return false;
+        }
+        return true;
+    }
+
+    // 一次会话内列举的结论。与 finishSend 对称：只回调这一次，不动 busy。
+    void finishBrowse(bool ok, std::string summary, Status status = Status{})
+    {
+        if (!browseActive)
+        {
+            return;
+        }
+        browseActive = false;
+        auto done = std::move(onBrowseDone);
+        onBrowseDone = nullptr;
+
+        Outcome o;
+        o.ok = ok;
+        o.summary = std::move(summary);
+        o.status = std::move(status);
+        o.remoteEntries = remoteEntries;
+        o.listStatus = listStatus;
+        if (done)
+        {
+            done(o);
+        }
+    }
+
     bool startSendOnSession(std::string source, std::string remoteName, std::string targetPeerId,
                             std::function<void(const Outcome &)> done)
     {
@@ -1064,7 +1124,7 @@ struct Client::Impl
             return;
         }
 
-        if (action == Action::kBrowse && f.type == FrameType::kAnswerFileList)
+        if (f.type == FrameType::kAnswerFileList && (action == Action::kBrowse || browseActive))
         {
             core::session::FileListStatus status = core::session::FileListStatus::kOk;
             std::vector<core::session::RemoteEntry> entries;
@@ -1076,6 +1136,19 @@ struct Client::Impl
             }
             listStatus = status;
             remoteEntries = std::move(entries);
+
+            if (action != Action::kBrowse)
+            {
+                // 常驻会话上的列举：只回调这一次，会话继续。
+                const bool ok = (status == core::session::FileListStatus::kOk ||
+                                 status == core::session::FileListStatus::kTruncated);
+                const std::string summary = ok ? ("远端列表 " + std::to_string(remoteEntries.size()) + " 项")
+                                               : (status == core::session::FileListStatus::kNotFound
+                                                      ? "对端没有这个目录"
+                                                      : "对端拒绝列举（未开启共享，或路径越界）");
+                finishBrowse(ok, summary, ok ? Status{} : Status::Fail(ErrorCode::kNotFound, "remote list failed"));
+                return;
+            }
 
             switch (status)
             {
@@ -1178,6 +1251,10 @@ struct Client::Impl
         // 搭车发送不再单独回调（避免上层收到两个结论）。
         sendActive = false;
         onSendDone = nullptr;
+        // 挂起的列举同理：会话结束时上层已经收到 onDone，这次列举的回调
+        // 不能再单独发（否则上层会收到两个结论）。
+        browseActive = false;
+        onBrowseDone = nullptr;
         if (session)
         {
             session->close();
@@ -1254,6 +1331,11 @@ bool Client::sendOnSession(std::string sourcePath, std::string remoteName, std::
 {
     return impl_->startSendOnSession(std::move(sourcePath), std::move(remoteName), std::move(toPeerId),
                                      std::move(done));
+}
+
+bool Client::browseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done)
+{
+    return impl_->startBrowseOnSession(std::move(peerId), std::move(relPath), std::move(done));
 }
 
 void Client::cancelSend()

@@ -57,11 +57,26 @@ private slots:
     void onProbeRequested(const relayer::app::ConnInfo &conn);
     void onDisconnectRequested();
     void onTransTaskRun(const relayer::app::RelayTaskItems &items);
+    void onRemoteCheckRequested(const relayer::app::RelayTaskItems &items);
+    void onRemoteBrowseFinished(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows);
 
 private:
     void buildLayout();
     void wireSignals();
     void startAutoReceive();
+
+    // "检查远端"的逐行队列：CoreService 一次只跑一个列举，所以一行一行来。
+    struct RemoteCheck
+    {
+        QString peer;
+        QString relDir;  // 对端接收根下的相对目录（列举它）
+        QString name;    // 期望在里面看到的文件名
+        qint64 localSize = 0;
+    };
+    void nextRemoteCheck();
+
+    QList<RemoteCheck> remoteChecks_;
+    int remoteCheckIndex_ = -1;
 
     Ui::MainWindow *ui_;
     relayer::app::CoreService *core_;

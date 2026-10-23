@@ -39,6 +39,15 @@ struct PeerRow
     QString address;
 };
 
+// 远端目录列举的一条（core::session::RemoteEntry 的 QString 版）。
+struct RemoteRow
+{
+    QString name;
+    bool isDir = false;
+    quint64 size = 0;
+    qint64 mtime = 0;
+};
+
 // 一次连接所需的全部参数。收拢成结构体而不是继续给每个方法加参数：
 // sendFile 已经 6 个参数，且这三项在所有操作里总是一起出现。
 struct ConnInfo
@@ -125,6 +134,12 @@ public:
     // 传输中无法刷新，调用方负责提示。
     bool refreshPeers(const relayer::app::ConnInfo &conn);
 
+    // 在常驻会话上问一次远端目录（PROTOCOL.md §11.8）。
+    //
+    // 返回 false = 没有可用的常驻会话（没连接、或正在传输）。**不回落成
+    // 新连接**：那会顶掉接收会话、换掉本机 id，是文档里反复警告的回归。
+    bool browsePeerOnSession(const QString &peerId, const QString &relPath);
+
     // 中止当前操作（硬停：不发 cancel 帧，与 CLI 的 abort 同语义）。
     void cancelCurrent();
 
@@ -158,6 +173,10 @@ signals:
 
     // list 的结果。与 operationFinished 同批到达（先列表后结论）。
     void peerListReceived(const QList<relayer::app::PeerRow> &rows);
+
+    // 远端列举的结果（browsePeerOnSession 的回程）。一次请求一次信号，
+    // 会话不结束。
+    void remoteBrowseFinished(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows);
 
 private:
     void startIoThread();
@@ -235,4 +254,5 @@ private:
 }  // namespace relayer::app
 
 Q_DECLARE_METATYPE(relayer::app::PeerRow)
+Q_DECLARE_METATYPE(relayer::app::RemoteRow)
 Q_DECLARE_METATYPE(relayer::app::ConnInfo)

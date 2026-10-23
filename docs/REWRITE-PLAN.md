@@ -847,7 +847,7 @@ socket 回调里写就没法把每种组合都测到。
 
 | 子项 | 内容 | 状态 |
 | --- | --- | --- |
-| F1 | 远端目录列举：`kAskFileList`/`kAnswerFileList` 语义（`PROTOCOL.md` §11.8）、`core/session/FileList` 编解码、客户端侧服务（共享根 + `resolveWithin`）、CLI `ls --to <对端>`、e2e `remote-list` | ✅ 协议与 CLI 侧完成；GUI 面板与对照表粗校验未做 |
+| F1 | 远端目录列举：`kAskFileList`/`kAnswerFileList`（`PROTOCOL.md` §11.8）、`core/session/FileList` 编解码、客户端侧服务（共享根 + `resolveWithin`）、CLI `ls`、GUI 共享目录设置与对照表右键"检查远端"、e2e `remote-list` | ✅ 完成；远端浏览面板仍未做（`ExplorerControl` 的远端模式） |
 
 剩余（下一次从这里接）：
 
