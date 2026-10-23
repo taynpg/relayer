@@ -99,6 +99,14 @@ build/bin/relayer-cli.exe send/recv ...                # 对照参考实现、e2
   全局再声明一次就是两个不同类，链接期才炸。
 - **`.ui` 的根类必须与 `.cpp` 一致**：`ComparisonControl.ui` 从 `QDialog` 改成 `QWidget`
   才能配 `setupUi(QWidget*)`。
+- **【连接】/【断开】的语义（2026-10-23 定）**：【连接】只在 `!connected_ && !busy`
+  时可用，拿到**非空** id 才算连上（空 id 是握手中间态）；【断开】只看 `connected_`。
+  此前【断开】按 `busy` 禁用，而连上后 busy 恒为 true → 永远点不动，用户只能反复点
+  【连接】（每次顶掉常驻会话、白耗一个 id）。
+  **【断开】必须真的结束会话**：经 `disconnectRequested` 交给 MainWindow，由它先清
+  `receiveWanted_` 再 `cancelCurrent()`。若在连接面板里直接 abort，`operationFinished`
+  会走"接收会话失败"的自动重连路径，表现为"断开后自己又连上"。换中继地址的路径
+  因此固定为 **断开 → 连接**。
 - **no-auth 路径**：服务端 `--allow-no-auth` 时客户端必须显式 `serverAllowNoAuth`，
   不从空口令推断——漏填口令应报错，不该静默降级。CLI 侧"`--password` 与
   `--no-auth` 必须恰好给一个"的**后半条**曾缺失（只拦了"同时给"），导致漏配的
@@ -111,6 +119,10 @@ build/bin/relayer-cli.exe send/recv ...                # 对照参考实现、e2
 ### 0.7 起手式
 
 1. `git log --oneline -8` 看最近改动，`ctest` 确认基线（7/7）。
+2. **终端中文乱码**先看 `common/include/relayer/common/Console.h`：`main()` 开头
+   是否调了 `init()` + `use_utf8_locale()`。前者管 C++ 流（转宽字符写
+   `WriteConsoleW`），后者管 `printf` 系；被重定向时两条路都不改字节。
+   `common/` 里放它是因为 cli 与 server 都要——不要挪进任一上层。
 2. 要改 GUI：`app/bridge/CoreService.{h,cpp}` 是唯一的 Qt 边界，先读它，再读
    `cli/include/relayer/cli/Client.h`（GUI 的 worker 就是它）。
 3. 要改传输：`core/transfer/TransferPeer.h` 的 `Config` / `started()` / `Stats` 是契约面。
