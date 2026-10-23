@@ -35,6 +35,7 @@ add_executable(relayer WIN32
     bridge/CoreService.cpp
     model/ProgressTracker.cpp
     ui/ConnectorControl.cpp
+    ui/FileMetaInfo.cpp
     ui/LogControl.cpp
     ui/ReplaceArea.cpp
     ui/Setting.cpp

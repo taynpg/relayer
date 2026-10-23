@@ -26,7 +26,8 @@ class ComparisonControl;
 //     规模（几百行内）用 JSON 足够。
 //   - 编辑直接同步进内存模型（v1 的表格是唯一真身、筛选重排会丢编辑，
 //     v2 用 rows_ + 视图投影，清单 #8 的"行号不再是状态"）。
-//   - 粗校验/下载未做：依赖远端会话与远端目录列举（如实未实现，阶段 F）。
+//   - 下载落到**每行自己的本地目录**（v1 语义），不扔进全局接收目录：
+//     行说"name 属于 (localDir, peer, relDir)"，上下行因此对称。
 class ComparisonControl : public QWidget
 {
     Q_OBJECT
@@ -48,6 +49,13 @@ signals:
     // 右键"检查远端"：问对端"这些行要发的东西对方是不是已经有了"。
     // 本控件不碰网络（只做显示与转发），实际请求由 MainWindow 逐行发起。
     void remoteCheckRequested(const relayer::app::RelayTaskItems &items);
+
+    // 右键"下载到本地"：把每行在**对端 relDir 下的 name** 取回，落到该行的
+    // 本地目录。是"发送到对端"的逆操作，行语义因此是对称的：
+    //   name 属于 (localDir, peer, relDir)，发送是 localDir → peer:relDir，
+    //   下载是 peer:relDir → localDir。
+    // 同样由 MainWindow 逐行发起（一次只能有一个取回请求在飞）。
+    void downloadRequested(const relayer::app::RelayTaskItems &items);
 
 private:
     // ---- 内存模型 ----

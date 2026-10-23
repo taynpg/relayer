@@ -603,6 +603,8 @@ void ComparisonControl::onTableContextMenu(const QPoint &pos)
 
     QAction *transAction = menu.addAction(MenuIcons::upload(), QStringLiteral("发送到对端"));
     transAction->setEnabled(!selected.isEmpty());
+    QAction *downloadAction = menu.addAction(MenuIcons::download(), QStringLiteral("下载到本地目录"));
+    downloadAction->setEnabled(!selected.isEmpty());
     QAction *checkAction = menu.addAction(QStringLiteral("检查远端（对方是否已有）"));
     checkAction->setEnabled(!selected.isEmpty());
     QAction *newRowAction = menu.addAction(MenuIcons::newRow(), QStringLiteral("新行"));
@@ -659,6 +661,11 @@ void ComparisonControl::onTableContextMenu(const QPoint &pos)
         // 只把行数据交给 MainWindow：它才有 CoreService（本控件不碰网络）。
         // 对端留空的行由 MainWindow 用"当前通信对象"补，与发送一致。
         emit remoteCheckRequested(selectedItems());
+        return;
+    }
+    if (ret == downloadAction)
+    {
+        emit downloadRequested(selectedItems());
         return;
     }
     if (ret == newRowAction)

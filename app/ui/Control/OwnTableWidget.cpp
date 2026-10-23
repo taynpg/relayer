@@ -83,8 +83,11 @@ void ComDropTable::ensureRowComplete(int row)
 
 void ComDropTable::dragEnterEvent(QDragEnterEvent *event)
 {
-    if (!event->mimeData()->hasFormat(MY_MIME_DROP_TYPE))
+    if (!event->mimeData()->hasFormat(MY_MIME_DROP_TYPE) ||
+        event->mimeData()->hasFormat(MY_MIME_DROP_REMOTE_MARK))
     {
+        // 远端来的载荷里 from 是"相对共享根"，不是本地路径——落进本地目录列
+        // 只会写出一句谁都认不出的路径。整个拒收，比落进去再报错好。
         event->ignore();
         return;
     }
@@ -93,7 +96,8 @@ void ComDropTable::dragEnterEvent(QDragEnterEvent *event)
 
 void ComDropTable::dragMoveEvent(QDragMoveEvent *event)
 {
-    if (!event->mimeData()->hasFormat(MY_MIME_DROP_TYPE))
+    if (!event->mimeData()->hasFormat(MY_MIME_DROP_TYPE) ||
+        event->mimeData()->hasFormat(MY_MIME_DROP_REMOTE_MARK))
     {
         event->ignore();
         return;
@@ -103,6 +107,11 @@ void ComDropTable::dragMoveEvent(QDragMoveEvent *event)
 
 void ComDropTable::dropEvent(QDropEvent *event)
 {
+    if (event->mimeData()->hasFormat(MY_MIME_DROP_REMOTE_MARK))
+    {
+        event->ignore();
+        return;
+    }
     const QByteArray payload = event->mimeData()->data(MY_MIME_DROP_TYPE);
     const InfoDrop infoDrop = infoUnpack<InfoDrop>(payload);
 
@@ -170,6 +179,11 @@ void ExpDropTable::setOnInfoDropped(std::function<void(const InfoDrop &)> onDrop
     onInfoDropped_ = std::move(onDropped);
 }
 
+void ExpDropTable::setRemoteSource(bool remote)
+{
+    remoteSource_ = remote;
+}
+
 void ExpDropTable::mousePressEvent(QMouseEvent *event)
 {
     if (event->button() == Qt::LeftButton)
@@ -223,6 +237,12 @@ void ExpDropTable::mouseMoveEvent(QMouseEvent *event)
 
     auto *mimeData = new QMimeData();
     mimeData->setData(MY_MIME_DROP_TYPE, infoPack(infoDrop));
+    if (remoteSource_)
+    {
+        // 只给对照表看的"别收"标记（见头文件）。宿主的表格类型检查不认它，
+        // 认它的只有 ComDropTable。
+        mimeData->setData(MY_MIME_DROP_REMOTE_MARK, QByteArrayLiteral("1"));
+    }
 
     auto *drag = new QDrag(this);
     drag->setMimeData(mimeData);

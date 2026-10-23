@@ -22,6 +22,7 @@
 
 #include "relayer/cli/Client.h"
 #include "relayer/common/crypto/Sha256.h"
+#include "ui/FileMetaInfo.h"
 #include "ui_ExplorerControl.h"
 
 namespace
@@ -416,9 +417,11 @@ void ExplorerControl::setRemotePeer(const QString &peerId, const QString &peerNa
     entries_.clear();
     remotePendingPath_.clear();
 
-    // 远端只读：拖出（载荷是本地路径）与文件系统操作都不适用，
-    // 直接关掉入口，而不是留着能点但点了报错。
-    table_->setDragEnabled(false);
+    // 远端只读：文件系统操作都不适用，直接关掉入口，而不是留着能点但点了
+    // 报错。拖出**保留**——载荷是相对路径，落到本地面板就是"下载"（v1 的
+    // 跨面板拖拽在 v2 的对应物）。表格上的标记让对照表拒收这种载荷。
+    table_->setDragEnabled(true);
+    table_->setRemoteSource(true);
     ui_->cbPath->setEditable(false);
     ui_->btnEnter->setEnabled(false);
     ui_->btnHome->setText(QStringLiteral("共享根"));
@@ -447,6 +450,7 @@ void ExplorerControl::useLocalSource()
     entries_.clear();
 
     table_->setDragEnabled(true);
+    table_->setRemoteSource(false);
     ui_->cbPath->setEditable(true);
     ui_->btnEnter->setEnabled(true);
     ui_->btnHome->setText(QStringLiteral("家目录"));
@@ -691,6 +695,37 @@ void ExplorerControl::setFileItem(const FileEntry &entry, int row)
     table_->setItem(row, toInt(ExpColumn::Size), sizeItem);
 }
 
+const ExplorerControl::FileEntry *ExplorerControl::findEntry(const QString &name) const
+{
+    for (const auto &e : entries_)
+    {
+        if (e.name == name)
+        {
+            return &e;
+        }
+    }
+    return nullptr;
+}
+
+void ExplorerControl::showMetaInfo(int row)
+{
+    if (row < 0 || row >= table_->rowCount())
+    {
+        return;
+    }
+    const QString name = table_->item(row, toInt(ExpColumn::Name))->text();
+    const FileEntry *entry = findEntry(name);
+    const bool isDir =
+        entry != nullptr ? entry->isDir : table_->item(row, toInt(ExpColumn::Type))->text() == QStringLiteral("Dir");
+
+    FileMetaInfo dlg(this);
+    // 目录没有"大小"（-1 = 不适用，显示为 "-"，避免被读成 0 字节的空目录）；
+    // 远端条目由 applyRemoteEntries 带回 mtime，本地由 listDir 带回。
+    dlg.setMeta(displayPath(), name, isDir, (isDir || entry == nullptr) ? -1 : entry->size,
+                entry != nullptr ? entry->modifiedMs : -1, source_ == Source::Remote);
+    dlg.exec();
+}
+
 void ExplorerControl::onTableContextMenu(const QPoint &pos)
 {
     // 动作表注册式写法（清单 #5）：{显示条件, 文字, 回调}，不再写
@@ -748,6 +783,13 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
 
         connect(menu.addAction(QStringLiteral("刷新")), &QAction::triggered, this,
                 [this]() { enterPath(currentPath_); });
+        // 详细信息在远端同样有意义：名字、大小、修改时间都是 §11.8 回来的，
+        // 只是没有本地路径（对话框里显示 `peer:/rel` 并标注"（远端）"）。
+        if (singleRow)
+        {
+            connect(menu.addAction(QStringLiteral("详细信息")), &QAction::triggered, this,
+                    [this, rows]() { showMetaInfo(rows[0]); });
+        }
         menu.exec(table_->viewport()->mapToGlobal(pos));
         return;
     }
@@ -770,6 +812,10 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
          }},
         {singleRow, QStringLiteral("复制全路径"),
          [this, selectedPath]() { QApplication::clipboard()->setText(selectedPath); }},
+        // v1 的「详细信息」：名字/类型/大小/修改时间 + 三个复制按钮。
+        // 数据直接取自 entries_，不重新 stat——显示的必须是"表格里那一条"，
+        // 而不是"现在磁盘上那一条"（两者可能不同，用户会困惑）。
+        {singleRow, QStringLiteral("详细信息"), [this, rows]() { showMetaInfo(rows[0]); }},
         // 压缩 / 解压缩（v1 有、v2 之前只有后端能力没有入口）。
         //
         // 压缩的方向：包内**带顶层目录**（entryName 相对各源的父目录），

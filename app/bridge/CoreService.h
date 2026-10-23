@@ -166,7 +166,12 @@ public:
     // 决定，共享方无权指定（协议里这条是写死的）。
     // asArchive=true：relPath 指向**目录**，请对端打包成 tar.xz（§11.10）。
     // 归档请求要等对端压缩完才回应答，超时是 120 秒。
-    bool pullFileFromPeer(const QString &peerId, const QString &relPath, bool asArchive);
+    //
+    // intoDir 非空 = 这一次收到的东西落到那里，收完**自动恢复**成全局接收
+    // 目录（对照表的行级下载：每行有自己的本地目录，不能一次下载就把整个
+    // 会话的落点永久改掉）。空 = 用全局接收目录。
+    bool pullFileFromPeer(const QString &peerId, const QString &relPath, bool asArchive,
+                          const QString &intoDir = QString());
 
     // 中止当前操作（硬停：不发 cancel 帧，与 CLI 的 abort 同语义）。
     void cancelCurrent();
@@ -272,6 +277,18 @@ private:
     // 而"这一次取回是目录"是运行时的、逐次的决定。别人主动发来的 .tar.xz
     // 不能擅自解开——那可能正是用户想收的包。
     bool unpackNextArchive_ = false;
+
+    // 会话的默认接收目录（startReceive 时记下）。**只在 io 线程读写**。
+    // 行级下载临时改落点之后，靠它改回原处。
+    std::string defaultReceiveDir_;
+
+    // 正在等"落到指定目录"的那次取回的落点；空 = 没有临时落点要还原。
+    // **只在 io 线程读写**（pullFileFromPeer 的 post 里置、onFileReceived /
+    // onReceiveFailed 里清）。
+    std::string pullTargetDir_;
+
+    // 把临时落点改回 defaultReceiveDir_（io 线程）。
+    void restoreReceiveDir();
 
     asio::io_context ctx_;
 

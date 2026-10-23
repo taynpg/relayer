@@ -4,9 +4,12 @@
 #include <QList>
 #include <QStringList>
 #include <QVector>
+#include <functional>
 
 #include "OwnTableWidget.h"
 #include "bridge/CoreService.h"
+
+struct InfoDrop;
 
 QT_BEGIN_NAMESPACE
 namespace Ui
@@ -31,8 +34,8 @@ class QComboBox;
 // 的意义。差异只在三处，都有明确理由：
 //   1. 远端是**只读**：重命名/删除/新建文件夹都是本地文件系统操作，远端没有
 //      对应帧（要做得先有协议）；远端模式不显示这些动作。
-//   2. 远端不拖出：拖拽载荷是"本地路径"，远端条目没有本地路径。要支持得
-//      先做下载，那是另一件事。
+//   2. 远端的拖拽载荷是**相对共享根**而不是本地绝对路径，所以拖出时多打一个
+//      标记 MIME，对照表的本地目录列据此拒收（见 InfoDrop.h）。
 //   3. 远端路径是**相对共享根**（可能是另一个系统的路径规则），显示成
 //      `peer:/rel`，且不可手输。
 //
@@ -88,6 +91,16 @@ public:
     ExpDropTable *table() const
     {
         return table_;
+    }
+
+    // 从**另一张浏览表**拖入时的回调（v1 的 peerDf 形状：一套代码两个方向）。
+    //
+    // 本控件只把载荷交出去：它不知道自己是左边还是右边、对面是谁、往哪落。
+    // 方向由"谁收到了"决定——本地表收到 = 对方是远端 = 下载；远端表收到 =
+    // 上传。这个判断只有 MainWindow 做得出来（它同时持有两个面板）。
+    void setOnInfoDropped(std::function<void(const InfoDrop &)> onDropped)
+    {
+        table_->setOnInfoDropped(std::move(onDropped));
     }
 
     // 外部导航入口（配置表"访问本地目录"等）。进入失败经 notice 上报。
@@ -179,6 +192,14 @@ private:
     // 状态行。每一次列举都必须留下可见结果（读取中 / 共 N 项 / 失败原因），
     // 否则失败与"没反应"在界面上无法区分。
     void setStatus(const QString &text, bool error = false);
+
+    // 按名字回源数据里找条目。
+    // 表格里的大小/时间是**格式化后**的字符串（"1.2 KiB"、"2026-10-23 ..."），
+    // 反解析既不可靠也多此一举——名字在同一个目录里唯一，直接回源。
+    [[nodiscard]] const FileEntry *findEntry(const QString &name) const;
+
+    // 右键「详细信息」：本地/远端共用同一个对话框（v1 也是同一个 Form）。
+    void showMetaInfo(int row);
 
     Ui::ExplorerControl *ui_ = nullptr;
     ExpDropTable *table_ = nullptr;  // 表格本体由 initControl 动态创建，塞进 .ui 的占位 widget

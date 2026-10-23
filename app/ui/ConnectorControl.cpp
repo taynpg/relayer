@@ -328,6 +328,18 @@ void ConnectorControl::onPeerListReceived(const QList<PeerRow> &rows)
     }
 }
 
+void ConnectorControl::setCurrentPeer(const QString &id, const QString &address)
+{
+    currentPeerId_ = id;
+    if (id.isEmpty())
+    {
+        ui_->edCurrentClient->clear();
+        return;
+    }
+    // 只知道 id 时不要显示成 "A（）"——那看起来像地址丢了。
+    ui_->edCurrentClient->setText(address.isEmpty() ? id : QStringLiteral("%1（%2）").arg(id, address));
+}
+
 void ConnectorControl::onTableContextMenu(const QPoint &pos)
 {
     auto *item = ui_->tableClients->itemAt(pos);
@@ -347,12 +359,7 @@ void ConnectorControl::onTableContextMenu(const QPoint &pos)
         QString label;
         std::function<void()> run;
     } actions[] = {
-        {QStringLiteral("设为通信对象"),
-         [this, id, address]()
-         {
-             currentPeerId_ = id;
-             ui_->edCurrentClient->setText(QStringLiteral("%1（%2）").arg(id, address));
-         }},
+        {QStringLiteral("设为通信对象"), [this, id, address]() { setCurrentPeer(id, address); }},
         {QStringLiteral("发送文件到此对端"), [this, id, address]() { emit sendToPeerRequested(id, address); }},
         {QStringLiteral("浏览此对端的目录"), [this, id, address]() { emit browsePeerRequested(id, address); }},
     };

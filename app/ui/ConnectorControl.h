@@ -46,6 +46,13 @@ public:
         return currentPeerId_;
     }
 
+    // 直接把某个对端设为当前通信对象。给"意图已明确指向某对端"的入口用
+    // （跨面板拖拽：拖到谁的面板就是发给谁）。
+    //
+    // 不在这里做在线校验：调用方（MainWindow）有自己的提示口径，而且
+    // 列表可能是旧的。address 可空（有些入口只知道 id）。
+    void setCurrentPeer(const QString &id, const QString &address = QString());
+
     // 最近一次在线列表里有没有这个 id。列表为空（还没刷新过）时返回
     // false——调用方据此区分"确定不在线"与"不知道"，别把后者当错误拦下。
     bool isPeerOnline(const QString &id) const

@@ -85,6 +85,14 @@ public:
     // 从另一张浏览表（本地→远端或反向）放下时的回调。
     void setOnInfoDropped(std::function<void(const InfoDrop &)> onDropped);
 
+    // 本表浏览的是远端（相对共享根）。只影响拖出：载荷里额外打一个标记，
+    // 让对照表的本地目录列**拒收**——远端相对路径不是本地路径，落进去
+    // 会把"发到哪"写成一句谁都不认的路径。
+    //
+    // 不往 InfoDrop 里加字段：那个序列化格式是与 v1 的契约（InfoDrop.h），
+    // 加字段会让旧数据读不动。标记走独立的 MIME，载荷本身一字不改。
+    void setRemoteSource(bool remote);
+
 protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
@@ -96,4 +104,5 @@ private:
     std::function<QString()> getOwnRoot_;
     std::function<void(const InfoDrop &)> onInfoDropped_;
     QPoint dragStart_;
+    bool remoteSource_ = false;
 };

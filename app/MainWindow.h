@@ -60,6 +60,8 @@ private slots:
     void onDisconnectRequested();
     void onTransTaskRun(const relayer::app::RelayTaskItems &items);
     void onRemoteCheckRequested(const relayer::app::RelayTaskItems &items);
+    void onDownloadRequested(const relayer::app::RelayTaskItems &items);
+    void onRemotePullFinished(bool ok, const QString &summary);
 
     // 粗校验 / 时间戳校验（从本地面板发起）：与**远端面板当前目录下的同名
     // 文件**比。v1 的语义是跨面板比，v2 的两个面板正好是左本地、右远端。
@@ -84,6 +86,29 @@ private:
 
     QList<RemoteCheck> remoteChecks_;
     int remoteCheckIndex_ = -1;
+
+    // "下载到本地目录"的逐行队列（对照表右键）。
+    //
+    // 为什么要排队：协议上一次只允许一个取回请求在飞（Client 的 pullActive），
+    // 而且对端在打包/发送期间会拒绝新的取回请求。所以按行串行，一行真正
+    // 落地（或失败）之后才发下一行的请求。
+    //
+    // "落地"的判据是 fileReceived / archiveExtracted —— 只等应答（"对方
+    // 接受了"）是不够的：文件还在传，下一行的请求会被对端以"正忙"拒掉。
+    struct DownloadJob
+    {
+        QString peer;
+        QString relPath;  // 对端共享根下的相对路径（relDir/name）
+        QString name;     // 期望收到的名字（认领 fileReceived 用）
+        bool isDir = false;
+        QString into;  // 落点：该行的本地目录；空 = 全局接收目录
+    };
+    void nextDownload();
+    void finishDownloadStep();
+
+    QList<DownloadJob> downloads_;
+    int downloadIndex_ = -1;       // -1 = 空闲；否则是"已发请求、等接受"的下标
+    bool downloadWaiting_ = false;  // 已接受，等文件落地
 
     // 一次待完成的比对。远端那一侧要先列举才能拿到 size/mtime，所以这里
     // 记住本地侧的数值，等应答回来再比。

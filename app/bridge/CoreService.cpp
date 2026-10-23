@@ -101,6 +101,10 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
     cfg.keepReceiving = true;
     cfg.onFileReceived = [this](const std::string &targetPath)
     {
+        // 临时落点只服务"这一次取回"，落地即失效：不还原的话，后续别人
+        // 主动发来的文件会跟着落进那一行指定的本地目录。
+        restoreReceiveDir();
+
         if (unpackNextArchive_)
         {
             unpackNextArchive_ = false;
@@ -116,7 +120,13 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
         }
         emit fileReceived(toQt(targetPath));
     };
-    cfg.onReceiveFailed = [this](const std::string &message) { emit receiveFailed(toQt(message)); };
+    cfg.onReceiveFailed = [this](const std::string &message)
+    {
+        // 失败也要还原：这一次取回没落地，落点照样该回到全局接收目录。
+        // 不还原就会留下"下一个人发来的文件落到上一行目录"的暗坑。
+        restoreReceiveDir();
+        emit receiveFailed(toQt(message));
+    };
 
     // 接收覆盖：GUI 的落点是用户自己选的接收目录，"同一个文件反复发到
     // 同一个目录"是核心场景——默认拒绝覆盖会让第二次发送起永远失败，
@@ -393,6 +403,9 @@ void CoreService::startReceive(const QString &targetDir, const ConnInfo &conn)
             busy_ = true;
             receivePending_ = true;
             queuedWork_ = false;
+            // 记下默认落点：行级下载会临时改落点，收完改回这里。
+            defaultReceiveDir_ = fromQt(targetDir);
+            pullTargetDir_.clear();
             client_ = std::make_shared<cli::Client>(
                 ctx_, std::move(cfg), [this](const cli::ProgressReport &p)
                 { emit progressChanged(p.bytesDone, p.bytesTotal, p.bytesPerSecond); },
@@ -504,7 +517,7 @@ bool CoreService::browsePeerOnSession(const QString &peerId, const QString &relP
     return true;
 }
 
-bool CoreService::pullFileFromPeer(const QString &peerId, const QString &relPath, bool asArchive)
+bool CoreService::pullFileFromPeer(const QString &peerId, const QString &relPath, bool asArchive, const QString &intoDir)
 {
     if (peerId.isEmpty() || relPath.isEmpty())
     {
@@ -518,12 +531,27 @@ bool CoreService::pullFileFromPeer(const QString &peerId, const QString &relPath
     }
 
     runOnIo(
-        [this, peer = fromQt(peerId), path = fromQt(relPath), asArchive]
+        [this, peer = fromQt(peerId), path = fromQt(relPath), asArchive, into = fromQt(intoDir)]
         {
             if (!client_)
             {
                 emit remotePullFinished(false, QStringLiteral("没有可用的常驻会话"));
                 return;
+            }
+            // 先改落点再发请求：应答可能在 pullOnSession 返回前就到（同一
+            // 个 io 线程上不会，但把顺序写死能省掉一次"为什么落到别处"）。
+            if (!into.empty())
+            {
+                if (!client_->setReceiveDirOnSession(into))
+                {
+                    emit remotePullFinished(false, QStringLiteral("当前无法指定落点（会话不可用）"));
+                    return;
+                }
+                pullTargetDir_ = into;
+            }
+            else
+            {
+                pullTargetDir_.clear();
             }
             if (asArchive)
             {
@@ -538,6 +566,8 @@ bool CoreService::pullFileFromPeer(const QString &peerId, const QString &relPath
                                                                 // 否则下一次收到别人的 .tar.xz 会被
                                                                 // 当成这次的包解开。
                                                                 unpackNextArchive_ = false;
+                                                                // 临时落点同理：没取成就得改回去。
+                                                                restoreReceiveDir();
                                                             }
                                                             // 从 io 线程 emit 跨线程信号是安全的。
                                                             emit remotePullFinished(o.ok, toQt(o.summary));
@@ -545,10 +575,26 @@ bool CoreService::pullFileFromPeer(const QString &peerId, const QString &relPath
             if (!started)
             {
                 unpackNextArchive_ = false;
+                restoreReceiveDir();
                 emit remotePullFinished(false, QStringLiteral("当前不能取回（正在传输或会话不可用）"));
             }
         });
     return true;
+}
+
+void CoreService::restoreReceiveDir()
+{
+    // io 线程。没有临时落点（或根本没有会话）时什么都不做——这个函数会在
+    // 每一次接收结束时被调用，不能有副作用。
+    if (pullTargetDir_.empty())
+    {
+        return;
+    }
+    pullTargetDir_.clear();
+    if (client_ && !defaultReceiveDir_.empty())
+    {
+        client_->setReceiveDirOnSession(defaultReceiveDir_);
+    }
 }
 
 void CoreService::cancelCurrent()

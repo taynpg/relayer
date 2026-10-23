@@ -15,6 +15,7 @@
 #include <QVBoxLayout>
 #include <algorithm>
 
+#include "Base/InfoDrop.h"
 #include "model/ProgressTracker.h"
 #include "ui/ConnectorControl.h"
 #include "ui/Control/ComparisonControl.h"
@@ -187,26 +188,29 @@ void MainWindow::wireSignals()
                 if (ok)
                 {
                     log_->appendLog(QStringLiteral("[取回] 已解包到 %1\n").arg(dir));
+                    // 行级下载的"目录行"：包解开才算落地（包本身已被删）。
+                    // 目录名与行名一致才算这一行的（见 fileReceived 的说明）。
+                    if (downloadWaiting_ && downloadIndex_ >= 0 && downloadIndex_ < downloads_.size())
+                    {
+                        const auto job = downloads_.at(downloadIndex_);
+                        if (QFileInfo(dir).fileName() == job.name)
+                        {
+                            finishDownloadStep();
+                        }
+                    }
                 }
                 else
                 {
                     log_->appendLog(QStringLiteral("[取回] %1\n").arg(detail));
+                    // 解包失败：包还在接收目录，这一行算"取到了但没解开"，
+                    // 不该卡住整个队列。
+                    if (downloadWaiting_)
+                    {
+                        finishDownloadStep();
+                    }
                 }
             });
-    connect(core_, &relayer::app::CoreService::remotePullFinished, this,
-            [this](bool ok, const QString &summary)
-            {
-                if (ok)
-                {
-                    // 只是"对方接受了"。落点由接收路径报（[接收完成] 那一行），
-                    // 这里别写文件名——它还不知道文件会不会被改名。
-                    log_->appendLog(QStringLiteral("[取回] %1，文件将落到接收目录\n").arg(summary));
-                }
-                else
-                {
-                    log_->appendLog(QStringLiteral("[取回] 失败：%1\n").arg(summary));
-                }
-            });
+    connect(core_, &relayer::app::CoreService::remotePullFinished, this, &MainWindow::onRemotePullFinished);
     connect(remoteExplorer_, &ExplorerControl::remoteListRequested, this,
             [this](const QString &peer, const QString &relPath)
             {
@@ -217,6 +221,83 @@ void MainWindow::wireSignals()
                 }
             });
 
+    // 跨面板拖拽（v1 的 peerDf 形状：一套代码、两个方向）。
+    //
+    // 方向由"谁收到了"决定，不由载荷决定：
+    //   - 本地表收到 → 载荷来自远端 → 下载，落到**本地表的当前目录**；
+    //   - 远端表收到 → 载荷来自本地 → 上传，落到**远端表的当前目录**
+    //     （这就是"传到对方某个子目录"——先在对端目录里进到那一层）。
+    explorer_->setOnInfoDropped(
+        [this](const InfoDrop &drop)
+        {
+            if (remoteExplorer_->source() != ExplorerControl::Source::Remote ||
+                remoteExplorer_->remotePeerId().isEmpty())
+            {
+                log_->appendLog(QStringLiteral("[拖拽] 远端面板还没有对端，无法下载（先右键对端「浏览此对端的目录」）\n"));
+                return;
+            }
+            const QString peer = remoteExplorer_->remotePeerId();
+            const QString relFrom = drop.from;  // 远端相对目录（载荷 from）
+
+            relayer::app::RelayTaskItems items;
+            for (const auto &it : drop.items)
+            {
+                relayer::app::RelayTaskItem item;
+                item.name = it.fileName;
+                item.isDir = it.type == 0;
+                item.peerId = peer;
+                item.relDir = relFrom;                      // 从对端的这一层取
+                item.localDir = explorer_->currentPath();   // 落到本地的这一层
+                items.append(item);
+            }
+            log_->appendLog(QStringLiteral("[拖拽] 下载 %1 项：%2 → %3\n")
+                                .arg(items.size())
+                                .arg(relFrom.isEmpty() ? QStringLiteral("<共享根>") : relFrom,
+                                     explorer_->currentPath()));
+            onDownloadRequested(items);
+        });
+
+    remoteExplorer_->setOnInfoDropped(
+        [this](const InfoDrop &drop)
+        {
+            const QString peer = remoteExplorer_->remotePeerId();
+            if (peer.isEmpty())
+            {
+                log_->appendLog(QStringLiteral("[拖拽] 远端面板还没有对端，无法上传\n"));
+                return;
+            }
+            const QString localFrom = drop.from;  // 本地绝对目录（载荷 from）
+
+            // 拖到谁的面板就是发给谁：面板标题显示的那个对端，本来就是这个
+            // 动作唯一合理的收件人。不切换的话 onTransTaskRun 会以"对端与
+            // 当前通信对象不一致"拦下——那对用户来说等于"拖了没反应"。
+            if (connector_->currentPeerId() != peer)
+            {
+                connector_->setCurrentPeer(peer);
+                log_->appendLog(QStringLiteral("[拖拽] 通信对象已切到 %1（拖拽目标就是它）\n").arg(peer));
+            }
+
+            relayer::app::RelayTaskItems items;
+            for (const auto &it : drop.items)
+            {
+                relayer::app::RelayTaskItem item;
+                item.name = it.fileName;
+                item.isDir = it.type == 0;
+                item.peerId = peer;
+                // 两种形状（与 RelayTaskControl::startTasks 的展开逻辑对应）：
+                // 文件给父目录 + 名字；目录给目录本身（`from` 是它的父目录）。
+                item.localDir = item.isDir ? QDir(localFrom).filePath(it.fileName) : localFrom;
+                item.relDir = remoteExplorer_->currentPath();  // 落到对端的这一层
+                items.append(item);
+            }
+            log_->appendLog(QStringLiteral("[拖拽] 上传 %1 项：%2 → %3:%4\n")
+                                .arg(items.size())
+                                .arg(localFrom, peer,
+                                     remoteExplorer_->currentPath().isEmpty() ? QStringLiteral("<共享根>")
+                                                                              : remoteExplorer_->currentPath()));
+            onTransTaskRun(items);
+        });
+
     connect(comparison_, &ComparisonControl::logMessage, log_, &LogControl::appendLog);
     connect(comparison_, &ComparisonControl::exploreLocalRequested, explorer_,
             [this](const QString &path)
@@ -226,6 +307,7 @@ void MainWindow::wireSignals()
             });
     connect(comparison_, &ComparisonControl::transTaskRun, this, &MainWindow::onTransTaskRun);
     connect(comparison_, &ComparisonControl::remoteCheckRequested, this, &MainWindow::onRemoteCheckRequested);
+    connect(comparison_, &ComparisonControl::downloadRequested, this, &MainWindow::onDownloadRequested);
     connect(core_, &relayer::app::CoreService::remoteBrowseFinished, this, &MainWindow::onRemoteBrowseFinished);
     connect(taskControl_, &relayer::app::RelayTaskControl::logMessage, log_, &LogControl::appendLog);
     connect(taskControl_, &relayer::app::RelayTaskControl::batchFinished, this,
@@ -256,6 +338,22 @@ void MainWindow::wireSignals()
                 // 常驻接收继续等下一个文件；重置空闲提示，让"等待文件……"
                 // 再出现一次，用户才知道会话还活着。
                 idleProgressLogged_ = false;
+
+                // 对照表的行级下载：这一份是刚才那一行要的东西吗？
+                // 只按"名字对得上"认领——队列表不可能知道来源，但名字不符
+                // 就说明这是别人推来的文件，队列继续等自己那份。
+                if (!downloadWaiting_ || downloadIndex_ < 0 || downloadIndex_ >= downloads_.size())
+                {
+                    return;
+                }
+                const auto job = downloads_.at(downloadIndex_);
+                const QFileInfo got(targetPath);
+                if (got.fileName() != job.name)
+                {
+                    return;
+                }
+                log_->appendLog(QStringLiteral("[下载] %1：已落到 %2\n").arg(job.name, got.absolutePath()));
+                finishDownloadStep();
             });
     connect(core_, &relayer::app::CoreService::receiveFailed, this,
             [this](const QString &message)
@@ -265,6 +363,14 @@ void MainWindow::wireSignals()
                 // 走 operationFinished 那条路。
                 log_->appendLog(QStringLiteral("%1（会话保持，继续等待下一个文件）\n").arg(message));
                 idleProgressLogged_ = false;
+
+                // 行级下载在等一份文件时失败：这一行算失败，继续下一行。
+                // 不推进的话队列会永远停在这一格，用户以为"卡住了"。
+                if (downloadWaiting_)
+                {
+                    log_->appendLog(QStringLiteral("[下载] 这一项没收到，继续下一项\n"));
+                    finishDownloadStep();
+                }
             });
 }
 
@@ -624,6 +730,155 @@ void MainWindow::onRemoteCheckRequested(const relayer::app::RelayTaskItems &item
     remoteCheckIndex_ = 0;
     log_->appendLog(QStringLiteral("[检查] 开始检查 %1 项\n").arg(remoteChecks_.size()));
     nextRemoteCheck();
+}
+
+// 对照表右键"下载到本地目录"：把每行在 peer:relDir 下的 name 取回来，
+// 落到该行的本地目录。是"发送到对端"的逆操作。
+//
+// 与"检查远端"同构：本控件只给行数据，网络动作在这里逐行发起。差别是
+// 这里的每一步要等**文件落地**才算完（只等应答会被对端以"正忙"拒掉）。
+void MainWindow::onDownloadRequested(const relayer::app::RelayTaskItems &items)
+{
+    if (!core_->busy())
+    {
+        QMessageBox::warning(this, QStringLiteral("提示"),
+                             QStringLiteral("请先连接中继——下载要靠常驻接收会话，"
+                                            "新开连接会把本机 id 换掉。"));
+        return;
+    }
+    if (downloadIndex_ >= 0)
+    {
+        log_->appendLog(QStringLiteral("[下载] 上一批还没跑完，请等它结束\n"));
+        return;
+    }
+
+    const QString defaultPeer = connector_->currentPeerId();
+    downloads_.clear();
+    for (const auto &it : items)
+    {
+        if (it.name.isEmpty())
+        {
+            continue;
+        }
+        const QString peer = it.peerId.isEmpty() ? defaultPeer : it.peerId;
+        if (peer.isEmpty())
+        {
+            log_->appendLog(QStringLiteral("[下载] %1：没有指定对端，跳过\n").arg(it.name));
+            continue;
+        }
+
+        DownloadJob job;
+        job.peer = peer;
+        job.name = it.name;
+        job.isDir = it.isDir;
+        // 相对路径统一用 '/'：协议里的路径是 POSIX 形状，而行里的相对目录
+        // 是用户手填的（Windows 上很可能写成反斜杠）。
+        QString rel = it.relDir;
+        rel.replace(QLatin1Char('\\'), QLatin1Char('/'));
+        while (rel.startsWith(QLatin1Char('/')))
+        {
+            rel.remove(0, 1);
+        }
+        while (rel.endsWith(QLatin1Char('/')))
+        {
+            rel.chop(1);
+        }
+        job.relPath = rel.isEmpty() ? it.name : (rel + QLatin1Char('/') + it.name);
+
+        // 落点：行里写了本地目录、且它确实存在 → 就落在那儿（v1 语义）。
+        // 不存在则退回全局接收目录——下落点由接收方决定，不能凭一行
+        // 手填的路径就去建一整套目录树。
+        if (!it.localDir.isEmpty())
+        {
+            const QFileInfo dirInfo(it.localDir);
+            if (dirInfo.isDir())
+            {
+                job.into = dirInfo.absoluteFilePath();
+            }
+            else
+            {
+                log_->appendLog(QStringLiteral("[下载] %1：本地目录不存在（%2），改落接收目录\n")
+                                    .arg(it.name, it.localDir));
+            }
+        }
+        downloads_.append(job);
+    }
+
+    if (downloads_.isEmpty())
+    {
+        return;
+    }
+    downloadIndex_ = 0;
+    downloadWaiting_ = false;
+    log_->appendLog(QStringLiteral("[下载] 开始 %1 项（逐项串行，等落地再发下一项）\n").arg(downloads_.size()));
+    nextDownload();
+}
+
+void MainWindow::nextDownload()
+{
+    while (downloadIndex_ >= 0 && downloadIndex_ < downloads_.size())
+    {
+        const auto &job = downloads_.at(downloadIndex_);
+        if (core_->pullFileFromPeer(job.peer, job.relPath, job.isDir, job.into))
+        {
+            return;  // 等 onRemotePullFinished
+        }
+        log_->appendLog(QStringLiteral("[下载] %1：当前无法发起取回（会话不可用或正忙）\n").arg(job.name));
+        ++downloadIndex_;
+    }
+
+    if (downloadIndex_ >= 0)
+    {
+        downloadIndex_ = -1;
+        downloadWaiting_ = false;
+        downloads_.clear();
+        log_->appendLog(QStringLiteral("[下载] 结束\n"));
+    }
+}
+
+// 当前这一项有着落了（收到 / 解包完成 / 失败）：推进一格。
+void MainWindow::finishDownloadStep()
+{
+    if (downloadIndex_ < 0)
+    {
+        return;
+    }
+    downloadWaiting_ = false;
+    ++downloadIndex_;
+    nextDownload();  // 结束时它会清队列并把 index 归 -1
+}
+
+void MainWindow::onRemotePullFinished(bool ok, const QString &summary)
+{
+    // 队列在跑时，这条应答属于队首那一项——面板下载的应答不会混进来
+    // （同一时刻只允许一个取回请求在飞，队列占着它）。
+    if (downloadIndex_ >= 0 && downloadIndex_ < downloads_.size())
+    {
+        // 值拷贝：finishDownloadStep 可能清空队列，引用会悬空。
+        const auto job = downloads_.at(downloadIndex_);
+        if (ok)
+        {
+            // 只是"对方接受了"，文件还在路上。此时发下一项会被对端以
+            // "正忙"拒掉，所以必须等 fileReceived / archiveExtracted。
+            downloadWaiting_ = true;
+            log_->appendLog(QStringLiteral("[下载] %1：对方已接受，等待接收…\n").arg(job.name));
+            return;
+        }
+        log_->appendLog(QStringLiteral("[下载] %1：对端没能给出（%2）\n").arg(job.name, summary));
+        finishDownloadStep();
+        return;
+    }
+
+    if (ok)
+    {
+        // 只是"对方接受了"。落点由接收路径报（[接收完成] 那一行），
+        // 这里别写文件名——它还不知道文件会不会被改名。
+        log_->appendLog(QStringLiteral("[取回] %1，文件将落到接收目录\n").arg(summary));
+    }
+    else
+    {
+        log_->appendLog(QStringLiteral("[取回] 失败：%1\n").arg(summary));
+    }
 }
 
 void MainWindow::onBrowsePeerRequested(const QString &peerId, const QString &peerName)

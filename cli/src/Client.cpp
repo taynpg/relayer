@@ -1922,6 +1922,20 @@ bool Client::pullOnSession(std::string peerId, std::string relPath, bool archive
     return impl_->startPullOnSession(std::move(peerId), std::move(relPath), archive, std::move(done));
 }
 
+bool Client::setReceiveDirOnSession(std::string targetPath)
+{
+    // 判据与 canSendOnSession 一致：会话在、已认证、当前动作就是接收。
+    // 不看 pullActive/sendActive——改落点本身不发帧，与在飞的操作不冲突；
+    // 反而正是"取回请求已经在路上"时才需要它（见 GUI 的行级下载）。
+    Impl *p = impl_.get();
+    if (p == nullptr || p->finished || !p->authenticated || !p->session || p->action != Action::kReceive)
+    {
+        return false;
+    }
+    p->targetPath = std::move(targetPath);
+    return true;
+}
+
 void Client::cancelSend()
 {
     impl_->cancelSendNow();

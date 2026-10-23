@@ -337,6 +337,18 @@ public:
     bool pullOnSession(std::string peerId, std::string relPath, bool archive,
                        std::function<void(const Outcome &)> done);
 
+    // 改**现有接收会话**的落点（GUI 的对照表行级下载用）。
+    //
+    // 协议里落点由接收方决定、发送方无权指定（§11.9）；这条接口是接收方
+    // 自己改主意——"把这一行要的东西放到这一行的本地目录"，而不是笼统扔进
+    // 全局接收目录。它只改内存里的 targetPath，**不重连**（重连会换 id，
+    // 那正是整套常驻会话要避免的事）。
+    //
+    // 返回 false = 当前不是"接收会话"状态（没连上 / 正在跑别的操作）。
+    // 调用方负责在这次接收结束后改回去——会话是长期的，落点不该被一次
+    // 下载永久改掉。
+    bool setReceiveDirOnSession(std::string targetPath);
+
     // 把 `<dir>/x.tar.xz` 解到 `<dir>/x/`，成功后删除包，返回解包目录。
     // 失败返回空串并**保留包**——用户可以自己解，总比包被删了又没解开好。
     //
