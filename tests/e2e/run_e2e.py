@@ -810,6 +810,64 @@ def self_browse(workdir: Path, bin_dir: Path) -> None:
         c.shutdown()
 
 
+@scenario("pull-file", "远端取回：请对端把共享文件发过来，内容一致；三种拒绝都明确")
+def pull_file(workdir: Path, bin_dir: Path) -> None:
+    """PROTOCOL.md §11.9 的端到端验收。
+
+    取回**不另造传输**：B 回完 kAnswerFilePull(0) 之后，用普通的推流程
+    （kFileRequestSend → kFileAnswerSend → 分块）把文件发给 A，所以这条
+    场景同时也验证了"拉"与"推"能拼在一起而不打架。
+
+    四条断言：
+      1. 存在的文件能取回，内容逐字节一致；
+      2. 不存在的文件明确报 kNotFound（不是超时）；
+      3. `..` 越界被拒（**安全看门**）；
+      4. 目录被明确拒绝（打包还没实现，不能含糊过去）。
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        share = workdir / "share"
+        (share / "sub").mkdir(parents=True, exist_ok=True)
+        payload = b"pull-me-please" * 7
+        (share / "a.txt").write_bytes(payload)
+
+        # 共享方：常驻，等着被取回。idle/hard 都给大一点，别在断言中途掉线。
+        bob = c.cli("recv-bob", "recv", "--to-dir", str(c.dst), *c.cli_common(), "--id", "bob",
+                    "--share", str(share), "--hard-timeout", "120", "--idle-timeout", "120")
+        bob.wait_for(ASSIGNED_PREFIX, 20.0)
+
+        dst_a = workdir / "dst-a"
+        dst_a.mkdir()
+
+        def pull(tag: str, path: str) -> tuple[int, str]:
+            p = c.cli(tag, "recv", "--to-dir", str(dst_a), *c.cli_common(), "--id", tag,
+                      "--pull-from", "bob", "--pull-path", path, "--hard-timeout", "25")
+            rc = p.wait_exit(45)
+            return rc, "\n".join(p.pill())
+
+        rc, out = pull("pull-ok", "a.txt")
+        expect_eq(rc, 0, f"取回存在的文件应当成功：{out}")
+        expect("PULL accepted" in out, f"没看到接受应答：{out}")
+        got = (dst_a / "a.txt").read_bytes()
+        expect(got == payload, f"取回的内容不一致：期望 {len(payload)} 字节，实际 {len(got)}")
+
+        # --- 三种拒绝都必须是明确应答，不能退化成"等满超时" ---
+        rc, out = pull("pull-missing", "nope.txt")
+        expect(rc != 0, "取回不存在的文件竟然成功")
+        expect("对端没有这个文件" in out, f"不存在的文件应当报 kNotFound：{out}")
+
+        rc, out = pull("pull-escape", "../server-does-not-matter")
+        expect(rc != 0, "`..` 越界竟然取回成功——共享根形同虚设")
+        expect("拒绝取回" in out, f"越界应当报 kRejected：{out}")
+
+        rc, out = pull("pull-dir", "sub")
+        expect(rc != 0, "取回目录竟然成功（归档还没实现）")
+        expect("对端没有这个文件" in out, f"目录应当报 kNotFound：{out}")
+    finally:
+        c.shutdown()
+
+
 @scenario("one-byte", "1 字节文件正常完成")
 def one_byte(workdir: Path, bin_dir: Path) -> None:
     _transfer_roundtrip(workdir, bin_dir, 1)

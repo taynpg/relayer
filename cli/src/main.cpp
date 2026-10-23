@@ -57,6 +57,8 @@ void printUsage()
                 "      --id <name>          声明本机标识（重连后保持不变；被别人占用则连接失败）\n"
                 "      --self-send <file>   自检：recv 时把这个文件发给自己（验完整链路）\n"
                 "      --self-browse        自检：recv 时在接收会话上列一次自己的共享根\n"
+                "      --pull-from <id>     取回：recv 时请这个对端把文件发过来\n"
+                "      --pull-path <rel>    取回的文件（相对对端共享根）\n"
                 "      --share <dir>        recv 时允许对端列举这个目录（不给则不响应）\n"
                 "      --path <rel>         ls 的相对路径（相对对端共享根，默认根目录）\n"
                 "      --chunk-size <bytes> 分块大小（默认 256 KiB，上限 4 MiB）\n"
@@ -341,6 +343,21 @@ ParseResult parseArgs(int argc, char **argv)
             // （一次性连接），两条不能互相替代。
             r.args.config.selfBrowse = true;
         }
+        else if (a == "--pull-from")
+        {
+            // 远端取回（PROTOCOL.md §11.9）：recv 时请这个对端把文件发过来。
+            if (!takeValue(a, r.args.config.pullFrom))
+            {
+                return r;
+            }
+        }
+        else if (a == "--pull-path")
+        {
+            if (!takeValue(a, r.args.config.pullPath))
+            {
+                return r;
+            }
+        }
         else if (a == "--path")
         {
             if (!takeValue(a, r.args.path))
@@ -396,6 +413,24 @@ ParseResult parseArgs(int argc, char **argv)
     {
         // 自检发送是"接收会话上搭车发送"，只有 recv 有接收会话。
         r.error = "--self-send 只能与 recv 一起用";
+        return r;
+    }
+    if (!r.args.config.pullFrom.empty() && r.args.command != "recv")
+    {
+        // 取回要搭在接收会话上：回程的文件需要它收下。
+        r.error = "--pull-from 只能与 recv 一起用";
+        return r;
+    }
+    if (!r.args.config.pullPath.empty() && r.args.config.pullFrom.empty())
+    {
+        r.error = "--pull-path 需要配合 --pull-from（说明从哪个对端取）";
+        return r;
+    }
+    if (!r.args.config.pullFrom.empty() && r.args.config.pullPath.empty())
+    {
+        // 空路径指的是共享根（一个目录），取回它只会得到"不存在或目录"。
+        // 与其让对方回一个含糊的 kNotFound，不如在参数校验处就说清楚。
+        r.error = "--pull-from 需要配合 --pull-path 指定要取回哪个文件";
         return r;
     }
     if (r.args.config.selfBrowse && r.args.command != "recv")

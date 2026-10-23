@@ -87,9 +87,19 @@ enum class FrameType : std::uint16_t
     // 应答复用 kAnswerId 的 status + id 结构，不另开应答帧。
     kClaimId = 134,
 
+    // 远端取回（PROTOCOL.md §11.9）：请对端把共享目录里的某个文件发给我。
+    // 应答只带 status；真正的传输复用 500-509 那一套（对端以普通"推"的
+    // 方式发起），所以这里不需要传输参数。
+    kAskFilePull = 135,
+    kAnswerFilePull = 136,
+
     // --- 文件传输会话管理（500..549） ---
     kFileRequestSend = 500,
     kFileAnswerSend = 501,
+    // 502/503 是 v1 FileSession 模型的遗留，**v2 不使用**（PROTOCOL.md
+    // §11.9.2 说明了为什么）：拉模式下接收方不知道 totalSize/chunkSize/
+    // Merkle 根，最终仍要走一次 kFileRequestSend，加这两帧等于多一次往返
+    // 换不到任何信息。编号保留，不要拿来复用。
     kFileRequestDown = 502,
     kFileAnswerDown = 503,
     kFileRequestComplete = 504,

@@ -140,6 +140,11 @@ public:
     // 新连接**：那会顶掉接收会话、换掉本机 id，是文档里反复警告的回归。
     bool browsePeerOnSession(const QString &peerId, const QString &relPath);
 
+    // 在常驻会话上请对端把某个文件发过来（PROTOCOL.md §11.9）。
+    // relPath 相对对端共享根。文件会落到本机的接收目录——落点由本机配置
+    // 决定，共享方无权指定（协议里这条是写死的）。
+    bool pullFileFromPeer(const QString &peerId, const QString &relPath);
+
     // 中止当前操作（硬停：不发 cancel 帧，与 CLI 的 abort 同语义）。
     void cancelCurrent();
 
@@ -177,6 +182,10 @@ signals:
     // 远端列举的结果（browsePeerOnSession 的回程）。一次请求一次信号，
     // 会话不结束。
     void remoteBrowseFinished(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows);
+
+    // 取回请求的结论（收到对端应答时触发，**不是**文件传完）。
+    // ok=true 只表示"对方接受了"，文件随后由接收路径报告落点。
+    void remotePullFinished(bool ok, const QString &summary);
 
 private:
     void startIoThread();

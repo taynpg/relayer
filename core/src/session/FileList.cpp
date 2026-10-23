@@ -201,4 +201,33 @@ bool decodeAnswerFileList(const std::vector<char> &body, FileListStatus &status,
     return true;
 }
 
+std::vector<char> encodeAnswerFilePull(FilePullStatus status)
+{
+    // 一个字节就够：接受与否之外没有可协商的参数——真正的参数（总长、块
+    // 大小、Merkle 根）由随后的 kFileRequestSend 给出。
+    std::vector<char> out;
+    putU8(out, static_cast<std::uint8_t>(status));
+    return out;
+}
+
+bool decodeAnswerFilePull(const std::vector<char> &body, FilePullStatus &status, std::string &err)
+{
+    status = FilePullStatus::kRejected;
+    if (body.empty())
+    {
+        err = "answer_file_pull truncated: missing status byte";
+        return false;
+    }
+    const auto raw = static_cast<std::uint8_t>(body[0]);
+    if (raw > static_cast<std::uint8_t>(FilePullStatus::kRejected))
+    {
+        // 未知状态按拒绝处理，不当成连接错误：断开会让一次版本差异变成一次
+        // 不可恢复的会话失败（与 answer_file_list 的处理一致）。
+        err = "answer_file_pull has unknown status";
+        return false;
+    }
+    status = static_cast<FilePullStatus>(raw);
+    return true;
+}
+
 }  // namespace relayer::core::session

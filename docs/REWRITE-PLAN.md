@@ -821,7 +821,7 @@ socket 回调里写就没法把每种组合都测到。
 
 当前 CTest 共 7 项：`common`（16 用例 / 1111 断言）、`filestore`（117 / 1718）、
 `core`（341 / 5482）、`arch`（架构规则 R1-R6）、`protocol_doc` 与 `transition_doc`
-（文档与代码一致性）、`e2e_quick`（三进程 15 场景，约 58s）。
+（文档与代码一致性）、`e2e_quick`（三进程 16 场景，约 68s）。
 合计 474 用例 / 8311 断言，全量 52 秒。
 
 ### 4.1 阶段 E 进度（2026-10-23 更新）
@@ -848,13 +848,20 @@ socket 回调里写就没法把每种组合都测到。
 | 子项 | 内容 | 状态 |
 | --- | --- | --- |
 | F1 | 远端目录列举：`kAskFileList`/`kAnswerFileList`（`PROTOCOL.md` §11.8）、`core/session/FileList` 编解码、客户端侧服务（共享根 + `resolveWithin`）、CLI `ls`、GUI：`ExplorerControl` 的本地/远端双数据源（v1 形状，同一个控件切数据源）+ 共享目录设置 + 对照表右键"检查远端"、e2e `remote-list` | ✅ 完成 |
+| F2 | 远端取回（下载）：`kAskFilePull`/`kAnswerFilePull`（`PROTOCOL.md` §11.9）、`FilePullStatus` 编解码、客户端侧服务（共享根 + `resolveWithin`）、复用 500-509 推流程、CLI `recv --pull-from/--pull-path`、GUI 远端面板右键「下载到接收目录」、e2e `pull-file` | ✅ 完成（目录取回**未做**：要等归档打包） |
 
 剩余（下一次从这里接）：
 
 1. **E4 验收**——GUI 已在本机中继 + loopback 上完成收发，还缺一次**真实链路**
    （两台机器经中继）的完整记录。e2e 的 no-auth 缺口已补（见 §4.1 上方场景表）。
-2. 阶段 F 才做的：远端浏览/下载、对端打包归档、P2P 直连、多任务并行
-   （前三项需要协议扩展，`cli`/`core` 侧都还没有对应帧）。
+   这是唯一无法用测试替代、且可能推翻其他结论的一项。
+2. **对端打包归档（tar.xz）**——`kAskArchivePack` 等 130-133 帧仍是占位。
+   它是**目录取回**的前置：没有它，取回一个目录就是 N 次独立请求。
+3. **P2P 直连**——550/551 仍是占位；收益取决于网络环境（同局域网才有意义）。
+4. **多任务并行**——把 `CoreService` 从"一次一操作"改成"每任务一个 Client"。
+   不动协议，但 GUI 状态机、任务表单、自动接收都要跟着改，影响面最大。
+
+远端浏览与下载已在 F1/F2 完成，不再列为剩余项。
 
 上次的收尾三项（Setting / ReplaceArea / ProgressTracker）已全部完成，
 提交 `beb6d63` / `c118c06` / `32500f6`。

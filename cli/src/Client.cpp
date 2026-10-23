@@ -111,6 +111,12 @@ struct Client::Impl
     // 同一套思路：会话不结束，只把这一次的结论回调给上层。
     bool browseActive = false;
     std::function<void(const Outcome &)> onBrowseDone;
+
+    // 会话内的一次"取回请求"（PROTOCOL.md §11.9）。只等到 kAnswerFilePull
+    // 为止——真正的文件由常驻接收会话收下，走的是普通接收路径。
+    bool pullActive = false;
+    std::function<void(const Outcome &)> onPullDone;
+    asio::steady_timer pullTimer{ctx};
     std::string targetPath;
 
     bool authenticated = false;
@@ -129,6 +135,8 @@ struct Client::Impl
     bool selfSendStarted = false;
     // 自检列举已发起（见 ClientConfig::selfBrowse）。
     bool selfBrowseStarted = false;
+    // 取回请求已发起（见 ClientConfig::pullFrom）。
+    bool pullStarted = false;
     // 会话内列举出过结论。finish() 据此把结果搬进 Outcome——action 是
     // kReceive（自检列举）时不满足 `action == Action::kBrowse` 那个条件。
     bool browseDone = false;
@@ -522,19 +530,43 @@ struct Client::Impl
                 }
             }
 
+            // 远端取回（PROTOCOL.md §11.9）：在接收会话上请对端把文件发过来。
+            // 走 recv 模式是因为回程的文件需要这个常驻会话收下。
+            if (action == Action::kReceive && identityFinal && !config.pullFrom.empty() && !pullStarted)
+            {
+                pullStarted = true;
+                const bool started =
+                    startPullOnSession(config.pullFrom, config.pullPath,
+                                       [this](const Outcome &o)
+                                       {
+                                           std::printf("PULL %s\n", o.ok ? "accepted" : "failed");
+                                           std::fflush(stdout);
+                                           if (!o.ok)
+                                           {
+                                               // 拒绝/超时：不会再等文件了，直接结束。
+                                               // 成功则继续等回程的文件（接收路径负责收尾）。
+                                               finish(false, "取回失败：" + o.summary, o.status, false);
+                                           }
+                                       });
+                if (!started)
+                {
+                    finish(false, "取回请求未能发起（会话不可用或正忙）",
+                           Status::Fail(ErrorCode::kUnknown, "pull unavailable"), false);
+                }
+            }
+
             // 自检列举：在接收会话上向自己要一份目录（GUI 远端浏览的同一条
             // 路径——请求搭在 kReceive 会话上，而不是新开连接）。自投让请求
             // 与应答都绕回本连接，所以一个进程就把服务端应答侧也验了。
             if (action == Action::kReceive && identityFinal && config.selfBrowse && !selfBrowseStarted)
             {
                 selfBrowseStarted = true;
-                const bool started = startBrowseOnSession(
-                    assignedId, std::string(),
-                    [this](const Outcome &o)
-                    {
-                        // 列完就结束：这是自检，不是长期接收。
-                        finish(o.ok, o.summary, o.status, false);
-                    });
+                const bool started = startBrowseOnSession(assignedId, std::string(),
+                                                          [this](const Outcome &o)
+                                                          {
+                                                              // 列完就结束：这是自检，不是长期接收。
+                                                              finish(o.ok, o.summary, o.status, false);
+                                                          });
                 if (!started)
                 {
                     finish(false, "自检列举未能启动（接收会话不可用或正忙）",
@@ -867,6 +899,141 @@ struct Client::Impl
         return !finished && authenticated && session && action == Action::kReceive;
     }
 
+    // 现在就能起一次搭车发送吗（会话在 + 没有别的发送在跑）。
+    // servePullRequest 靠它决定"接受"还是"正忙，拒绝"。
+    bool canStartSendOnSession() const noexcept
+    {
+        return canSendOnSession() && !sendActive;
+    }
+
+    // 常驻会话上请对端把某个文件发给我（PROTOCOL.md §11.9）。
+    //
+    // 回调在**收到 kAnswerFilePull 时就触发**，不等文件传完：上层要区分
+    // "对方不给我"（立刻可知）和"给了但传得慢"（随后由接收路径报告）。
+    bool startPullOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done)
+    {
+        if (!canSendOnSession() || pullActive)
+        {
+            return false;
+        }
+        pullActive = true;
+        onPullDone = std::move(done);
+
+        Frame f;
+        f.type = FrameType::kAskFilePull;
+        f.to = std::move(peerId);
+        // 请求体与 kAskFileList 同构（相对共享根的路径），复用同一套编解码。
+        f.body = core::session::encodeAskFileList(relPath);
+
+        touch();
+        if (const auto st = session->send(f); !st.ok())
+        {
+            finishPull(false, "取回请求发送失败", st);
+            return false;
+        }
+
+        // 与列举同理：对端离线时服务端静默丢帧，不设超时就会一直等。
+        pullTimer.expires_after(std::chrono::seconds(10));
+        pullTimer.async_wait(
+            [this](const std::error_code &ec)
+            {
+                if (ec || !pullActive)
+                {
+                    return;
+                }
+                finishPull(false, "对端没有响应（可能已离线）",
+                           Status::Fail(ErrorCode::kTimeout, "pull answer timeout"));
+            });
+        return true;
+    }
+
+    void finishPull(bool ok, std::string summary, Status status = Status{})
+    {
+        if (!pullActive)
+        {
+            return;
+        }
+        pullActive = false;
+        pullTimer.cancel();
+        auto done = std::move(onPullDone);
+        onPullDone = nullptr;
+
+        Outcome o;
+        o.ok = ok;
+        o.summary = std::move(summary);
+        o.status = std::move(status);
+        if (done)
+        {
+            done(o);
+        }
+    }
+
+    // 对端来要文件（B 侧）：校验共享根 → 回 status → 用普通"推"流程发送。
+    void servePullRequest(const Frame &req)
+    {
+        Frame answer;
+        answer.type = FrameType::kAnswerFilePull;
+        // 请求方的身份由服务端在转发时绑定，可以直接当回信地址。
+        answer.to = req.from;
+
+        std::string rel;
+        std::string err;
+        auto status = core::session::FilePullStatus::kRejected;
+        std::string target;
+
+        if (!core::session::decodeAskFileList(req.body, rel, err))
+        {
+            status = core::session::FilePullStatus::kRejected;
+        }
+        else if (config.shareRoot.empty())
+        {
+            // 没开共享：明确拒绝。静默不回会让对方等满超时，看起来像网络问题。
+            status = core::session::FilePullStatus::kRejected;
+        }
+        else if (!canStartSendOnSession())
+        {
+            // 自己正在发别的：明确拒绝而不是排进队列。排队会让请求方看到
+            // 一个不动的进度条，而它并不知道前面还有别人在传。
+            status = core::session::FilePullStatus::kRejected;
+        }
+        else
+        {
+            const std::string resolved = rel.empty() ? config.shareRoot : store.resolveWithin(config.shareRoot, rel);
+            if (resolved.empty())
+            {
+                status = core::session::FilePullStatus::kRejected;  // 绝对路径 / 越界
+            }
+            else
+            {
+                const auto st = store.stat(resolved);
+                if (!st.exists || st.isDir)
+                {
+                    // 目录不支持：打包归档还没实现，递归取回语义也不清楚
+                    // （PROTOCOL.md §11.9.5）。
+                    status = core::session::FilePullStatus::kNotFound;
+                }
+                else
+                {
+                    status = core::session::FilePullStatus::kAccepted;
+                    target = resolved;
+                }
+            }
+        }
+
+        answer.body = core::session::encodeAnswerFilePull(status);
+        if (const auto st = session->send(answer); !st.ok())
+        {
+            return;
+        }
+
+        if (status == core::session::FilePullStatus::kAccepted)
+        {
+            // 先回 status 再发文件：应答里那个 0 是"我接受"，文件随后才到。
+            // 顺序反了的话，请求方会先看到一个陌生的 kFileRequestSend。
+            (void)startSendOnSession(target, std::string(), req.from, [](const Outcome &) {});  // 结论由接收方自己报
+        }
+    }
+
     // 常驻会话上问一次远端目录。会话继续活着（id 不变、接收不中断），
     // 这与 Client::browsePeer 的一次性连接是两条路：后者给 CLI 用，前者
     // 给 GUI——GUI 一旦新开连接就会顶掉常驻接收会话、把自己的 id 换掉。
@@ -1182,6 +1349,43 @@ struct Client::Impl
             return;
         }
 
+        // 对端要文件：与列举一样，**任何操作模式下都要应答**——"我正在收
+        // 文件"不妨碍把共享目录里的东西给对方，前提是当前没有发送在跑
+        // （servePullRequest 里判）。
+        if (f.type == FrameType::kAskFilePull)
+        {
+            servePullRequest(f);
+            return;
+        }
+
+        if (f.type == FrameType::kAnswerFilePull && pullActive)
+        {
+            core::session::FilePullStatus status = core::session::FilePullStatus::kRejected;
+            std::string err;
+            if (!core::session::decodeAnswerFilePull(f.body, status, err))
+            {
+                finishPull(false, "取回应答解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+                return;
+            }
+            switch (status)
+            {
+            case core::session::FilePullStatus::kAccepted:
+                // 只是"对方接受了"。文件随后由常驻接收会话收下，那一步的
+                // 结论走正常接收路径（finish / onFileReceived），不在这里报。
+                finishPull(true, "对端已开始发送");
+                return;
+            case core::session::FilePullStatus::kNotFound:
+                finishPull(false, "对端没有这个文件（或它是目录）",
+                           Status::Fail(ErrorCode::kNotFound, "remote file not found"));
+                return;
+            case core::session::FilePullStatus::kRejected:
+            default:
+                finishPull(false, "对端拒绝取回（未开启共享、路径越界或正忙）",
+                           Status::Fail(ErrorCode::kPermissionDenied, "remote pull rejected"));
+                return;
+            }
+        }
+
         if (f.type == FrameType::kAnswerFileList && (action == Action::kBrowse || browseActive))
         {
             core::session::FileListStatus status = core::session::FileListStatus::kOk;
@@ -1395,6 +1599,11 @@ bool Client::sendOnSession(std::string sourcePath, std::string remoteName, std::
 bool Client::browseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done)
 {
     return impl_->startBrowseOnSession(std::move(peerId), std::move(relPath), std::move(done));
+}
+
+bool Client::pullOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done)
+{
+    return impl_->startPullOnSession(std::move(peerId), std::move(relPath), std::move(done));
 }
 
 void Client::cancelSend()

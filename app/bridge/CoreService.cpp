@@ -431,6 +431,41 @@ bool CoreService::browsePeerOnSession(const QString &peerId, const QString &relP
     return true;
 }
 
+bool CoreService::pullFileFromPeer(const QString &peerId, const QString &relPath)
+{
+    if (peerId.isEmpty() || relPath.isEmpty())
+    {
+        return false;
+    }
+    // 与列举同理：没有常驻会话就不做，**不**回落成新连接（新连接会顶掉
+    // 接收会话并换掉本机 id，而且回程的文件还需要这个会话去收）。
+    if (!busy_)
+    {
+        return false;
+    }
+
+    runOnIo(
+        [this, peer = fromQt(peerId), path = fromQt(relPath)]
+        {
+            if (!client_)
+            {
+                emit remotePullFinished(false, QStringLiteral("没有可用的常驻会话"));
+                return;
+            }
+            const bool started = client_->pullOnSession(peer, path,
+                                                        [this](const cli::Outcome &o)
+                                                        {
+                                                            // 从 io 线程 emit 跨线程信号是安全的。
+                                                            emit remotePullFinished(o.ok, toQt(o.summary));
+                                                        });
+            if (!started)
+            {
+                emit remotePullFinished(false, QStringLiteral("当前不能取回（正在传输或会话不可用）"));
+            }
+        });
+    return true;
+}
+
 void CoreService::cancelCurrent()
 {
     // 只在忙时才有可取消的东西。post 到 io 线程执行，与 Client 的

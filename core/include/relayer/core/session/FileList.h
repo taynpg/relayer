@@ -60,4 +60,25 @@ inline constexpr std::size_t kMaxListEntries = 5000;
 [[nodiscard]] bool decodeAnswerFileList(const std::vector<char> &body, FileListStatus &status,
                                         std::vector<RemoteEntry> &entries, std::string &err);
 
+// ---------------------------------------------------------------------------
+// 远端取回（PROTOCOL.md §11.9）
+// ---------------------------------------------------------------------------
+
+// `kAnswerFilePull` 的唯一字节。
+//
+// 请求体**复用** encodeAskFileList / decodeAskFileList：两者的 body 都是
+// "相对共享根的路径"，为同一件事定义两套编解码只会让"长度前缀用 u8 还是
+// u16"这种问题出现两个答案。
+enum class FilePullStatus : std::uint8_t
+{
+    kAccepted = 0,  // 已接受，随后对端会用 kFileRequestSend 发起一次正常发送
+    kNotFound = 1,  // 路径不存在，或指向的是目录
+    kRejected = 2,  // 未开启共享 / 路径越界 / 当前正忙
+};
+
+[[nodiscard]] std::vector<char> encodeAnswerFilePull(FilePullStatus status);
+
+// 解码。多余字节容忍（对端版本更新），与 answer_id / answer_file_list 一致。
+[[nodiscard]] bool decodeAnswerFilePull(const std::vector<char> &body, FilePullStatus &status, std::string &err);
+
 }  // namespace relayer::core::session

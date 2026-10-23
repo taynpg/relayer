@@ -142,6 +142,30 @@ void MainWindow::wireSignals()
     connect(connector_, &ConnectorControl::probeRequested, this, &MainWindow::onProbeRequested);
     connect(connector_, &ConnectorControl::disconnectRequested, this, &MainWindow::onDisconnectRequested);
     connect(connector_, &ConnectorControl::browsePeerRequested, this, &MainWindow::onBrowsePeerRequested);
+    connect(remoteExplorer_, &ExplorerControl::remotePullRequested, this,
+            [this](const QString &peer, const QString &relPath)
+            {
+                if (!core_->pullFileFromPeer(peer, relPath))
+                {
+                    log_->appendLog(QStringLiteral("[取回] %1：当前不能取回（未连接或正在传输）\n").arg(relPath));
+                    remoteExplorer_->applyRemoteEntries(false, QStringLiteral("当前不能取回（会话不可用或正在传输）"),
+                                                        {});
+                }
+            });
+    connect(core_, &relayer::app::CoreService::remotePullFinished, this,
+            [this](bool ok, const QString &summary)
+            {
+                if (ok)
+                {
+                    // 只是"对方接受了"。落点由接收路径报（[接收完成] 那一行），
+                    // 这里别写文件名——它还不知道文件会不会被改名。
+                    log_->appendLog(QStringLiteral("[取回] %1，文件将落到接收目录\n").arg(summary));
+                }
+                else
+                {
+                    log_->appendLog(QStringLiteral("[取回] 失败：%1\n").arg(summary));
+                }
+            });
     connect(remoteExplorer_, &ExplorerControl::remoteListRequested, this,
             [this](const QString &peer, const QString &relPath)
             {

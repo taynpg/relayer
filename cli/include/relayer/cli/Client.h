@@ -203,6 +203,16 @@ struct ClientConfig
     // 退出条件含糊。
     bool selfBrowse = false;
 
+    // 远端取回（recv --pull-from / --pull-path，PROTOCOL.md §11.9）。
+    //
+    // 做成"recv + 搭车请求"而不是独立子命令，理由和 --self-send 一样：请求
+    // 要与常驻接收会话共用一条连接（新开连接会顶掉接收会话、换掉 id），而
+    // 回程的文件正好由这个接收会话收下。
+    //
+    // pullFrom 为空表示不做取回。
+    std::string pullFrom;
+    std::string pullPath;  // 相对对端共享根
+
     // 远端目录列举的共享根（PROTOCOL.md §11.8）。空 = **不响应**列举请求。
     //
     // 只有这个目录之下的内容能被对端看到：请求里的路径一律按"相对该根"
@@ -304,6 +314,15 @@ public:
     // 返回 false = 当前没有可用的常驻会话（没连上 / 正在跑别的操作），
     // 调用方应提示"先连接"而不是偷偷降级成新连接。
     bool browseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done);
+
+    // 在**现有常驻会话**上请对端把某个文件发过来（PROTOCOL.md §11.9）。
+    //
+    // done 在收到应答时就调用，**不等文件传完**：ok 表示"对方接受了"，
+    // 文件随后落到接收目录，那一步的结论走正常的接收回调。这样上层能区分
+    // "对方不给我"（立刻可知）和"给了但传得慢"（接收进度会报）。
+    //
+    // 返回 false = 没有可用的常驻会话，或已经有一个取回请求在等应答。
+    bool pullOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done);
 
     // 取消正在进行的"会话内发送"（对端的收尾会看到 kLocalCancelled）。
     // 会话本身不受影响——接收继续等下一个文件。

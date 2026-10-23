@@ -645,7 +645,25 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
     if (source_ == Source::Remote)
     {
         // 远端只读：本地那套（打开/复制路径/重命名/删除/新建）全不适用。
-        // 留一个刷新，够用且不会让人误以为能改对方磁盘。
+        // 能做的只有两件——把文件**拿过来**（§11.9）和刷新。
+        const QString name = singleRow ? table_->item(rows[0], toInt(ExpColumn::Name))->text() : QString();
+        const bool isFile = singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir");
+        const QString peer = peerId_;
+
+        auto *pull = menu.addAction(QStringLiteral("下载到接收目录"));
+        // 目录不行：归档还没实现（§11.9.5），点了只会得到"对端没有这个文件"，
+        // 不如直接禁用并写明原因。
+        pull->setEnabled(isFile && !isPathLikeName(name));
+        pull->setToolTip(isFile ? QStringLiteral("文件会落到本机的接收目录")
+                                : QStringLiteral("目录暂不支持（需要先实现打包归档）"));
+        connect(pull, &QAction::triggered, this,
+                [this, peer, name]()
+                {
+                    const QString rel = joinRel(currentPath_, name);
+                    emit remotePullRequested(peer, rel);
+                    setStatus(QStringLiteral("已请求取回 %1 …").arg(rel));
+                });
+
         connect(menu.addAction(QStringLiteral("刷新")), &QAction::triggered, this,
                 [this]() { enterPath(currentPath_); });
         menu.exec(table_->viewport()->mapToGlobal(pos));

@@ -93,6 +93,10 @@ signals:
     // 本控件不碰网络：只发请求，结果由 applyRemoteEntries 送回。
     void remoteListRequested(const QString &peerId, const QString &relPath);
 
+    // 远端模式下"下载到接收目录"（PROTOCOL.md §11.9）。本控件不碰网络：
+    // 只把"从谁取、取哪个相对路径"交给 MainWindow。
+    void remotePullRequested(const QString &peerId, const QString &relPath);
+
 private:
     struct FileEntry
     {
