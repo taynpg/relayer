@@ -35,6 +35,7 @@ add_executable(relayer WIN32
     bridge/CoreService.cpp
     ui/ConnectorControl.cpp
     ui/LogControl.cpp
+    ui/Setting.cpp
     ui/Control/CheckableComboBox.cpp
     ui/Control/ComparisonControl.cpp
     ui/Control/ExplorerControl.cpp

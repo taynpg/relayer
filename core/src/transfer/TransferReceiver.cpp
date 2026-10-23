@@ -389,9 +389,9 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void *data,
                 {
                     ws = std::move(st);
                 }
-                else if (auto st = writeStream_->write(c.data.data(), c.data.size()); !st.ok())
+                else if (auto stw = writeStream_->write(c.data.data(), c.data.size()); !stw.ok())
                 {
-                    ws = std::move(st);
+                    ws = std::move(stw);
                 }
                 // flush 是**必须**的，sync 是可选的。
                 //
@@ -399,9 +399,9 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void *data,
                 // 缓冲交给操作系统——不做这一步，write 成功只意味着"进了
                 // 本进程的缓冲区"。而下一行就要告诉对端"这块我收好了"。
                 // ACK 的语义是"已经到文件里了"，不是"已经到我的内存里了"。
-                else if (auto st = writeStream_->flush(); !st.ok())
+                else if (auto stf = writeStream_->flush(); !stf.ok())
                 {
-                    ws = std::move(st);
+                    ws = std::move(stf);
                 }
                 else if (config_.syncOnWrite)
                 {

@@ -17,7 +17,17 @@
 #include "ui/Control/ExplorerControl.h"
 #include "ui/Control/RelayTaskControl.h"
 #include "ui/LogControl.h"
+#include "ui/Setting.h"
+#include "ui/SettingsKeys.h"
 #include "ui_MainWindow.h"
+
+using relayer::app::settings::kAutoRetryDefault;
+using relayer::app::settings::kReceiverAutoRetry;
+using relayer::app::settings::kReceiverDir;
+using relayer::app::settings::kReceiverRetryInterval;
+using relayer::app::settings::kReceiverRetryMax;
+using relayer::app::settings::kRetryIntervalDefault;
+using relayer::app::settings::kRetryMaxDefault;
 
 namespace
 {
@@ -59,7 +69,7 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowTitle(QStringLiteral("relayer v%1").arg(RELAYER_VERSION));
 
     QSettings settings;
-    receiveDir_ = settings.value("receiver/dir", defaultReceiveDir()).toString();
+    receiveDir_ = settings.value(kReceiverDir, defaultReceiveDir()).toString();
 
     log_->appendLog(QStringLiteral("relayer v%1\n").arg(RELAYER_VERSION));
 }
@@ -317,17 +327,24 @@ void MainWindow::onOperationFinished(bool ok, const QString &summary, const QStr
     }
     if (wasReceiving && !ok)
     {
-        // 接收会话自身失败（中继没了、认证被拒……）：延迟有限重试，
-        // 不限次的话中继一停日志就无限刷。
-        if (++receiveRetries_ <= 3)
+        // 接收会话自身失败（中继没了、认证被拒……）：按设置里的重试
+        // 策略延迟重试（Setting 对话框可配；默认 3 次 × 3 秒，次数
+        // 0 表示一直重试）。关闭重试或次数用尽则停下来等用户处理。
+        QSettings settings;
+        const bool autoRetry = settings.value(kReceiverAutoRetry, kAutoRetryDefault).toBool();
+        const int intervalSec = qMax(1, settings.value(kReceiverRetryInterval, kRetryIntervalDefault).toInt());
+        const int maxRetry = qMax(0, settings.value(kReceiverRetryMax, kRetryMaxDefault).toInt());
+        if (autoRetry && (maxRetry == 0 || ++receiveRetries_ <= maxRetry))
         {
-            log_->appendLog(QStringLiteral("[接收] 3 秒后重试（第 %1/3 次）\n").arg(receiveRetries_));
-            QTimer::singleShot(3000, this, &MainWindow::startAutoReceive);
+            const QString countText =
+                maxRetry == 0 ? QString() : QStringLiteral("（第 %1/%2 次）").arg(receiveRetries_).arg(maxRetry);
+            log_->appendLog(QStringLiteral("[接收] %1 秒后重试%2\n").arg(intervalSec).arg(countText));
+            QTimer::singleShot(intervalSec * 1000, this, &MainWindow::startAutoReceive);
         }
         else
         {
             receiveRetries_ = 0;
-            log_->appendLog(QStringLiteral("[接收] 连续失败已停止重试，请检查中继后点「连接」恢复\n"));
+            log_->appendLog(QStringLiteral("[接收] 已停止自动重试，请检查中继或在设置里调整后点「连接」恢复\n"));
         }
         return;
     }

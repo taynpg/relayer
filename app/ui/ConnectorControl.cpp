@@ -9,9 +9,14 @@
 #include <QSettings>
 #include <functional>
 
+#include "Setting.h"
+#include "SettingsKeys.h"
 #include "ui_ConnectorControl.h"
 
 using relayer::app::PeerRow;
+using relayer::app::settings::kConnectorLast;
+using relayer::app::settings::kConnectorNoAuth;
+using relayer::app::settings::kConnectorRecent;
 
 namespace
 {
@@ -56,10 +61,14 @@ void ConnectorControl::initTable()
 
 void ConnectorControl::initButtons()
 {
-    // btnLock（"设定"）在 Setting 对话框迁移进来之前不可用。
-    // 禁用而不是隐藏：布局与 v1 一致，用户能看到功能在计划内。
-    ui_->btnLock->setEnabled(false);
-    ui_->btnLock->setToolTip(QStringLiteral("设置面板将在后续版本提供"));
+    // btnLock（"设定"）打开设置对话框（v1 同名按钮的行为）。模态 exec
+    // 没问题：设置是纯配置操作，不占传输通道，也不会跑几分钟。
+    connect(ui_->btnLock, &QPushButton::clicked, this,
+            [this]()
+            {
+                Setting dlg(this);
+                dlg.exec();
+            });
 
     connect(ui_->btnConnect, &QPushButton::clicked, this, &ConnectorControl::onConnectClicked);
     connect(ui_->btnDisconnect, &QPushButton::clicked, this, &ConnectorControl::onClearClicked);
@@ -73,7 +82,7 @@ void ConnectorControl::initAuth()
     // 很烦）；口令框绝不持久化。勾选无认证时口令框禁用，表达"这个值
     // 不会被使用"，也防住"勾了无认证却填了口令"的歧义。
     QSettings settings;
-    ui_->ckNoAuth->setChecked(settings.value("connector/noAuth", false).toBool());
+    ui_->ckNoAuth->setChecked(settings.value(relayer::app::settings::kConnectorNoAuth, false).toBool());
     ui_->edPassword->setEnabled(!ui_->ckNoAuth->isChecked());
 
     connect(ui_->ckNoAuth, &QCheckBox::toggled, this,
@@ -81,7 +90,7 @@ void ConnectorControl::initAuth()
             {
                 ui_->edPassword->setEnabled(!checked);
                 QSettings s;
-                s.setValue("connector/noAuth", checked);
+                s.setValue(relayer::app::settings::kConnectorNoAuth, checked);
             });
 }
 
@@ -89,11 +98,11 @@ void ConnectorControl::loadIpHistory()
 {
     QSettings settings;
     ui_->cbIp->clear();
-    const QStringList history = settings.value("connector/recent").toStringList();
+    const QStringList history = settings.value(kConnectorRecent).toStringList();
     ui_->cbIp->addItems(history);
     if (!history.isEmpty())
     {
-        ui_->cbIp->setCurrentText(settings.value("connector/last").toString());
+        ui_->cbIp->setCurrentText(settings.value(kConnectorLast).toString());
     }
     ui_->cbIp->setEditable(true);
 }
@@ -108,8 +117,8 @@ void ConnectorControl::saveIpHistory(const QString &ipPort)
     {
         history.removeLast();
     }
-    settings.setValue("connector/recent", history);
-    settings.setValue("connector/last", ipPort);
+    settings.setValue(kConnectorRecent, history);
+    settings.setValue(kConnectorLast, ipPort);
     loadIpHistory();
 }
 

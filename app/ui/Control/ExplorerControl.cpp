@@ -66,7 +66,7 @@ void ExplorerControl::initControl()
     table_ = new ExpDropTable(this);
     const QStringList headers = {QStringLiteral(""), QStringLiteral("文件名称"), QStringLiteral("最后修改时间"),
                                  QStringLiteral("类型"), QStringLiteral("大小")};
-    table_->setColumnCount(headers.size());
+    table_->setColumnCount(static_cast<int>(headers.size()));
     table_->setHorizontalHeaderLabels(headers);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setContextMenuPolicy(Qt::CustomContextMenu);

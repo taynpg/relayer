@@ -7,6 +7,8 @@
 #include <asio/executor_work_guard.hpp>
 #include <asio/post.hpp>
 
+#include "ui/SettingsKeys.h"
+
 namespace relayer::app
 {
 
@@ -100,7 +102,9 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
     // 拒绝、由 --overwrite 显式打开；GUI 侧默认打开，用户可在日志菜单
     // 里关掉（设置持久化，见 LogControl 的菜单项）。
     const QSettings settings;
-    cfg.overwriteExisting = settings.value("receiver/overwrite", true).toBool();
+    cfg.overwriteExisting =
+        settings.value(relayer::app::settings::kReceiverOverwrite, relayer::app::settings::kReceiverOverwriteDefault)
+            .toBool();
 
     cfg.onIdAssigned = [this](const std::string &id)
     {

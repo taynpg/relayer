@@ -7,17 +7,17 @@
     <x>0</x>
     <y>0</y>
     <width>580</width>
-    <height>400</height>
+    <height>220</height>
    </rect>
   </property>
   <property name="windowTitle">
-   <string>Dialog</string>
+   <string>设置</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayout_2">
    <item>
     <widget class="QGroupBox" name="groupBox">
      <property name="title">
-      <string>连接</string>
+      <string>自动接收</string>
      </property>
      <layout class="QVBoxLayout" name="verticalLayout">
       <item>
@@ -25,14 +25,14 @@
         <item>
          <widget class="QRadioButton" name="rbNoRecon">
           <property name="text">
-           <string>不重连</string>
+           <string>失败后停止</string>
           </property>
          </widget>
         </item>
         <item>
          <widget class="QRadioButton" name="rbRecon">
           <property name="text">
-           <string>自动重连</string>
+           <string>失败后自动重试</string>
           </property>
          </widget>
         </item>
@@ -56,7 +56,7 @@
         <item>
          <widget class="QLabel" name="label">
           <property name="text">
-           <string>重连间隔(秒)：</string>
+           <string>重试间隔(秒)：</string>
           </property>
          </widget>
         </item>
@@ -66,7 +66,7 @@
         <item>
          <widget class="QLabel" name="label_2">
           <property name="text">
-           <string>最大重连次数(0表示一直重连)：</string>
+           <string>最大重试次数(0表示一直重试)：</string>
           </property>
          </widget>
         </item>
@@ -79,68 +79,17 @@
     </widget>
    </item>
    <item>
-    <widget class="QGroupBox" name="gbCompress">
+    <widget class="QGroupBox" name="gbReceive">
      <property name="title">
-      <string>压缩传输</string>
+      <string>接收</string>
      </property>
      <layout class="QVBoxLayout" name="verticalLayout_3">
       <item>
-       <widget class="QCheckBox" name="cbCompress">
+       <widget class="QCheckBox" name="ckOverwrite">
         <property name="text">
-         <string>启用压缩传输（多文件/文件夹打包为单个 tar.xz 传输）</string>
+         <string>覆盖已存在的文件（目标已存在时删旧收新；关闭则拒绝接收）</string>
         </property>
        </widget>
-      </item>
-      <item>
-       <layout class="QHBoxLayout" name="horizontalLayout_4">
-        <item>
-         <widget class="QLabel" name="lbThreshold">
-          <property name="text">
-           <string>单包阈值(MB)，超出则放弃本次传输：</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QLineEdit" name="edThreshold"/>
-        </item>
-       </layout>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="gbEncrypt">
-     <property name="title">
-      <string>加密传输</string>
-     </property>
-     <layout class="QVBoxLayout" name="verticalLayout_4">
-      <item>
-       <widget class="QCheckBox" name="cbEncrypt">
-        <property name="text">
-         <string>启用加密传输（AES-256-GCM，需通信双方配置相同密钥）</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <layout class="QHBoxLayout" name="horizontalLayout_5">
-        <item>
-         <widget class="QLabel" name="lbEncryptKey">
-          <property name="text">
-           <string>密钥：</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QLineEdit" name="edEncryptKey">
-          <property name="echoMode">
-           <enum>QLineEdit::Password</enum>
-          </property>
-          <property name="placeholderText">
-          <string>默认 relayFile，留空则不加密</string>
-         </property>
-         </widget>
-        </item>
-       </layout>
       </item>
      </layout>
     </widget>
@@ -153,7 +102,7 @@
      <property name="sizeHint" stdset="0">
       <size>
        <width>20</width>
-       <height>136</height>
+       <height>40</height>
       </size>
      </property>
     </spacer>

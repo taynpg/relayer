@@ -5,7 +5,12 @@
 #include <QSettings>
 #include <QStandardPaths>
 
+#include "SettingsKeys.h"
 #include "ui_LogControl.h"
+
+using relayer::app::settings::kReceiverDir;
+using relayer::app::settings::kReceiverOverwrite;
+using relayer::app::settings::kReceiverOverwriteDefault;
 
 namespace
 {
@@ -43,14 +48,14 @@ void LogControl::initMenu()
             [this]()
             {
                 QSettings settings;
-                const QString current = settings.value("receiver/dir", defaultReceiveDir()).toString();
+                const QString current = settings.value(kReceiverDir, defaultReceiveDir()).toString();
 
                 const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("设置接收目录"), current);
                 if (dir.isEmpty())
                 {
                     return;
                 }
-                settings.setValue("receiver/dir", dir);
+                settings.setValue(kReceiverDir, dir);
                 emit receiveDirChanged(dir);
             });
 
@@ -60,12 +65,12 @@ void LogControl::initMenu()
     QSettings settings;
     auto *acOverwrite = menu->addAction(QStringLiteral("覆盖已存在的文件"));
     acOverwrite->setCheckable(true);
-    acOverwrite->setChecked(settings.value("receiver/overwrite", true).toBool());
+    acOverwrite->setChecked(settings.value(kReceiverOverwrite, kReceiverOverwriteDefault).toBool());
     connect(acOverwrite, &QAction::toggled, this,
             [this](bool checked)
             {
                 QSettings s;
-                s.setValue("receiver/overwrite", checked);
+                s.setValue(kReceiverOverwrite, checked);
                 appendLog(checked ? QStringLiteral("[接收] 已开启覆盖：目标已存在时删旧收新\n")
                                   : QStringLiteral("[接收] 已关闭覆盖：目标已存在时拒绝接收\n"));
             });
