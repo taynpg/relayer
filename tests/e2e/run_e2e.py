@@ -276,9 +276,20 @@ class Cluster:
 
     # -- 启动 ------------------------------------------------------------
 
-    def start_server(self, timeout: float = 15.0, extra: list[str] | None = None) -> Process:
+    def start_server(self, timeout: float = 15.0, extra: list[str] | None = None,
+                     no_auth: bool = False) -> Process:
+        """启动中继。no_auth=True 时用 --allow-no-auth（不配口令）。
+
+        服务端的规则是"口令与 allow-no-auth 必须恰好给一个"（server/main.cpp
+        的启动校验），所以两条分支互斥——别想着同时传，那是被测代码要拒绝的
+        配置，不是测试脚手架该构造的。
+        """
         name = f"server-{self.port}"
-        args = [str(self.bin_dir / f"relayerd{EXE}"), "--port", str(self.port), "--password", PASSWORD]
+        args = [str(self.bin_dir / f"relayerd{EXE}"), "--port", str(self.port)]
+        if no_auth:
+            args += ["--allow-no-auth"]
+        else:
+            args += ["--password", PASSWORD]
         if extra:
             args += extra
         p = Process(name, args, self.workdir / f"{name}.log")
@@ -298,10 +309,16 @@ class Cluster:
         self.procs.append(p)
         return p
 
-    def cli_common(self) -> list[str]:
+    def cli_common(self, no_auth: bool = False) -> list[str]:
+        # 客户端同样必须显式声明认证方式（--no-auth 与 --password 互斥，
+        # 都不给会在 CLI 参数校验处直接报错）——"从空口令推断"是 GUI 侧
+        # 已经修掉过的坑，这里不复辟。
+        if no_auth:
+            return ["-p", str(self.port), "--no-auth"]
         return ["-p", str(self.port), "--password", PASSWORD]
 
-    def start_receiver(self, idle_timeout: int = 30, extra: list[str] | None = None) -> tuple[Process, str]:
+    def start_receiver(self, idle_timeout: int = 30, extra: list[str] | None = None,
+                       no_auth: bool = False) -> tuple[Process, str]:
         """起接收端，返回 (进程, 分配到的 id)。
 
         id 只能从契约行取。**不能**用 `list` 去猜：id 由服务端递增分配，
@@ -309,7 +326,7 @@ class Cluster:
         自己，然后文件被投给一个刚断开的连接，中继静默丢弃，症状是发送方
         等应答超时。
         """
-        args = ["recv", "--to-dir", str(self.dst), *self.cli_common(), "--idle-timeout", str(idle_timeout)]
+        args = ["recv", "--to-dir", str(self.dst), *self.cli_common(no_auth), "--idle-timeout", str(idle_timeout)]
         if extra:
             args += extra
         p = self.cli("recv", *args)
@@ -319,8 +336,9 @@ class Cluster:
             raise E2EFailure(f"接收端报了空 id：{line!r}")
         return p, assigned
 
-    def send(self, src_path: Path, to_id: str, name: str = "send", extra: list[str] | None = None) -> Process:
-        args = ["send", str(src_path), "--to", to_id, *self.cli_common()]
+    def send(self, src_path: Path, to_id: str, name: str = "send", extra: list[str] | None = None,
+             no_auth: bool = False) -> Process:
+        args = ["send", str(src_path), "--to", to_id, *self.cli_common(no_auth)]
         if extra:
             args += extra
         return self.cli(name, *args)
@@ -562,6 +580,64 @@ def relative_subdir_traversal(workdir: Path, bin_dir: Path) -> None:
 
         expect(not (c.dst / "outside.bin").exists(), "文件落在了接收根目录之外（上层目录）")
         expect(not (c.dst / "evil.bin").exists(), "文件落在了接收根目录")
+    finally:
+        c.shutdown()
+
+
+@scenario("no-auth", "无认证中继：--no-auth 端到端可传；口令客户端与漏配客户端都被拒")
+def no_auth(workdir: Path, bin_dir: Path) -> None:
+    """认证矩阵里"无认证"那一整行，此前只走过一次手工路径。
+
+    三条断言各管一件事：
+
+      1. 两端都显式 --no-auth → 完整传输成功。这证明无认证不是"跳过
+         握手"的捷径，而是一条真正的握手路径（版本/身份协商照走）。
+      2. 带 --password 的客户端连无认证中继 → 明确失败且**有时限**。
+         失败是必然的；要防的是"静默容忍"——服务端若把口令客户端当成
+         无认证客户端放行，等于认证开关形同虚设。断言退出码而不是
+         报错文案：措辞是实现细节，退出才是契约。
+      3. 口令和无认证都不给 → 客户端参数校验直接拒绝。这是"漏填口令
+         应报错，不该静默降级"（§0.6）的看门断言：漏配如果被推断成
+         无认证，忘了配口令的终端就会裸奔上中继。
+
+    顺序注意：第 2/3 条要有意义的失败，接收端必须还活着——目标是死对端
+    的话，发送方也会报错退出，但那是 answerTimeout 的失败，测不到认证层。
+    所以先做负例（此时 recv1 挂着），再杀掉 recv1 跑正例。
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server(no_auth=True)
+        src = c.src / "payload.bin"
+        want = make_file(src, 2_000_000)
+
+        recv1, rid = c.start_receiver(idle_timeout=120, no_auth=True)
+
+        # --- 负例 1：带口令的客户端 ---
+        # 直接用 c.cli 构造：send() 的 cli_common(no_auth=False) 会带
+        # --password，再往 extra 里塞一份就是重复参数，校验语义会被
+        # "后者覆盖前者"搅浑。
+        s_pw = c.cli("send-pw", "send", str(src), "--to", rid, "-p", str(c.port),
+                     "--password", PASSWORD, "--idle-timeout", "30")
+        expect(s_pw.wait_exit(60) != 0, "带口令的客户端在无认证中继上竟然发送成功——认证开关形同虚设")
+
+        # --- 负例 2：什么都不声明 ---
+        s_none = c.cli("send-none", "send", str(src), "--to", rid, "-p", str(c.port),
+                       "--idle-timeout", "30")
+        expect(s_none.wait_exit(60) != 0, "没声明认证方式的客户端竟然发送成功——漏填口令被静默降级了")
+
+        # --- 正例：两端都 --no-auth ---
+        recv1.kill()
+        recv2, rid2 = c.start_receiver(idle_timeout=120, no_auth=True)
+        sender = c.send(src, rid2, no_auth=True, extra=["--idle-timeout", "120"])
+        rc = c.wait_all([sender, recv2], 600)
+        expect_eq(rc[0], 0, "发送端退出码（两端均 --no-auth）")
+        expect_eq(rc[1], 0, "接收端退出码（两端均 --no-auth）")
+
+        got = c.dst / "payload.bin"
+        expect(got.exists(), f"目标文件不存在：{got}")
+        expect_eq(got.stat().st_size, 2_000_000, "目标文件大小")
+        expect_eq(sha256_of(got), want, "内容哈希")
+        expect_no_fragment(c.dst, "payload.bin")
     finally:
         c.shutdown()
 

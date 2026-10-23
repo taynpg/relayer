@@ -82,8 +82,10 @@ cmake --build build-rel && cd build-rel && ctest
   - ✅ E3.4 ComparisonControl（JSON 持久化 + 相对目录落盘）
   - ✅ E3.5 RelayTaskControl 任务表单（停止/重传/批次失败规则）
   - ✅ 身份稳定（连接=常驻接收会话 + sessionId 解复用）、性能三杠杆
-  - ⬜ 剩余：Setting 对话框（`btnLock` 仍禁用）、ReplaceArea 作用域、
-    速度显示（清单 #11 ProgressTracker）、E4 真实链路验收
+  - ✅ E3.6 Setting 对话框（压缩/加密组故意不迁，v2 无对应物；QSettings 键
+    单一来源 `app/ui/SettingsKeys.h`）；E3.7 ReplaceArea 作用域（v1 的
+    useCase/useRegex 是假选项，v2 做成真的）；E3.8 ProgressTracker（清单 #11）
+  - ⬜ 剩余：E4 真实链路验收（两台机器经中继；e2e 缺 no-auth 场景）
 - ⬜ 阶段 F（多任务并行 / P2P / 远端浏览归档）、G（发布）
 
 测试基线：`ctest` 7 项全过（common / filestore / core / arch / protocol_doc /
@@ -146,3 +148,8 @@ core 341/5482，合计 474 用例 / 8311 断言；e2e 10 场景（完整跑 295 
 - **`--idle-timeout` 只该在传输开始后计时**。`TransferPeer::started()` 是
   "现在沉默是否正常"的权威判据（发送方=收到 AnswerSend，接收方=open 成功），
   不要在调用层按角色分别判——漏一边就会出现"接收端在发送端算摘要时把自己掐了"。
+- **两个构建目录可能被留在 `RELAYER_BUILD_GUI=OFF`**（Release 验证后忘了改回），
+  症状是 build/bin 里没有 relayer.exe。重新 configure 带 GUI 即可。
+- **v1 的 GUI 也有假选项**（ReplaceArea 的 useCase/useRegex 传进 lambda 但
+  从未使用、Setting 的压缩阈值照抄默认）。迁移 v1 逻辑时先读消费方代码，
+  确认选项真的被用到了再照搬。

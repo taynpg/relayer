@@ -351,6 +351,16 @@ ParseResult parseArgs(int argc, char **argv)
         r.error = "--no-auth 与 --password 不能同时给出";
         return r;
     }
+    // 上面那句注释一直写着"必须恰好声明一种"，但这条分支此前是缺的：
+    // 什么都不给时客户端会拿着空口令按认证模式去连，对无认证中继得到的
+    // 是协议层的"unauthenticated peer sent non-auth frame"——话不算错，
+    // 但要用户从协议错误里反推"我漏了个参数"，不如在这里就说清。
+    // 由 e2e 的 no-auth 场景看门（parseArgs 在匿名命名空间里，单测够不着）。
+    if (!r.args.config.serverAllowNoAuth && r.args.config.password.empty())
+    {
+        r.error = "必须提供 --password，或用 --no-auth 声明中继已关闭认证";
+        return r;
+    }
 
     r.ok = true;
     return r;

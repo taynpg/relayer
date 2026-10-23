@@ -555,9 +555,14 @@ TEST_CASE("resolving a bogus host reports failure", "[transport][connection][int
                                             }));
     REQUIRE(conn != nullptr);
 
-    // DNS 解析失败通常很快（.invalid 是保留域，一定解析不到），但系统
-    // resolver 有时会卡在超时上，所以上限留 5 秒——条件满足就立刻返回。
-    REQUIRE(pumpUntil(ctx, [&] { return closedCalled; }, std::chrono::seconds(5)));
+    // 这条用例断言的是"**最终**会报失败、不会永久挂着"，不是解析有多快。
+    //
+    // 上限从 5 秒提到 30 秒：在本机实测（Windows 11 + 系统 resolver），
+    // .invalid 的 NXDOMAIN 有时要 5 秒以上才回来，Release 下偶发红——
+    // 2026-10-23 复现两败两过，失败时整个 core_test 从 9s 拖到 18s，说明
+    // 解析确实卡了 5s 以上，而不是代码没回调。正常路径仍是毫秒级返回，
+    // 放宽只影响真出问题时的等待。
+    REQUIRE(pumpUntil(ctx, [&] { return closedCalled; }, std::chrono::seconds(30)));
     REQUIRE_FALSE(reason.ok());
 }
 
