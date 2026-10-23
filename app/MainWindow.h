@@ -83,7 +83,8 @@ private:
     relayer::app::CoreService *core_;
     ConnectorControl *connector_;
     LogControl *log_;
-    ExplorerControl *explorer_ = nullptr;
+    ExplorerControl *explorer_ = nullptr;        // 本地
+    ExplorerControl *remoteExplorer_ = nullptr;  // 远端（同一个类，换数据源）
     ComparisonControl *comparison_ = nullptr;
     relayer::app::RelayTaskControl *taskControl_ = nullptr;
 

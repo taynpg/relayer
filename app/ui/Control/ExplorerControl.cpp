@@ -152,6 +152,14 @@ void ExplorerControl::enterPath(const QString &path)
 {
     if (source_ == Source::Remote)
     {
+        if (peerId_.isEmpty())
+        {
+            // 常驻的面板还没选对端：不发请求，保持空表（displayPath 已经
+            // 显示"<未选择对端>"）。
+            entries_.clear();
+            rebuildView();
+            return;
+        }
         // 远端：异步。只发请求，等 applyRemoteEntries 回来才动 currentPath_。
         const QString rel = path;
         remotePendingPath_ = rel;
@@ -262,6 +270,10 @@ QString ExplorerControl::displayPath() const
     {
         return currentPath_;
     }
+    if (peerId_.isEmpty())
+    {
+        return QStringLiteral("<未选择对端>");
+    }
     return QStringLiteral("%1:/%2").arg(peerId_, currentPath_);
 }
 
@@ -284,6 +296,14 @@ void ExplorerControl::setRemotePeer(const QString &peerId, const QString &peerNa
 
     ui_->cbPath->setCurrentText(displayPath());
     rebuildView();
+
+    if (peerId_.isEmpty())
+    {
+        // 远端面板常驻显示（v1 是本地/远端各占一半），未选对端时也要有
+        // 明确状态，否则看起来像坏了。
+        ui_->cbPath->setCurrentText(QStringLiteral("<未选择对端>"));
+        return;
+    }
     enterPath(QString());
 }
 

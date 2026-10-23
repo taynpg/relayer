@@ -5,6 +5,7 @@
 #include <QDirIterator>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QGroupBox>
 #include <QMessageBox>
 #include <QSettings>
 #include <QSplitter>
@@ -66,6 +67,9 @@ MainWindow::MainWindow(QWidget *parent)
     receiveDir_ = settings.value(kReceiverDir, defaultReceiveDir()).toString();
 
     log_->appendLog(QStringLiteral("relayer v%1\n").arg(RELAYER_VERSION));
+
+    // 本地面板一开始就落在用户目录：空白表格会让人以为功能没做。
+    explorer_->navigateTo(QStandardPaths::writableLocation(QStandardPaths::HomeLocation));
 }
 
 MainWindow::~MainWindow()
@@ -92,14 +96,38 @@ void MainWindow::buildLayout()
     sTop->setStretchFactor(0, 0);
     sTop->setStretchFactor(1, 1);
 
+    // 本地与远端**并排常驻**（v1 是各占一半）：远端即使还没选对端也要看得见，
+    // 否则点完"浏览此对端的目录"像是没反应。两者是同一个类，只是数据源不同。
     explorer_ = new ExplorerControl(this);
-    connect(explorer_, &ExplorerControl::notice, this,
-            [this](const QString &msg) { log_->appendLog(QStringLiteral("[浏览] %1\n").arg(msg)); });
+    remoteExplorer_ = new ExplorerControl(this);
+    remoteExplorer_->setRemotePeer(QString(), QString());  // 空闲态：显示"<未选择对端>"
+    for (auto *e : {explorer_, remoteExplorer_})
+    {
+        connect(e, &ExplorerControl::notice, this,
+                [this](const QString &msg) { log_->appendLog(QStringLiteral("[浏览] %1\n").arg(msg)); });
+    }
+
+    auto *localBox = new QGroupBox(QStringLiteral("本地"), this);
+    auto *localLay = new QVBoxLayout(localBox);
+    localLay->setContentsMargins(4, 4, 4, 4);
+    localLay->addWidget(explorer_);
+
+    auto *remoteBox = new QGroupBox(QStringLiteral("远端（对端共享目录）"), this);
+    auto *remoteLay = new QVBoxLayout(remoteBox);
+    remoteLay->setContentsMargins(4, 4, 4, 4);
+    remoteLay->addWidget(remoteExplorer_);
+
+    auto *sBottom = new QSplitter(Qt::Horizontal, this);
+    sBottom->setHandleWidth(2);
+    sBottom->addWidget(localBox);
+    sBottom->addWidget(remoteBox);
+    sBottom->setStretchFactor(0, 1);
+    sBottom->setStretchFactor(1, 1);
 
     auto *sMain = new QSplitter(Qt::Vertical, this);
     sMain->setHandleWidth(2);
     sMain->addWidget(sTop);
-    sMain->addWidget(explorer_);
+    sMain->addWidget(sBottom);
     sMain->setStretchFactor(0, 0);
     sMain->setStretchFactor(1, 1);
 
@@ -114,18 +142,13 @@ void MainWindow::wireSignals()
     connect(connector_, &ConnectorControl::probeRequested, this, &MainWindow::onProbeRequested);
     connect(connector_, &ConnectorControl::disconnectRequested, this, &MainWindow::onDisconnectRequested);
     connect(connector_, &ConnectorControl::browsePeerRequested, this, &MainWindow::onBrowsePeerRequested);
-    connect(connector_, &ConnectorControl::localBrowseRequested, this,
-            [this]()
-            {
-                explorer_->useLocalSource();
-                log_->appendLog(QStringLiteral("[浏览] 切回本地\n"));
-            });
-    connect(explorer_, &ExplorerControl::remoteListRequested, this,
+    connect(remoteExplorer_, &ExplorerControl::remoteListRequested, this,
             [this](const QString &peer, const QString &relPath)
             {
                 if (!core_->browsePeerOnSession(peer, relPath))
                 {
-                    explorer_->applyRemoteEntries(false, QStringLiteral("当前不能列举（会话不可用或正在传输）"), {});
+                    remoteExplorer_->applyRemoteEntries(false, QStringLiteral("当前不能列举（会话不可用或正在传输）"),
+                                                        {});
                 }
             });
 
@@ -474,8 +497,8 @@ void MainWindow::onBrowsePeerRequested(const QString &peerId, const QString &pee
     // v1 的语义：浏览面板只有一套，切的是数据源（AskType → Source）。
     // 不做独立窗口——那样会把表格/导航/筛选复制一遍，且以后做本地↔远端
     // 拖拽时两个窗口之间没有共享状态可用。
-    explorer_->setRemotePeer(peerId, peerName);
-    log_->appendLog(QStringLiteral("[浏览] 切到 %1 的共享目录\n").arg(peerId));
+    remoteExplorer_->setRemotePeer(peerId, peerName);
+    log_->appendLog(QStringLiteral("[浏览] 远端面板切到 %1 的共享目录\n").arg(peerId));
 }
 
 void MainWindow::nextRemoteCheck()

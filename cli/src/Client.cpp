@@ -96,6 +96,9 @@ struct Client::Impl
     asio::steady_timer pumpTimer;
     asio::steady_timer watchdog;  // 空闲 / 总时长
     asio::steady_timer progressTimer;
+    // 会话内列举的应答超时。对端离线时服务端**静默丢帧**（§11.3 没有"投递
+    // 失败"这一类），不设这个定时器，远端浏览面板会永远停在"读取中"。
+    asio::steady_timer browseTimer{ctx};
 
     Action action = Action::kList;
     std::string toPeerId;
@@ -171,6 +174,7 @@ struct Client::Impl
         // 不能再单独发（否则上层会收到两个结论）。
         browseActive = false;
         onBrowseDone = nullptr;
+        browseTimer.cancel();
 
         if (!ok)
         {
@@ -629,7 +633,20 @@ struct Client::Impl
         if (!session->send(f).ok())
         {
             finish(false, "远端列举请求发送失败", Status::Fail(ErrorCode::kProtocol, "send failed"));
+            return;
         }
+
+        // 同 GUI 路径：对端离线时服务端静默丢帧，不设超时就会一直等。
+        browseTimer.expires_after(std::chrono::seconds(10));
+        browseTimer.async_wait(
+            [this](const std::error_code &ec)
+            {
+                if (ec || action != Action::kBrowse)
+                {
+                    return;
+                }
+                finish(false, "对端没有响应（可能已离线）", Status::Fail(ErrorCode::kTimeout, "browse answer timeout"));
+            });
     }
 
     // 对端来问目录：按共享根解析、列一层、回一条。**只服务这一个根**。
@@ -850,6 +867,20 @@ struct Client::Impl
             finishBrowse(false, "远端列举请求发送失败", st);
             return false;
         }
+
+        // 应答超时：与"对端没应答"同一时限语义，但独立计时——会话本身
+        // 还活着，不能靠会话级看门狗（那会连接收一起判死）。
+        browseTimer.expires_after(std::chrono::seconds(10));
+        browseTimer.async_wait(
+            [this](const std::error_code &ec)
+            {
+                if (ec || !browseActive)
+                {
+                    return;
+                }
+                finishBrowse(false, "对端没有响应（可能已离线）",
+                             Status::Fail(ErrorCode::kTimeout, "browse answer timeout"));
+            });
         return true;
     }
 
@@ -861,6 +892,7 @@ struct Client::Impl
             return;
         }
         browseActive = false;
+        browseTimer.cancel();
         auto done = std::move(onBrowseDone);
         onBrowseDone = nullptr;
 
@@ -1255,6 +1287,7 @@ struct Client::Impl
         // 不能再单独发（否则上层会收到两个结论）。
         browseActive = false;
         onBrowseDone = nullptr;
+        browseTimer.cancel();
         if (session)
         {
             session->close();
