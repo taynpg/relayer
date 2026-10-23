@@ -46,6 +46,8 @@ void printUsage()
                 "  recv --to-dir <目录>            等待别人发来文件，落到目录里\n"
                 "        [--overwrite]            目标已存在时覆盖（默认拒绝，保护已有文件）\n"
                 "  ls --to <对端id> [--path <相对路径>]  列出对端共享目录（远端浏览/粗校验）\n"
+                "  pack <输出.tar.xz> <路径>...     本地压缩（不联网）\n"
+                "  unpack <包.tar.xz>               本地解压（不联网；手动压缩的包）\n"
                 "  list                            只连上去列出在线对端\n"
                 "\n"
                 "通用选项:\n"
@@ -112,6 +114,9 @@ struct Args
     // ls 的相对路径（相对对端共享根，空 = 根目录）。
     std::string path;
 
+    // pack / unpack 的位置参数（pack: 输出包 + 各源；unpack: 包）。
+    std::vector<std::string> inputs;
+
     // send 的 --as：对端落点的相对名（可带目录段，如 "docs/a.bin"）。
     // 空则用本地文件名。安全性由接收方负责（路径校验 + 中间目录建齐，
     // 见 PROTOCOL.md §9.4 的 root 说明）。
@@ -172,7 +177,8 @@ ParseResult parseArgs(int argc, char **argv)
         r.ok = true;
         return r;
     }
-    if (r.args.command != "send" && r.args.command != "recv" && r.args.command != "list" && r.args.command != "ls")
+    if (r.args.command != "send" && r.args.command != "recv" && r.args.command != "list" &&
+        r.args.command != "ls" && r.args.command != "pack" && r.args.command != "unpack")
     {
         r.error = "未知子命令: " + r.args.command;
         return r;
@@ -190,6 +196,33 @@ ParseResult parseArgs(int argc, char **argv)
             return r;
         }
         r.args.file = argv[i++];
+    }
+
+    // pack / unpack 是**纯本地**操作，不连中继。所以在这里就解析完并返回，
+    // 跳过后面所有的网络参数校验（认证方式、--to、--to-dir 等都不适用）。
+    if (r.args.command == "pack" || r.args.command == "unpack")
+    {
+        for (; i < argc && argv[i][0] != '-'; ++i)
+        {
+            r.args.inputs.emplace_back(argv[i]);
+        }
+        if (i < argc)
+        {
+            r.error = r.args.command + " 不接受选项";
+            return r;
+        }
+        if (r.args.command == "pack" && r.args.inputs.size() < 2)
+        {
+            r.error = "pack 需要：pack <输出.tar.xz> <路径>...";
+            return r;
+        }
+        if (r.args.command == "unpack" && r.args.inputs.size() != 1)
+        {
+            r.error = "unpack 需要：unpack <包.tar.xz>";
+            return r;
+        }
+        r.ok = true;
+        return r;
     }
 
     for (; i < argc; ++i)
@@ -521,6 +554,33 @@ int main(int argc, char **argv)
     }
 
     const auto &a = parsed.args;
+
+    // 本地压缩 / 解压：不联网，直接做完了返回。
+    if (a.command == "pack")
+    {
+        std::vector<std::string> sources(a.inputs.begin() + 1, a.inputs.end());
+        std::string err;
+        if (!relayer::cli::Client::createArchive(sources, a.inputs.front(), err))
+        {
+            std::fprintf(stderr, "压缩失败：%s\n", err.c_str());
+            return 2;
+        }
+        std::printf("已压缩：%s\n", a.inputs.front().c_str());
+        return kExitOk;
+    }
+    if (a.command == "unpack")
+    {
+        // false：手动压缩的包**带顶层目录**，解到包的父目录即可。取回目录的
+        // 包形状相反（无顶层），那条路径由接收流程自己处理，不走这里。
+        const auto dir = relayer::cli::Client::unpackArchive(a.inputs.front(), false);
+        if (dir.empty())
+        {
+            std::fprintf(stderr, "解压失败（不是 tar.xz，或包已损坏）\n");
+            return 2;
+        }
+        std::printf("已解压到：%s\n", dir.c_str());
+        return kExitOk;
+    }
 
     asio::io_context ctx;
 

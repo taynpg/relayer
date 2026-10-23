@@ -1833,16 +1833,21 @@ bool Client::createArchive(const std::vector<std::string> &sources, const std::s
         const auto base = p.parent_path();
         if (std::filesystem::is_directory(p, ec))
         {
+            std::error_code iterEc;
             for (auto it = std::filesystem::recursive_directory_iterator(
-                     p, std::filesystem::directory_options::skip_permission_denied, ec);
-                 it != std::filesystem::recursive_directory_iterator(); it.increment(ec))
+                     p, std::filesystem::directory_options::skip_permission_denied, iterEc);
+                 it != std::filesystem::recursive_directory_iterator(); it.increment(iterEc))
             {
-                if (ec)
+                if (iterEc)
                 {
                     break;
                 }
-                const auto rel = std::filesystem::relative(it->path(), base, ec);
-                if (ec || rel.empty())
+                // lexically_relative 是**纯字符串计算**，不访问文件系统：
+                // std::filesystem::relative 会去查真实路径（还带 ec 出参），
+                // 一旦它失败，整个循环就把所有条目都 continue 掉了——表现
+                // 成"没有可压缩的内容"，而目录明明是好的。
+                const auto rel = it->path().lexically_relative(base);
+                if (rel.empty())
                 {
                     continue;
                 }

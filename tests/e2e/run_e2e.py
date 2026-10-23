@@ -933,6 +933,46 @@ def pull_dir(workdir: Path, bin_dir: Path) -> None:
         c.shutdown()
 
 
+@scenario("pack-unpack", "本地压缩/解压：包内带顶层目录，解开后不多套一层")
+def pack_unpack(workdir: Path, bin_dir: Path) -> None:
+    """手动压缩 / 解压的端到端验收（PROTOCOL.md §11.10.6 的"两种包形状"）。
+
+    这两条命令**不联网**，所以不建 Cluster——直接调二进制。
+
+    与取回目录的包相反：手动压缩的包**带顶层目录**（entryName 相对各源的
+    父目录），所以解压时解到父目录而不是按包名建子目录。混用会得到
+    `sub/sub/`，那是最容易犯也最难看出来的错，所以专门断言它没发生。
+    """
+    exe = bin_dir / f"relayer-cli{EXE}"
+    src = workdir / "sub"
+    (src / "nested").mkdir(parents=True)
+    (src / "empty").mkdir()
+    (src / "a.txt").write_bytes(b"alpha")
+    (src / "nested" / "b.bin").write_bytes(b"beta!")
+
+    archive = workdir / "out.tar.xz"
+    packed = subprocess.run([str(exe), "pack", str(archive), str(src)], capture_output=True, text=True, timeout=60)
+    expect_eq(packed.returncode, 0, f"pack 应当成功：{packed.stderr}")
+    expect(archive.exists(), "没生成包文件")
+
+    with tarfile.open(archive, "r:xz") as tf:
+        names = sorted(tf.getnames())
+    # 带顶层目录：包内是 sub/a.txt 而不是 a.txt。
+    expect("sub/a.txt" in names, f"包内应当带顶层目录：{names}")
+    expect("sub/nested/b.bin" in names, f"嵌套文件没进包：{names}")
+    expect("sub/empty" in names, f"空目录没进包：{names}")
+
+    shutil.rmtree(src)
+    unpacked = subprocess.run([str(exe), "unpack", str(archive)], capture_output=True, text=True, timeout=60)
+    expect_eq(unpacked.returncode, 0, f"unpack 应当成功：{unpacked.stderr}")
+
+    expect((src / "a.txt").read_bytes() == b"alpha", "a.txt 内容不一致")
+    expect((src / "nested" / "b.bin").read_bytes() == b"beta!", "嵌套文件内容不一致")
+    expect((src / "empty").is_dir(), "空目录没恢复出来")
+    # 最容易犯的错：把带顶层目录的包解到"按包名建的子目录"里，得到 sub/sub/。
+    expect(not (src / "sub").exists(), "解压多套了一层（出现了 sub/sub/）")
+
+
 @scenario("one-byte", "1 字节文件正常完成")
 def one_byte(workdir: Path, bin_dir: Path) -> None:
     _transfer_roundtrip(workdir, bin_dir, 1)
