@@ -315,8 +315,9 @@ void ConnectorControl::onPeerListReceived(const QList<PeerRow> &rows)
         auto *addrItem = new QTableWidgetItem(rows[r].address);
         addrItem->setFlags(addrItem->flags() & ~Qt::ItemIsEditable);
 
-        // 自己标红（同 v1）：发的文件"发给自己"是合法用法（本机自测），
-        // 但容易误操作，标出来。
+        // 自己标红（同 v1）：发的文件"发给自己"是合法用法（本机自测，
+        // 服务端会把帧绕回本连接，见 PROTOCOL.md §11.3.1），但容易
+        // 误操作——真正要发给别人时选中自己不会报错，只会安静地传回本机。
         if (rows[r].id == ui_->lineEdit->text())
         {
             idItem->setForeground(Qt::red);

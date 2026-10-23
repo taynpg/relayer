@@ -54,6 +54,7 @@ void printUsage()
                 "      --no-auth            中继已用 --allow-no-auth 启动时必须加这个\n"
                 "                           （与 --password 互斥；不自动推断，防止漏填口令静默降级）\n"
                 "      --id <name>          声明本机标识（重连后保持不变；被别人占用则连接失败）\n"
+                "      --self-send <file>   自检：recv 时把这个文件发给自己（验完整链路）\n"
                 "      --chunk-size <bytes> 分块大小（默认 256 KiB，上限 4 MiB）\n"
                 "      --idle-timeout <sec> 传输开始后多久没有进展就判定对端失联（默认 60）\n"
                 "                           传输开始前不计时：recv 会一直等，除非给 --hard-timeout\n"
@@ -317,6 +318,15 @@ ParseResult parseArgs(int argc, char **argv)
                 return r;
             }
         }
+        else if (a == "--self-send")
+        {
+            // 自检：recv 时把自己的这个文件也发给"自己"（服务端绕回本连接）。
+            // 一条命令验完中继 + 认证 + 传输 + 落盘，不需要第二台机器。
+            if (!takeValue(a, r.args.config.selfSendPath))
+            {
+                return r;
+            }
+        }
         else if (a == "--overwrite")
         {
             // 接收目标已存在时删旧收新。默认拒绝覆盖（保护用户文件），
@@ -340,6 +350,13 @@ ParseResult parseArgs(int argc, char **argv)
     if (r.args.command == "recv" && r.args.toDir.empty())
     {
         r.error = "recv 需要 --to-dir 指定落点目录";
+        return r;
+    }
+
+    if (!r.args.config.selfSendPath.empty() && r.args.command != "recv")
+    {
+        // 自检发送是"接收会话上搭车发送"，只有 recv 有接收会话。
+        r.error = "--self-send 只能与 recv 一起用";
         return r;
     }
 

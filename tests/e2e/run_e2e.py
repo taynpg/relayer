@@ -692,6 +692,38 @@ def fixed_id(workdir: Path, bin_dir: Path) -> None:
         c.shutdown()
 
 
+@scenario("self-send", "自投：一个进程把自己的文件发给自己（服务端绕回本连接）")
+def self_send(workdir: Path, bin_dir: Path) -> None:
+    """PROTOCOL.md §11.3.1 的端到端验收。
+
+    v1 支持"发给自己"（本机自测：一条命令验证中继 + 认证 + 传输 + 落盘）。
+    v2 早期把 `to == 自己 id` 判成拒绝，服务端静默丢帧——发送方要等满
+    应答超时才报错。现在改成"转发回这条连接"，本场景钉住它。
+
+    一个进程同时当收发两端，客户端靠 sessionId 解复用（§9.4.1）。
+    三条断言：退出码 0、落点内容逐字节一致、不留残片。
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        src = c.src / "payload.bin"
+        want = make_file(src, 3_000_000)
+
+        p = c.cli("recv-self", "recv", "--to-dir", str(c.dst), *c.cli_common(),
+                  "--id", "me", "--self-send", str(src), "--idle-timeout", "60")
+        line = p.wait_for(ASSIGNED_PREFIX, 20.0)
+        expect_eq(line.split(ASSIGNED_PREFIX, 1)[1].strip(), "me", "自检实例的 id")
+        expect_eq(p.wait_exit(120), 0, "自检进程退出码")
+
+        got = c.dst / "payload.bin"
+        expect(got.exists(), f"目标文件不存在：{got}")
+        expect_eq(got.stat().st_size, 3_000_000, "目标文件大小")
+        expect_eq(sha256_of(got), want, "内容哈希")
+        expect_no_fragment(c.dst, "payload.bin")
+    finally:
+        c.shutdown()
+
+
 @scenario("one-byte", "1 字节文件正常完成")
 def one_byte(workdir: Path, bin_dir: Path) -> None:
     _transfer_roundtrip(workdir, bin_dir, 1)

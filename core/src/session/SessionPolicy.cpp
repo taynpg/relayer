@@ -213,10 +213,23 @@ RoutePlan planRoute(Role role, bool established, const RouteConfig &config, std:
 
     if (!selfId.empty() && f.to == selfId)
     {
-        // 要求把帧转给发送者自己：只可能是客户端拼错了 to，或者在试探
-        // 服务端会不会把帧绕回来。两种情况都不该转发。
-        plan.action = RouteAction::kReject;
-        plan.reason = "route target equals sender";
+        // 发给自己的帧：**转发回这条连接**，不是拒绝，也不是本地受理。
+        //
+        // 这是 v1 支持、用户明确要求保留的场景（"本机自测"：一个实例把
+        // 文件发给自己，用来验证整条链路——中继、认证、传输、落盘——不用
+        // 第二台机器）。早期版本把它判成 kReject，理由是"只可能是拼错了
+        // to"，那是把猜测当成了规则：用户真的会这么用。
+        //
+        // 安全性：这里的 selfId 来自认证阶段，不是 f.from，所以发送者
+        // 只可能把帧绕回**自己**，偷不到别人的帧、也干扰不到别人；转发
+        // 时 from 仍会被绑成真实身份（见 forward()），伪造依然不可能。
+        //
+        // 注意不能用 kAcceptLocal：本地受理等于交给服务端处理，而服务端
+        // 不做文件业务（REWRITE-PLAN §6.1），帧会在这里凭空消失——比
+        // 明确拒绝更难排查。
+        plan.action = RouteAction::kForward;
+        plan.to = f.to;
+        plan.from = identityToBind(role, established, selfId);
         return plan;
     }
 

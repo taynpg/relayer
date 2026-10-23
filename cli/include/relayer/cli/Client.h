@@ -173,6 +173,17 @@ struct ClientConfig
     // 永远失败。
     bool overwriteExisting = false;
 
+    // 自检：接收会话建立后，把这一个文件发给**自己**（PROTOCOL.md §11.3.1）。
+    //
+    // 空 = 关闭。非空只在 kReceive 下有意义：一个进程同时当收发两端，
+    // 一条命令就能验证"中继 + 认证 + 传输 + 落盘"整条链路，不必找第二台
+    // 机器。走的是服务端的自投转发（帧绕回本连接），客户端靠 sessionId
+    // 把接收端与发送端分开——与 GUI"自动接收 + 搭车发送"同一条路径。
+    //
+    // 退出条件：文件收到并校验通过（与普通 recv 一致）。自检发送失败会
+    // 提前结束并报错。
+    std::string selfSendPath;
+
     // 传输参数。chunkSize 在命令行可调，主要用于把"小文件测不出多块"
     // 这条路堵上（见 TransferPeer::Config 的注释）。
     std::uint32_t chunkSize = 0;  // 0 = 用协议默认值（256 KiB）

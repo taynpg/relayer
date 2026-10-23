@@ -112,6 +112,9 @@ struct Client::Impl
     // （带新 id），没有这个标志就会无限声明。
     bool claimSent = false;
 
+    // 自检发送已启动（见 ClientConfig::selfSendPath）。
+    bool selfSendStarted = false;
+
     std::string assignedId;
 
     // 进度速率的基线。用"两次上报之间走了多少字节"算瞬时速度，比
@@ -458,6 +461,34 @@ struct Client::Impl
             }
 
             onAuthenticated();
+
+            // 自检（PROTOCOL.md §11.3.1）：接收端已经建好，把自己的文件
+            // 发给自己，帧由中继绕回本连接。
+            //
+            // 必须等身份**最终确定**（identityFinal）再发：声明了标识时，
+            // 第一次回调的身份还是空的，那时发出去 to 会是空串（被当成
+            // "发给服务端"），请求直接进黑洞。
+            if (action == Action::kReceive && identityFinal && !config.selfSendPath.empty() && !selfSendStarted)
+            {
+                selfSendStarted = true;
+                const bool started =
+                    startSendOnSession(config.selfSendPath, std::string(), assignedId,
+                                       [this](const Outcome &o)
+                                       {
+                                           // 成功不做额外动作：接收侧收完会自己 finish（退出码
+                                           // 由它决定）。失败要提前结束，否则进程挂在"等文件"
+                                           // 上直到硬超时，看不出是自检发送出了问题。
+                                           if (!o.ok)
+                                           {
+                                               finish(false, "自检发送失败：" + o.summary, o.status, o.connectionLost);
+                                           }
+                                       });
+                if (!started)
+                {
+                    finish(false, "自检发送未能启动（接收会话不可用）",
+                           Status::Fail(ErrorCode::kUnknown, "self-send unavailable"), false);
+                }
+            }
         };
 
         h.onFrame = [this](core::session::Session &, const Frame &f)

@@ -277,14 +277,19 @@ TEST_CASE("frame for another client is forwarded", "[session][route]")
     REQUIRE(plan.from == "client-7");
 }
 
-TEST_CASE("routing to self is rejected", "[session][route]")
+TEST_CASE("routing to self loops the frame back to the sender", "[session][route]")
 {
-    // client-7 让服务端把帧转给 client-7：只可能是拼错了 to，或者在试探
-    // 服务端会不会把帧绕回去。两种都不该转发。
+    // 自投（PROTOCOL.md §11.3.1）：v1 支持、用户要求保留的本机自测路径。
+    //
+    // 必须是 kForward 而不是 kAcceptLocal：本地受理等于交给服务端处理，
+    // 而服务端不做文件业务，帧会凭空消失（症状是发送方等满应答超时，
+    // 比重定向到"明确拒绝"更难查）。
     const auto plan = planRoute(Role::kServer, true, serverConfig(), "client-7",
                                 makeFrame(FrameType::kFileRequestSend, "client-7", "client-7"));
-    REQUIRE(plan.action == RouteAction::kReject);
-    REQUIRE_FALSE(plan.reason.empty());
+    REQUIRE(plan.action == RouteAction::kForward);
+    REQUIRE(plan.to == "client-7");
+    // from 仍被绑成真实身份：自投不能成为伪造身份的旁路。
+    REQUIRE(plan.from == "client-7");
 }
 
 TEST_CASE("forwarding never preserves a claimed third-party identity", "[session][route][identity]")
