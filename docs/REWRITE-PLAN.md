@@ -824,7 +824,7 @@ socket 回调里写就没法把每种组合都测到。
 （文档与代码一致性）、`e2e_quick`（三进程 8 场景，约 40s）。
 合计 474 用例 / 8311 断言，全量 51 秒。
 
-### 4.1 阶段 E 进度（2026-10-22 晚）
+### 4.1 阶段 E 进度（2026-10-23 更新）
 
 已落地（按提交顺序）：
 
@@ -839,19 +839,19 @@ socket 回调里写就没法把每种组合都测到。
 | E3.5 | `RelayTaskControl` 任务表单（清单 #10/#12：批次推进、停止、重传、`connectionLost` 终止规则） | ✅ |
 | — | 身份稳定：连接=常驻接收会话、`askListOnStart`、`sessionId` 解复用（见 `PROTOCOL.md` §9.4.1） | ✅ |
 | — | 性能三杠杆：默认 256 KiB 块、控制帧插队、单帧写超时 60s；接收端写流复用 | ✅ |
+| E3.6 | `Setting` 对话框（`btnLock` 解禁）：自动接收重试策略（重试开关/间隔/次数，次数 0=一直）+ 接收覆盖开关；QSettings 键收拢到 `ui/SettingsKeys.h`。v1 的压缩/加密两组**不迁移**（v2 无对应物，不放假开关，理由在 `Setting.h` 注释） | ✅ |
+| E3.7 | `ReplaceArea` 作用域对话框：作用列对齐 v2 四字段（名称/本地目录/对端/相对目录）；v1 的 useCase/useRegex 是**假选项**（结果传入 lambda 但从未使用），v2 做成真的（`Qt::CaseSensitivity` + `QRegularExpression`，pattern 先验证） | ✅ |
+| E3.8 | `model/ProgressTracker`（清单 #11）：除零/时间边界/速度择优类内闭环（bytesTotal=0 占位、无瞬时速度退回自算均值、开头 200ms 不显示均值）；任务表进度列升级为「百分比 · 速度」；`humanBytes` 三处拷贝收拢 | ✅ |
 
 剩余（下一次从这里接）：
 
-1. **`Setting` 对话框**——`ConnectorControl::initButtons()` 里 `btnLock` 目前禁用，
-   注释写明「在 Setting 对话框迁移进来之前不可用」。
-2. **`ReplaceArea` 作用域**——`ComparisonControl::onReplace()` 现在只做「全部可编辑列 +
-   区分大小写」的普通替换；v1 的作用列/大小写/正则未迁移。
-3. **进度与速度（清单 #11 `ProgressTracker`）**——`RelayTaskControl::onProgress()`
-   目前只更新字节进度，`bytesPerSecond` 被忽略；空文件除零与时间边界没有集中处理。
-4. **E4 验收**——GUI 已在本机中继 + loopback 上完成收发，还缺一次**真实链路**
+1. **E4 验收**——GUI 已在本机中继 + loopback 上完成收发，还缺一次**真实链路**
    （两台机器经中继）的完整记录；e2e 也缺 no-auth 场景。
-5. 阶段 F 才做的：远端浏览/下载、对端打包归档、P2P 直连、多任务并行
+2. 阶段 F 才做的：远端浏览/下载、对端打包归档、P2P 直连、多任务并行
    （前三项需要协议扩展，`cli`/`core` 侧都还没有对应帧）。
+
+上次的收尾三项（Setting / ReplaceArea / ProgressTracker）已全部完成，
+提交 `beb6d63` / `c118c06` / `32500f6`。
 
 ---
 

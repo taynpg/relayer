@@ -36,17 +36,22 @@
 
 ### 0.3 没做（下次接着做）
 
-1. **`Setting` 对话框**：`ConnectorControl::initButtons()` 里 `btnLock` 被显式禁用，
-   注释写着「在 Setting 对话框迁移进来之前不可用」。`Setting.ui` 已在仓库里，
-   没人 include。
-2. **`ReplaceArea` 作用域**：`ComparisonControl::onReplace()` 只做「全部可编辑列 +
-   区分大小写」的普通替换（注释在 cpp 里写明了）。`ReplaceArea.ui` 同样未接线。
-3. **速度显示 / `ProgressTracker`**（§3.7.2 清单 #11）：`RelayTaskControl::onProgress()`
-   收了 `bytesPerSecond` 但没用；空文件除零、时间边界没有集中处。
-4. **E4 验收**：需要一次**真实链路**（两台机器经中继，不是本机回环）的完整收发记录。
+上次列的收尾三项已完成（2026-10-23，提交 beb6d63 / c118c06 / 32500f6）：
+
+- **Setting 对话框**：`btnLock` 已解禁。重试策略（开关/间隔/次数，0=一直）+
+  接收覆盖开关；v1 的压缩/加密两组故意不迁（v2 无对应物）。QSettings 键
+  统一在 `app/ui/SettingsKeys.h`。
+- **ReplaceArea 作用域**：对话框已接线 `ComparisonControl::onReplace()`；
+  v1 的 useCase/useRegex 是假选项，v2 做成了真的。
+- **ProgressTracker**（清单 #11）：`app/model/ProgressTracker.{h,cpp}`，
+  任务表进度列显示「百分比 · 速度」。
+
+剩下：
+
+1. **E4 验收**：需要一次**真实链路**（两台机器经中继，不是本机回环）的完整收发记录。
    目前为止 GUI 的收发都是在本机中继 + loopback 上验证的；e2e 也缺 no-auth 场景
    （`--allow-no-auth` 走过一次手工路径，见 §0.6 最后一条）。
-5. **阶段 F**：远端浏览/下载、对端打包 tar.xz、P2P 直连、多任务并行。前三个都要动协议，
+2. **阶段 F**：远端浏览/下载、对端打包 tar.xz、P2P 直连、多任务并行。前三个都要动协议，
    `PROTOCOL.md` 得先写帧定义再写代码。
 
 ### 0.4 E 阶段定下的架构约束（别推翻，推翻要改协议和测试）
