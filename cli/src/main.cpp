@@ -59,7 +59,8 @@ void printUsage()
                 "      --self-browse        自检：recv 时在接收会话上列一次自己的共享根\n"
                 "      --pull-from <id>     取回：recv 时请这个对端把文件发过来\n"
                 "      --pull-path <rel>    取回的文件（相对对端共享根）\n"
-                "      --pull-dir <rel>     取回的目录（对端打包成 tar.xz 发来）\n"
+                "      --pull-dir <rel>     取回的目录（对端打包成 tar.xz，收到后自动解开）\n"
+                "      --unpack             收到 .tar.xz 就解开并删除包\n"
                 "      --share <dir>        recv 时允许对端列举这个目录（不给则不响应）\n"
                 "      --path <rel>         ls 的相对路径（相对对端共享根，默认根目录）\n"
                 "      --chunk-size <bytes> 分块大小（默认 256 KiB，上限 4 MiB）\n"
@@ -359,6 +360,11 @@ ParseResult parseArgs(int argc, char **argv)
                 return r;
             }
         }
+        else if (a == "--unpack")
+        {
+            // 收到 .tar.xz 就解开（对别人主动发来的包也生效）。
+            r.args.config.unpackArchives = true;
+        }
         else if (a == "--pull-dir")
         {
             // 目录取回：请对端打包成 tar.xz 再发（PROTOCOL.md §11.10）。
@@ -369,6 +375,9 @@ ParseResult parseArgs(int argc, char **argv)
                 return r;
             }
             r.args.config.pullAsArchive = true;
+            // 目录取回默认解包：用户要的是"目录"，不是一个 .tar.xz。
+            // 想保留包就自己解——但那是少数需求，多数人拿到包只会问"东西呢"。
+            r.args.config.unpackArchives = true;
         }
         else if (a == "--path")
         {

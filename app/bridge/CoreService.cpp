@@ -99,7 +99,23 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo &conn)
     // 分配 id，"收完就重挂"会让接收方每收一个文件就换一次 id，发送方
     // 表格里的对端 id 立刻过期——再发就发进虚空，等满 answerTimeout 才报错。
     cfg.keepReceiving = true;
-    cfg.onFileReceived = [this](const std::string &targetPath) { emit fileReceived(toQt(targetPath)); };
+    cfg.onFileReceived = [this](const std::string &targetPath)
+    {
+        if (unpackNextArchive_)
+        {
+            unpackNextArchive_ = false;
+            const auto dir = cli::Client::unpackArchive(targetPath);
+            if (!dir.empty())
+            {
+                // 包已删，不再发 fileReceived：上层看到两条结论（"收到包"
+                // 加"已解包"）会以为收到了两个东西。
+                emit archiveExtracted(true, toQt(dir), QString());
+                return;
+            }
+            emit archiveExtracted(false, QString(), QStringLiteral("解包失败，包已保留在接收目录"));
+        }
+        emit fileReceived(toQt(targetPath));
+    };
     cfg.onReceiveFailed = [this](const std::string &message) { emit receiveFailed(toQt(message)); };
 
     // 接收覆盖：GUI 的落点是用户自己选的接收目录，"同一个文件反复发到
@@ -509,14 +525,26 @@ bool CoreService::pullFileFromPeer(const QString &peerId, const QString &relPath
                 emit remotePullFinished(false, QStringLiteral("没有可用的常驻会话"));
                 return;
             }
+            if (asArchive)
+            {
+                unpackNextArchive_ = true;
+            }
             const bool started = client_->pullOnSession(peer, path, asArchive,
                                                         [this](const cli::Outcome &o)
                                                         {
+                                                            if (!o.ok)
+                                                            {
+                                                                // 没接受就不会有包来，清掉标记——
+                                                                // 否则下一次收到别人的 .tar.xz 会被
+                                                                // 当成这次的包解开。
+                                                                unpackNextArchive_ = false;
+                                                            }
                                                             // 从 io 线程 emit 跨线程信号是安全的。
                                                             emit remotePullFinished(o.ok, toQt(o.summary));
                                                         });
             if (!started)
             {
+                unpackNextArchive_ = false;
                 emit remotePullFinished(false, QStringLiteral("当前不能取回（正在传输或会话不可用）"));
             }
         });

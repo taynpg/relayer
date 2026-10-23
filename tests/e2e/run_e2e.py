@@ -908,16 +908,18 @@ def pull_dir(workdir: Path, bin_dir: Path) -> None:
         rc, out = pull_dir_cmd("dir-ok", "sub")
         expect_eq(rc, 0, f"取回目录应当成功：{out}")
 
-        archive = dst_a / "sub.tar.xz"
-        expect(archive.exists(), f"没收到 sub.tar.xz，目录内容：{list(dst_a.iterdir())}")
+        # 目录取回现在会自动解包：用户看到的是目录，不是一个 .tar.xz
+        # （§11.10.6 的补完）。所以断言看解出来的东西，而不是包本身。
+        extracted_dir = dst_a / "sub"
+        expect(extracted_dir.is_dir(), f"没解出 sub 目录，接收目录内容：{list(dst_a.iterdir())}")
+        expect(not (dst_a / "sub.tar.xz").exists(), "包应该在被解开后删除，否则会越积越多")
 
-        with tarfile.open(archive, "r:xz") as tf:
-            names = sorted(tf.getnames())
-            expect("a.txt" in names, f"包里没有 a.txt：{names}")
-            expect("nested/b.bin" in names, f"包里没有嵌套文件：{names}")
-            expect("empty" in names, f"空目录没进包：{names}")
-            expect(tf.extractfile("a.txt").read() == b"alpha-content", "a.txt 内容不一致")
-            expect(tf.extractfile("nested/b.bin").read() == b"beta-content-123", "嵌套文件内容不一致")
+        expect((extracted_dir / "a.txt").read_bytes() == b"alpha-content", "a.txt 内容不一致")
+        expect((extracted_dir / "nested" / "b.bin").read_bytes() == b"beta-content-123",
+               "嵌套文件内容不一致")
+        expect((extracted_dir / "empty").is_dir(), "空目录在包/解包过程中丢了")
+        # 层次要与对方看到的一致：解出来是 sub/a.txt，而不是散在接收目录里。
+        expect(not (dst_a / "a.txt").exists(), "解包把内容散到了接收目录，少了 sub/ 这一层")
 
         # --- 拒绝路径 ---
         rc, out = pull_dir_cmd("dir-on-file", "sub/a.txt")

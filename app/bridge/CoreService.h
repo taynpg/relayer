@@ -216,6 +216,10 @@ signals:
     // ok=true 只表示"对方接受了"，文件随后由接收路径报告落点。
     void remotePullFinished(bool ok, const QString &summary);
 
+    // 目录取回的包已自动解开（PROTOCOL.md §11.10.6 的补完）。
+    // ok=false 时包会**保留**在接收目录，detail 说明原因。
+    void archiveExtracted(bool ok, const QString &dir, const QString &detail);
+
 private:
     void startIoThread();
     void runOnIo(std::function<void()> fn);
@@ -261,6 +265,13 @@ private:
         std::shared_ptr<cli::Client> client;
     };
     std::map<qint64, SendJob> sendJobs_;
+
+    // 下一次收到的 .tar.xz 要不要自动解开。**只在 io 线程读写**。
+    //
+    // 不放进 ClientConfig：常驻接收会话的 config 在 startReceive 时就定死了，
+    // 而"这一次取回是目录"是运行时的、逐次的决定。别人主动发来的 .tar.xz
+    // 不能擅自解开——那可能正是用户想收的包。
+    bool unpackNextArchive_ = false;
 
     asio::io_context ctx_;
 

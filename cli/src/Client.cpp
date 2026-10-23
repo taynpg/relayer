@@ -1451,14 +1451,37 @@ struct Client::Impl
                     // 的注释，这是"发送方表格里的对端 id 不过期"的关键）。
                     // 重建走 post：此刻在 TransferPeer 的完成回调栈上，
                     // 直接替换 peer 成员是回调栈析构的老坑。
+                    // 自动解包（--unpack / 目录取回）：解成功就报目录，
+                    // 失败则照常报包——两种情况用户都能看到明确的落点。
+                    std::string reported = r.targetPath;
+                    if (config.unpackArchives)
+                    {
+                        const auto dir = unpackArchive(r.targetPath);
+                        if (!dir.empty())
+                        {
+                            reported = dir;
+                        }
+                    }
                     if (config.onFileReceived)
                     {
-                        config.onFileReceived(r.targetPath);
+                        config.onFileReceived(reported);
                     }
                     asio::post(ctx, [this] { rebuildReceiver(); });
                     return;
                 }
-                finish(true, "接收完成：" + r.targetPath);
+                {
+                    std::string reported = r.targetPath;
+                    if (config.unpackArchives)
+                    {
+                        const auto dir = unpackArchive(r.targetPath);
+                        if (!dir.empty())
+                        {
+                            reported = dir;
+                        }
+                    }
+                    finish(true, "接收完成：" + reported);
+                }
+                return;
             }
             else
             {
@@ -1792,6 +1815,38 @@ bool Client::sendOnSession(std::string sourcePath, std::string remoteName, std::
 bool Client::browseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done)
 {
     return impl_->startBrowseOnSession(std::move(peerId), std::move(relPath), std::move(done));
+}
+
+std::string Client::unpackArchive(const std::string &archivePath)
+{
+    static const std::string kSuffix = ".tar.xz";
+    if (archivePath.size() <= kSuffix.size() ||
+        archivePath.compare(archivePath.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0)
+    {
+        return std::string();  // 不是我们的包，什么都不做
+    }
+
+    const std::filesystem::path pack(archivePath);
+    const std::string name = pack.filename().string();
+    const std::string dirName = name.substr(0, name.size() - kSuffix.size());
+    const auto dest = pack.parent_path() / dirName;
+
+    // 用局部 store：解包是"一次性文件操作"，不该为此在类里再挂一个成员。
+    // StdFileStore 本身很轻（只是路径到系统调用的映射）。
+    filestore::StdFileStore store;
+    filestore::TarXzArchiver archiver(store);
+    filestore::ArchiveOptions options;
+    std::vector<std::string> extracted;
+    std::vector<std::string> skipped;
+    if (!archiver.extract(archivePath, dest.string(), options, extracted, skipped).ok())
+    {
+        // 失败保留包：用户还能自己解，总比"包被删了又没解开"好。
+        return std::string();
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(archivePath, ec);  // 包已经用完，留着只会越积越多
+    return dest.string();
 }
 
 bool Client::pullOnSession(std::string peerId, std::string relPath, bool archive,

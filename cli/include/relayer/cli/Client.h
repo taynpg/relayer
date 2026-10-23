@@ -217,6 +217,12 @@ struct ClientConfig
     // §11.10）。收到的是包本身，不会自动解包。
     bool pullAsArchive = false;
 
+    // 收到 `.tar.xz` 时自动解包并删除包（PROTOCOL.md §11.10.6 的"下一步"）。
+    //
+    // 只对**目录取回**有意义，所以默认关：别人主动发给你的 .tar.xz 可能是你
+    // 就想要的那个包，擅自解开会让"东西呢"变成一个问题。
+    bool unpackArchives = false;
+
     // 远端目录列举的共享根（PROTOCOL.md §11.8）。空 = **不响应**列举请求。
     //
     // 只有这个目录之下的内容能被对端看到：请求里的路径一律按"相对该根"
@@ -330,6 +336,14 @@ public:
     // 归档请求的应答超时是 120 秒：对端要先压缩，应答在打包完成后才发。
     bool pullOnSession(std::string peerId, std::string relPath, bool archive,
                        std::function<void(const Outcome &)> done);
+
+    // 把 `<dir>/x.tar.xz` 解到 `<dir>/x/`，成功后删除包，返回解包目录。
+    // 失败返回空串并**保留包**——用户可以自己解，总比包被删了又没解开好。
+    //
+    // 为什么不直接解到 `<dir>/`：包内路径是"相对被请求的那个目录"的
+    // （§11.10.3），没有顶层目录。解到 `<dir>/` 会让 a.txt、nested/ 散在
+    // 接收目录里，与对方看到的层次不一致。
+    static std::string unpackArchive(const std::string &archivePath);
 
     // 取消正在进行的"会话内发送"（对端的收尾会看到 kLocalCancelled）。
     // 会话本身不受影响——接收继续等下一个文件。

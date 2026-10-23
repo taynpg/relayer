@@ -152,6 +152,18 @@ void MainWindow::wireSignals()
                                                         {});
                 }
             });
+    connect(core_, &relayer::app::CoreService::archiveExtracted, this,
+            [this](bool ok, const QString &dir, const QString &detail)
+            {
+                if (ok)
+                {
+                    log_->appendLog(QStringLiteral("[取回] 已解包到 %1\n").arg(dir));
+                }
+                else
+                {
+                    log_->appendLog(QStringLiteral("[取回] %1\n").arg(detail));
+                }
+            });
     connect(core_, &relayer::app::CoreService::remotePullFinished, this,
             [this](bool ok, const QString &summary)
             {
