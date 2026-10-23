@@ -33,6 +33,7 @@ add_executable(relayer WIN32
     MainWindow.cpp
     Base/InfoDrop.cpp
     bridge/CoreService.cpp
+    model/ProgressTracker.cpp
     ui/ConnectorControl.cpp
     ui/LogControl.cpp
     ui/ReplaceArea.cpp

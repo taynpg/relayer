@@ -4,6 +4,7 @@
 #include <QList>
 
 #include "bridge/CoreService.h"
+#include "model/ProgressTracker.h"
 #include "model/TransferTask.h"
 
 class QLabel;
@@ -122,6 +123,9 @@ public:
     int current_ = -1;
     bool running_ = false;
     bool stopping_ = false;
+
+    // 当前行（current_）的进度/速度跟踪。startNext 里随行切换 reset。
+    relayer::app::ProgressTracker progressTracker_;
 };
 
 }  // namespace relayer::app

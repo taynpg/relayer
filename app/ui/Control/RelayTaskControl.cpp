@@ -10,24 +10,13 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 
+#include "model/ProgressTracker.h"
+
 namespace relayer::app
 {
 
 namespace
 {
-
-QString humanBytes(quint64 n)
-{
-    const char *units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
-    double v = static_cast<double>(n);
-    int i = 0;
-    while (v >= 1024.0 && i < 4)
-    {
-        v /= 1024.0;
-        ++i;
-    }
-    return QString::number(v, 'f', 1) + QLatin1String(units[i]);
-}
 
 // 状态的显示文本与颜色集中在这里：新增状态只改这一处。
 struct StatusStyle
@@ -97,7 +86,7 @@ void RelayTaskControl::buildLayout()
     table_->setColumnWidth(kColRelDir, 200);
     table_->setColumnWidth(kColSize, 90);
     table_->setColumnWidth(kColStatus, 70);
-    table_->setColumnWidth(kColProgress, 70);
+    table_->setColumnWidth(kColProgress, 150);
     table_->horizontalHeader()->setSectionResizeMode(kColName, QHeaderView::Stretch);
     table_->horizontalHeader()->setStretchLastSection(false);
 
@@ -271,6 +260,7 @@ void RelayTaskControl::startNext()
     ++current_;
     const Row &t = rows_[current_];
     setStatus(current_, kTransing);
+    progressTracker_.reset();
     emit logMessage(QStringLiteral("[任务] %1/%2  %3 → %4:%5\n")
                         .arg(current_ + 1)
                         .arg(rows_.size())
@@ -356,17 +346,21 @@ void RelayTaskControl::onSessionEnded(bool ok, const QString &summary, const QSt
     finishBatch(false);
 }
 
-void RelayTaskControl::onProgress(quint64 bytesDone, quint64 bytesTotal, double /*bytesPerSecond*/)
+void RelayTaskControl::onProgress(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond)
 {
     if (!running_ || current_ < 0 || current_ >= rows_.size())
     {
         return;
     }
-    const int pct =
-        bytesTotal > 0 ? static_cast<int>(100.0 * static_cast<double>(bytesDone) / static_cast<double>(bytesTotal)) : 0;
+    // bytesTotal == 0 是"还没等到文件请求"的占位期，表格里保持空白
+    // （日志侧由 MainWindow 提示"等待文件"，两边语义不同）。
+    if (bytesTotal == 0)
+    {
+        return;
+    }
     if (auto *it = table_->item(current_, kColProgress))
     {
-        it->setText(QStringLiteral("%1%").arg(pct));
+        it->setText(progressTracker_.update(bytesDone, bytesTotal, bytesPerSecond));
     }
 }
 

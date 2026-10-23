@@ -12,6 +12,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include "model/ProgressTracker.h"
 #include "ui/ConnectorControl.h"
 #include "ui/Control/ComparisonControl.h"
 #include "ui/Control/ExplorerControl.h"
@@ -21,6 +22,7 @@
 #include "ui/SettingsKeys.h"
 #include "ui_MainWindow.h"
 
+using relayer::app::humanBytes;
 using relayer::app::settings::kAutoRetryDefault;
 using relayer::app::settings::kReceiverAutoRetry;
 using relayer::app::settings::kReceiverDir;
@@ -31,18 +33,8 @@ using relayer::app::settings::kRetryMaxDefault;
 
 namespace
 {
-QString humanBytes(quint64 n)
-{
-    const char *units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
-    double v = static_cast<double>(n);
-    int i = 0;
-    while (v >= 1024.0 && i < 4)
-    {
-        v /= 1024.0;
-        ++i;
-    }
-    return QString::number(v, 'f', 1) + QLatin1String(units[i]);
-}
+// humanBytes 已收拢到 app/model/ProgressTracker.h（原与 RelayTaskControl
+// 各有一份相同实现）。
 
 QString defaultReceiveDir()
 {
