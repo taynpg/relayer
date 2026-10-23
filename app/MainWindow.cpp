@@ -112,15 +112,15 @@ void MainWindow::buildLayout()
     localLay->setContentsMargins(4, 4, 4, 4);
     localLay->addWidget(explorer_);
 
-    auto *remoteBox = new QGroupBox(QStringLiteral("远端（对端共享目录）"), this);
-    auto *remoteLay = new QVBoxLayout(remoteBox);
+    remoteBox_ = new QGroupBox(QStringLiteral("远端（未选择对端）"), this);
+    auto *remoteLay = new QVBoxLayout(remoteBox_);
     remoteLay->setContentsMargins(4, 4, 4, 4);
     remoteLay->addWidget(remoteExplorer_);
 
     auto *sBottom = new QSplitter(Qt::Horizontal, this);
     sBottom->setHandleWidth(2);
     sBottom->addWidget(localBox);
-    sBottom->addWidget(remoteBox);
+    sBottom->addWidget(remoteBox_);
     sBottom->setStretchFactor(0, 1);
     sBottom->setStretchFactor(1, 1);
 
@@ -491,6 +491,9 @@ void MainWindow::onBrowsePeerRequested(const QString &peerId, const QString &pee
     }
     if (!core_->busy())
     {
+        // busy 为假 = 没有常驻接收会话可搭车。写日志再弹窗：弹窗关掉之后
+        // 日志里还得留得下线索，否则事后无从判断"当时到底连没连上"。
+        log_->appendLog(QStringLiteral("[浏览] 没有常驻会话，无法浏览 %1（请先连接）\n").arg(peerId));
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请先连接中继——浏览对端要走常驻接收会话。"));
         return;
     }
@@ -498,6 +501,12 @@ void MainWindow::onBrowsePeerRequested(const QString &peerId, const QString &pee
     // 不做独立窗口——那样会把表格/导航/筛选复制一遍，且以后做本地↔远端
     // 拖拽时两个窗口之间没有共享状态可用。
     remoteExplorer_->setRemotePeer(peerId, peerName);
+    // 标题带对端名：切换成功与否一眼可见（面板内容可能因对方未开共享而为空，
+    // 只靠表格判断不了"到底切没切"）。
+    if (remoteBox_)
+    {
+        remoteBox_->setTitle(QStringLiteral("远端 —— %1").arg(peerName.isEmpty() ? peerId : peerName));
+    }
     log_->appendLog(QStringLiteral("[浏览] 远端面板切到 %1 的共享目录\n").arg(peerId));
 }
 

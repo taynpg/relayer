@@ -12,6 +12,8 @@ class MainWindow;
 }
 QT_END_NAMESPACE
 
+class QGroupBox;
+
 class ConnectorControl;
 class ComparisonControl;
 class ExplorerControl;
@@ -85,6 +87,7 @@ private:
     LogControl *log_;
     ExplorerControl *explorer_ = nullptr;        // 本地
     ExplorerControl *remoteExplorer_ = nullptr;  // 远端（同一个类，换数据源）
+    QGroupBox *remoteBox_ = nullptr;             // 标题带对端名，切换时一眼可见
     ComparisonControl *comparison_ = nullptr;
     relayer::app::RelayTaskControl *taskControl_ = nullptr;
 

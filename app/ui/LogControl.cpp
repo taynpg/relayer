@@ -11,7 +11,6 @@
 using relayer::app::settings::kReceiverDir;
 using relayer::app::settings::kReceiverOverwrite;
 using relayer::app::settings::kReceiverOverwriteDefault;
-using relayer::app::settings::kReceiverShareRoot;
 
 namespace
 {
@@ -60,23 +59,9 @@ void LogControl::initMenu()
                 emit receiveDirChanged(dir);
             });
 
-    // 共享目录（PROTOCOL.md §11.8）：允许对端列举哪个目录。
-    // 与"接收目录"分开：接收目录是往里写，共享目录是让人看——两者不必然
-    // 是同一个地方，合起来会让"我只想让人看某个子目录"做不到。
-    auto *acShare = menu->addAction(QStringLiteral("设置共享目录（供对端列举）..."));
-    connect(acShare, &QAction::triggered, this,
-            [this]()
-            {
-                QSettings settings;
-                const QString current = settings.value(kReceiverShareRoot).toString();
-                const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("设置共享目录"), current);
-                if (dir.isEmpty())
-                {
-                    return;
-                }
-                settings.setValue(kReceiverShareRoot, dir);
-                appendLog(QStringLiteral("[共享] 对端可以列举 %1\n").arg(dir));
-            });
+    // 共享目录**不在这里**：它是"给别人看什么"，与"往哪写"是两个概念，
+    // 入口统一放在「设定」对话框（Setting.ui 的 gbShare），避免同一设置
+    // 两个入口、改了一处以为生效。
 
     // 接收覆盖开关。默认开：反复把同一个文件发到对方同一目录是核心
     // 场景，拒绝覆盖会让第二次发送起永远失败。关掉则恢复"目标已存在

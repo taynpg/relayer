@@ -190,6 +190,19 @@ struct ClientConfig
     // 提前结束并报错。
     std::string selfSendPath;
 
+    // 自检列举（recv --self-browse）：在**常驻接收会话**上向自己发一次
+    // kAskFileList，列完即退出。
+    //
+    // 存在的理由：GUI 的远端浏览走 `Client::browseOnSession`——请求搭在
+    // kReceive 会话上；而 CLI 的 `ls` 走 `browsePeer`（一次性连接）。两条
+    // 路不是同一份代码，只测 `ls` 覆盖不到 GUI 那条。这个开关让"接收会话
+    // 上发列举"能被 e2e 跑到（自投把请求与应答都绕回本连接，同时覆盖了
+    // 服务端应答侧与客户端请求侧）。
+    //
+    // 与 selfSendPath 互斥：两个自检都想在列/传完后结束进程，同时给会让
+    // 退出条件含糊。
+    bool selfBrowse = false;
+
     // 远端目录列举的共享根（PROTOCOL.md §11.8）。空 = **不响应**列举请求。
     //
     // 只有这个目录之下的内容能被对端看到：请求里的路径一律按"相对该根"

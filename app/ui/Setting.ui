@@ -95,6 +95,53 @@
     </widget>
    </item>
    <item>
+    <widget class="QGroupBox" name="gbShare">
+     <property name="title">
+      <string>共享（供对端浏览目录）</string>
+     </property>
+     <layout class="QVBoxLayout" name="verticalLayout_4">
+      <item>
+       <widget class="QLabel" name="lblShareHint">
+        <property name="text">
+         <string>留空表示不响应。只有这里指定的目录才会被对端列举：只列一层、只读、路径越界一律拒绝（PROTOCOL.md §11.8）。</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="horizontalLayout_4">
+        <item>
+         <widget class="QLineEdit" name="edShareRoot">
+          <property name="readOnly">
+           <bool>true</bool>
+          </property>
+          <property name="placeholderText">
+           <string>（未共享）</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="btnShareBrowse">
+          <property name="text">
+           <string>浏览…</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="btnShareClear">
+          <property name="text">
+           <string>清除</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <spacer name="verticalSpacer">
      <property name="orientation">
       <enum>Qt::Orientation::Vertical</enum>

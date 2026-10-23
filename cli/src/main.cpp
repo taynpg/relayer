@@ -56,6 +56,7 @@ void printUsage()
                 "                           （与 --password 互斥；不自动推断，防止漏填口令静默降级）\n"
                 "      --id <name>          声明本机标识（重连后保持不变；被别人占用则连接失败）\n"
                 "      --self-send <file>   自检：recv 时把这个文件发给自己（验完整链路）\n"
+                "      --self-browse        自检：recv 时在接收会话上列一次自己的共享根\n"
                 "      --share <dir>        recv 时允许对端列举这个目录（不给则不响应）\n"
                 "      --path <rel>         ls 的相对路径（相对对端共享根，默认根目录）\n"
                 "      --chunk-size <bytes> 分块大小（默认 256 KiB，上限 4 MiB）\n"
@@ -333,6 +334,13 @@ ParseResult parseArgs(int argc, char **argv)
                 return r;
             }
         }
+        else if (a == "--self-browse")
+        {
+            // 自检列举：recv 时在**接收会话上**向自己要一次目录。走的是 GUI
+            // 远端浏览那条路（browseOnSession），CLI 的 ls 走的是另一条
+            // （一次性连接），两条不能互相替代。
+            r.args.config.selfBrowse = true;
+        }
         else if (a == "--path")
         {
             if (!takeValue(a, r.args.path))
@@ -388,6 +396,18 @@ ParseResult parseArgs(int argc, char **argv)
     {
         // 自检发送是"接收会话上搭车发送"，只有 recv 有接收会话。
         r.error = "--self-send 只能与 recv 一起用";
+        return r;
+    }
+    if (r.args.config.selfBrowse && r.args.command != "recv")
+    {
+        // 同理：要搭在接收会话上。
+        r.error = "--self-browse 只能与 recv 一起用";
+        return r;
+    }
+    if (r.args.config.selfBrowse && !r.args.config.selfSendPath.empty())
+    {
+        // 两者都靠"做完就退出"，同时给会让退出条件含糊（列完就退还是传完才退）。
+        r.error = "--self-browse 与 --self-send 不能同时使用";
         return r;
     }
 
@@ -529,7 +549,9 @@ int main(int argc, char **argv)
 
     // ls 的契约输出：先一行机器可读的汇总，再逐条。e2e 断言靠这些行，
     // 所以格式固定（不用本地化文案）。
-    if (a.command == "ls" && outcome.ok)
+    // --self-browse 用同一套格式：它验的是 GUI 那条路，但结论同样是"一个
+    // 目录列举结果"，让 e2e 用同一组断言比对两种情况才有可比性。
+    if ((a.command == "ls" || a.config.selfBrowse) && outcome.ok)
     {
         std::printf("REMOTE_LIST status=%d count=%zu\n", static_cast<int>(outcome.listStatus),
                     outcome.remoteEntries.size());

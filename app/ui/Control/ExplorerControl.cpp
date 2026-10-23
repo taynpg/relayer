@@ -164,8 +164,12 @@ void ExplorerControl::enterPath(const QString &path)
         const QString rel = path;
         remotePendingPath_ = rel;
         // 先显示"要去的地方"，回来再以 currentPath_ 为准（失败时停在原地）。
-        ui_->cbPath->setCurrentText(QStringLiteral("%1:/%2").arg(peerId_, rel));
+        // 用 showPath 而不是 setCurrentText：后者在不可编辑的 QComboBox 上
+        // 对不存在的项是静默空操作，界面会看起来毫无反应。
+        showPath(QStringLiteral("%1:/%2").arg(peerId_, rel));
         table_->setRowCount(0);
+        setStatus(QStringLiteral("正在读取 %1 …（对端离线时约 10 秒后超时）")
+                      .arg(rel.isEmpty() ? QStringLiteral("<共享根>") : rel));
         emit notice(
             QStringLiteral("[浏览] 读取 %1:%2 …").arg(peerId_, rel.isEmpty() ? QStringLiteral("<共享根>") : rel));
         emit remoteListRequested(peerId_, rel);
@@ -188,6 +192,18 @@ void ExplorerControl::enterPath(const QString &path)
     ui_->cbPath->setCurrentText(cleaned);
     updateExtOptions();
     rebuildView();
+
+    // 本地面板也给状态：两栏并排时，一边有字数统计、一边空白会让人以为
+    // 另一边没在工作。
+    int dirs = 0;
+    for (const auto &e : items)
+    {
+        if (e.isDir)
+        {
+            ++dirs;
+        }
+    }
+    setStatus(QStringLiteral("%1 项（%2 个目录，%3 个文件）").arg(items.size()).arg(dirs).arg(items.size() - dirs));
 }
 
 void ExplorerControl::onEnter()
@@ -264,6 +280,21 @@ void ExplorerControl::onDoubleClick(int row)
     enterPath(QDir(currentPath_).filePath(nameItem->text()));
 }
 
+void ExplorerControl::showPath(const QString &text)
+{
+    // 远端模式 cbPath 不可编辑：setCurrentText 在非可编辑的 QComboBox 上
+    // 只查已有项，查不到就静默忽略。改成"清空 + 加一项 + 选中"。
+    ui_->cbPath->clear();
+    ui_->cbPath->addItem(text);
+    ui_->cbPath->setCurrentIndex(0);
+}
+
+void ExplorerControl::setStatus(const QString &text, bool error)
+{
+    ui_->lblStatus->setText(text);
+    ui_->lblStatus->setStyleSheet(error ? QStringLiteral("color: #c0392b;") : QString());
+}
+
 QString ExplorerControl::displayPath() const
 {
     if (source_ == Source::Local)
@@ -294,14 +325,15 @@ void ExplorerControl::setRemotePeer(const QString &peerId, const QString &peerNa
     ui_->btnHome->setText(QStringLiteral("共享根"));
     ui_->filterWidget->setVisible(ui_->btnFilter->isChecked());
 
-    ui_->cbPath->setCurrentText(displayPath());
+    showPath(displayPath());
     rebuildView();
 
     if (peerId_.isEmpty())
     {
         // 远端面板常驻显示（v1 是本地/远端各占一半），未选对端时也要有
         // 明确状态，否则看起来像坏了。
-        ui_->cbPath->setCurrentText(QStringLiteral("<未选择对端>"));
+        showPath(QStringLiteral("<未选择对端>"));
+        setStatus(QStringLiteral("未选择对端——在上方对端表右键「浏览此对端的目录」。"));
         return;
     }
     enterPath(QString());
@@ -334,7 +366,8 @@ void ExplorerControl::applyRemoteEntries(bool ok, const QString &summary, const 
         // 失败时不要停在"没进去的目录"上：路径保持原样，表格清空并说明原因。
         entries_.clear();
         rebuildView();
-        ui_->cbPath->setCurrentText(displayPath());
+        showPath(displayPath());
+        setStatus(summary, true);
         emit notice(QStringLiteral("[浏览] %1").arg(summary));
         return;
     }
@@ -351,9 +384,21 @@ void ExplorerControl::applyRemoteEntries(bool ok, const QString &summary, const 
         e.modifiedMs = r.mtime > 0 ? r.mtime * 1000 : 0;
         entries_.push_back(e);
     }
-    ui_->cbPath->setCurrentText(displayPath());
+    showPath(displayPath());
     updateExtOptions();
     rebuildView();
+
+    int dirs = 0;
+    for (const auto &e : entries_)
+    {
+        if (e.isDir)
+        {
+            ++dirs;
+        }
+    }
+    setStatus(
+        QStringLiteral("%1 项（%2 个目录，%3 个文件）").arg(entries_.size()).arg(dirs).arg(entries_.size() - dirs));
+    emit notice(QStringLiteral("[浏览] %1 共 %2 项").arg(displayPath()).arg(entries_.size()));
 }
 
 void ExplorerControl::onHeaderClicked(int index)

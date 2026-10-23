@@ -140,6 +140,15 @@ private:
     // 远端模式下把 relPath 显示成 `peer:/rel`（用户要能一眼看出这是远端）。
     [[nodiscard]] QString displayPath() const;
 
+    // 把路径写进 cbPath。**不能用 setCurrentText**：远端模式 cbPath 不可编辑，
+    // 非可编辑的 QComboBox 只会在已有项里查找，找不到就什么都不做——这正是
+    // "点了浏览但控件毫无变化"的根因（路径框停在旧值，表格本来就是空的）。
+    void showPath(const QString &text);
+
+    // 状态行。每一次列举都必须留下可见结果（读取中 / 共 N 项 / 失败原因），
+    // 否则失败与"没反应"在界面上无法区分。
+    void setStatus(const QString &text, bool error = false);
+
     Ui::ExplorerControl *ui_ = nullptr;
     ExpDropTable *table_ = nullptr;  // 表格本体由 initControl 动态创建，塞进 .ui 的占位 widget
 

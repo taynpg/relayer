@@ -780,6 +780,36 @@ def remote_list(workdir: Path, bin_dir: Path) -> None:
         c.shutdown()
 
 
+@scenario("self-browse", "接收会话上自检列举（GUI 远端浏览的同一条代码路径）")
+def self_browse(workdir: Path, bin_dir: Path) -> None:
+    """GUI 的远端浏览走 `Client::browseOnSession`：请求搭在 kReceive 会话上，
+    不是新开连接（新开连接会顶掉常驻接收会话、换掉本机 id）。CLI 的 `ls`
+    走的是 `browsePeer`（一次性连接），**两条路不是同一份代码**，只测 `ls`
+    覆盖不到 GUI 那条。
+
+    这里用自投（to == 自己 id，§11.3.1）把请求与应答都绕回本连接，于是
+    一个进程同时充当"问的人"和"答的人"，把 browseOnSession + serveFileList
+    在同一会话上并存这件事也验了。
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        share = workdir / "share"
+        (share / "sub").mkdir(parents=True, exist_ok=True)
+        (share / "a.txt").write_bytes(b"hello")
+
+        proc = c.cli("self-browse", "recv", "--to-dir", str(c.dst), *c.cli_common(), "--id", "me",
+                     "--share", str(share), "--self-browse", "--hard-timeout", "20")
+        expect_eq(proc.wait_exit(40), 0, "自检列举的退出码")
+        out = "\n".join(proc.pill())
+        # 与 ls 同一套契约输出：证明这条路给出的结果和一次性连接那条一致。
+        expect("REMOTE_LIST status=0 count=2" in out, f"自检列举汇总不对：{out}")
+        expect("D  sub" in out, f"没列到子目录：{out}")
+        expect("F  5  a.txt" in out, f"没列到文件或大小不对：{out}")
+    finally:
+        c.shutdown()
+
+
 @scenario("one-byte", "1 字节文件正常完成")
 def one_byte(workdir: Path, bin_dir: Path) -> None:
     _transfer_roundtrip(workdir, bin_dir, 1)

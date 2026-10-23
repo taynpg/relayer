@@ -127,6 +127,11 @@ struct Client::Impl
 
     // 自检发送已启动（见 ClientConfig::selfSendPath）。
     bool selfSendStarted = false;
+    // 自检列举已发起（见 ClientConfig::selfBrowse）。
+    bool selfBrowseStarted = false;
+    // 会话内列举出过结论。finish() 据此把结果搬进 Outcome——action 是
+    // kReceive（自检列举）时不满足 `action == Action::kBrowse` 那个条件。
+    bool browseDone = false;
 
     std::string assignedId;
 
@@ -209,7 +214,7 @@ struct Client::Impl
                     o.peerList.push_back(PeerEntry{p.id, p.address});
                 }
             }
-            else if (action == Action::kBrowse)
+            else if (action == Action::kBrowse || browseDone)
             {
                 o.remoteEntries = remoteEntries;
                 o.listStatus = listStatus;
@@ -514,6 +519,26 @@ struct Client::Impl
                 {
                     finish(false, "自检发送未能启动（接收会话不可用）",
                            Status::Fail(ErrorCode::kUnknown, "self-send unavailable"), false);
+                }
+            }
+
+            // 自检列举：在接收会话上向自己要一份目录（GUI 远端浏览的同一条
+            // 路径——请求搭在 kReceive 会话上，而不是新开连接）。自投让请求
+            // 与应答都绕回本连接，所以一个进程就把服务端应答侧也验了。
+            if (action == Action::kReceive && identityFinal && config.selfBrowse && !selfBrowseStarted)
+            {
+                selfBrowseStarted = true;
+                const bool started = startBrowseOnSession(
+                    assignedId, std::string(),
+                    [this](const Outcome &o)
+                    {
+                        // 列完就结束：这是自检，不是长期接收。
+                        finish(o.ok, o.summary, o.status, false);
+                    });
+                if (!started)
+                {
+                    finish(false, "自检列举未能启动（接收会话不可用或正忙）",
+                           Status::Fail(ErrorCode::kUnknown, "self-browse unavailable"), false);
                 }
             }
         };
@@ -892,6 +917,7 @@ struct Client::Impl
             return;
         }
         browseActive = false;
+        browseDone = true;
         browseTimer.cancel();
         auto done = std::move(onBrowseDone);
         onBrowseDone = nullptr;
