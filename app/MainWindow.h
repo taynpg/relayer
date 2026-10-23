@@ -55,6 +55,7 @@ private slots:
     void onSendFinished(bool ok, const QString &summary, const QString &detail);
     void onAssignedIdChanged(const QString &id);
     void onProbeRequested(const relayer::app::ConnInfo &conn);
+    void onDisconnectRequested();
     void onTransTaskRun(const relayer::app::RelayTaskItems &items);
 
 private:

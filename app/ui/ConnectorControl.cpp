@@ -71,9 +71,38 @@ void ConnectorControl::initButtons()
             });
 
     connect(ui_->btnConnect, &QPushButton::clicked, this, &ConnectorControl::onConnectClicked);
-    connect(ui_->btnDisconnect, &QPushButton::clicked, this, &ConnectorControl::onClearClicked);
+    connect(ui_->btnDisconnect, &QPushButton::clicked, this, &ConnectorControl::onDisconnectClicked);
     connect(ui_->btnRefresh, &QPushButton::clicked, this, &ConnectorControl::onRefreshClicked);
     connect(ui_->btnAboutQt, &QPushButton::clicked, this, []() { QApplication::aboutQt(); });
+
+    updateConnectionButtons();
+}
+
+void ConnectorControl::updateConnectionButtons()
+{
+    // 【连接】在"已连上"或"正在连"时都禁用：
+    //   - 已连上：再点一次会新开连接、消耗一个新 id 并顶掉常驻会话，
+    //     正是文档里反复警告的"点一次刷新 id 涨一号"那类回归；
+    //   - 正在连：连点会在握手中途再发一次探测，纯属添乱。
+    // 换中继地址的路径是【断开】→【连接】，tooltip 里写明。
+    const bool busy = core_ != nullptr && core_->busy();
+    ui_->btnConnect->setEnabled(!connected_ && !busy);
+
+    // 【断开】只看 connected_：它在会话活着时常驻可用，哪怕正有传输在跑
+    // （中止就是用户的意图）。此前按 busy 禁用，而连接成功后 busy 恒为
+    // true，等于永远点不动——那才是真问题。
+    ui_->btnDisconnect->setEnabled(connected_);
+
+    if (connected_)
+    {
+        ui_->btnConnect->setToolTip(
+            QStringLiteral("已连接（id=%1）。刷新对端列表请用「刷新」；要换中继地址请先「断开」")
+                .arg(ui_->lineEdit->text()));
+    }
+    else
+    {
+        ui_->btnConnect->setToolTip(QString());
+    }
 }
 
 void ConnectorControl::initAuth()
@@ -181,13 +210,32 @@ void ConnectorControl::onConnectClicked()
     saveIpHistory(text);
 }
 
-void ConnectorControl::onClearClicked()
+void ConnectorControl::clearPeerView()
 {
     ui_->tableClients->setRowCount(0);
     ui_->edCurrentClient->setText(QString());
     ui_->lineEdit->setText(QString());
+    ui_->lineEdit->setStyleSheet(QString());
     currentPeerId_.clear();
     onlineIds_.clear();
+}
+
+void ConnectorControl::onDisconnectClicked()
+{
+    if (!connected_)
+    {
+        return;
+    }
+    // 先落本地状态再发信号：MainWindow 关会话之后 operationFinished 会回来，
+    // 那时 connected_ 已经 false，重复置位无害；反过来先发信号的话，中间
+    // 那一小段时间按钮还是禁用态。
+    connected_ = false;
+    updateConnectionButtons();
+    clearPeerView();
+
+    // 会话的关闭交给 MainWindow：只有它知道自动接收的状态机（receiveWanted_）。
+    // 在这里直接 cancelCurrent 而不清那个开关，断开后会立刻被自动重连回来。
+    emit disconnectRequested();
 }
 
 void ConnectorControl::onRefreshClicked()
@@ -199,17 +247,36 @@ void ConnectorControl::onRefreshClicked()
 
 void ConnectorControl::onBusyChanged(bool busy)
 {
-    // 连接/刷新按钮**不再随 busy 禁用**：v2 的"在线"由自动接收循环维持，
-    // 接收挂起期间 busy 恒为 true，禁用会让用户永远点不了刷新（实测如此）。
-    // CoreService 已能抢占挂起的接收，传输中再点会收到明确提示。
-    // 断开按钮保留 busy 禁用：它要动对端表，探测中途清表会跟结果渲染打架。
-    ui_->btnDisconnect->setEnabled(!busy);
+    // 只影响按钮可用性，没有别的状态要维护（详见 updateConnectionButtons：
+    // 【连接】按"已连接 / 正在连"禁用，【断开】按"已连接"启用）。
+    Q_UNUSED(busy);
+    updateConnectionButtons();
 }
 
 void ConnectorControl::onAssignedIdChanged(const QString &id)
 {
     ui_->lineEdit->setText(id);
     ui_->lineEdit->setStyleSheet(QStringLiteral("color: black;"));
+
+    // 空 id 是"认证刚过、服务端还没分配"的中间态（ClientConfig::onIdAssigned
+    // 的契约：可能先给空串）。只有拿到真 id 才算连接成功。
+    if (!id.isEmpty())
+    {
+        connected_ = true;
+        updateConnectionButtons();
+    }
+}
+
+void ConnectorControl::onOperationFinished(bool ok)
+{
+    // 任何一种"会话结束"（用户断开、中继挂了、认证被拒、一次性操作收尾）
+    // 都会走到这里：常驻会话已经不在，【连接】恢复可用。
+    Q_UNUSED(ok);
+    if (connected_)
+    {
+        connected_ = false;
+        updateConnectionButtons();
+    }
 }
 
 void ConnectorControl::onPeerListReceived(const QList<PeerRow> &rows)
@@ -287,6 +354,8 @@ void ConnectorControl::attachCoreService(relayer::app::CoreService *core)
     connect(core, &relayer::app::CoreService::busyChanged, this, &ConnectorControl::onBusyChanged);
     connect(core, &relayer::app::CoreService::assignedIdChanged, this, &ConnectorControl::onAssignedIdChanged);
     connect(core, &relayer::app::CoreService::peerListReceived, this, &ConnectorControl::onPeerListReceived);
+    // 会话结束（成功收尾/失败/用户断开）→ 连接按钮恢复可用。
+    connect(core, &relayer::app::CoreService::operationFinished, this, &ConnectorControl::onOperationFinished);
     // operationFinished 的日志由 MainWindow 统一出口，这里不接（接了
     // 会把同一行结论打两遍）。
 }

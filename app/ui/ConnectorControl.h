@@ -18,8 +18,12 @@ QT_END_NAMESPACE
 // 与 v1 的语义差异（这是 v2 结构性决定，不是偷懒）：
 //   - v1 有一条常驻控制连接，"连接/断开"管着它的生死；v2 的 Client 是
 //     一次操作一条连接（服务端无状态、可水平扩展，见 REWRITE-PLAN 6.1）。
-//     所以"连接"在 v2 里是**探测**（连上去拉一次在线列表，拿回自己的 id），
-//     "断开"是**清除**（清空对端列表与选中对象）。
+//     GUI 的"连接"= 建立**常驻接收会话**（拿到 id 后一直挂着等文件）。
+//   - 连接成功后【连接】按钮禁用（用户要求）：会话已经是常驻的，再点一次
+//     只会白耗一个服务端 id 并顶掉当前会话。要换中继地址必须先【断开】。
+//     【刷新】不受影响——它在现有会话上问一次列表，id 不变。
+//   - 【断开】= 真的结束会话（经 disconnectRequested 交给 MainWindow 处理：
+//     它持有自动接收状态机，本控件不知道"断开后该不该重连"）。
 //   - 自动接收由 MainWindow 负责（收到 assignedId 后挂起等文件），本控件
 //     只负责显示与选择。
 //
@@ -57,6 +61,11 @@ signals:
     // 自动接收复用（CoreService 一次一个操作，每次操作都要重新给参数）。
     void probeRequested(const relayer::app::ConnInfo &conn);
 
+    // 用户点了"断开"：请求结束常驻会话。由 MainWindow 落手，因为只有它
+    // 知道自动接收的状态机（receiveWanted_），直接在这里取消会被自动
+    // 重连回来。
+    void disconnectRequested();
+
     // 连接/探测的结论，交给日志面板显示。
     void logMessage(const QString &msg);
 
@@ -68,7 +77,7 @@ public:
 
 private slots:
     void onConnectClicked();
-    void onClearClicked();
+    void onDisconnectClicked();
     void onRefreshClicked();
     void onTableContextMenu(const QPoint &pos);
 
@@ -80,14 +89,26 @@ private:
     void saveIpHistory(const QString &ipPort);
     bool parseHostPort(const QString &text, QString &host, quint16 &port) const;
 
+    // 只用对端表/选中对象，不动会话（断开时清显示）。
+    void clearPeerView();
+
+    // 【连接】/【断开】的可用状态唯一出口：任何影响 connected_/busy_ 的
+    // 事件之后都调它，避免状态散成几处各改一个按钮。
+    void updateConnectionButtons();
+
     // ---- CoreService 信号 ----
     void onBusyChanged(bool busy);
     void onAssignedIdChanged(const QString &id);
+    void onOperationFinished(bool ok);
     void onPeerListReceived(const QList<relayer::app::PeerRow> &rows);
 
     Ui::ConnectorControl *ui_;
     relayer::app::CoreService *core_;
     QString currentPeerId_;
+
+    // 常驻会话已建立（拿到非空 id）。空 id 是"认证刚过、id 还没分配"的
+    // 中间态，不算连接成功。
+    bool connected_ = false;
 
     // 最近一次 kAnswerClientList 的 id 集合（含自己）。任务入口用它做
     // "填了对端但它不在线"的提示。

@@ -9,6 +9,7 @@
 #include <asio/io_context.hpp>
 
 #include "relayer/cli/Client.h"
+#include "relayer/common/Console.h"
 
 // relayer-cli 的入口。
 //
@@ -370,6 +371,13 @@ ParseResult parseArgs(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+    // 同 relayerd：先修终端编码再输出任何东西。本文件目前全用 printf 系
+    // （用法、报错、进度行），关键是 use_utf8_locale()；init() 一并调用，
+    // 这样以后加 std::cout 输出时不必记得回来补一句。
+    // 重定向场景字节不变，e2e 的 ASSIGNED_ID= / STATS 契约行不受影响。
+    relayer::console::init();
+    relayer::console::use_utf8_locale();
+
     const auto parsed = parseArgs(argc, argv);
     if (!parsed.ok)
     {

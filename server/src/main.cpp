@@ -8,6 +8,7 @@
 #include <asio/io_context.hpp>
 #include <asio/signal_set.hpp>
 
+#include "relayer/common/Console.h"
 #include "relayer/server/Server.h"
 
 // relayerd 的入口。
@@ -223,6 +224,14 @@ ParseResult parseArgs(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+    // 终端编码先修好再输出任何东西：下面所有中文报错都是 UTF-8 字节串，
+    // 而 Windows 控制台默认按代码页（中文系统 GBK）解释字节，不修就是乱码。
+    // init() 管 C++ 流，use_utf8_locale() 管 printf 系（本文件全用 printf，
+    // 两个都不能省）。输出被重定向到文件/管道时，两者都不改变字节——
+    // e2e 抓 "已启动" 契约行因此不受影响。
+    relayer::console::init();
+    relayer::console::use_utf8_locale();
+
     const auto parsed = parseArgs(argc, argv);
     if (!parsed.ok)
     {

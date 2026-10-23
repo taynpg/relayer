@@ -110,6 +110,7 @@ void MainWindow::wireSignals()
     connect(connector_, &ConnectorControl::sendToPeerRequested, this, &MainWindow::onSendToPeer);
     connect(connector_, &ConnectorControl::logMessage, log_, &LogControl::appendLog);
     connect(connector_, &ConnectorControl::probeRequested, this, &MainWindow::onProbeRequested);
+    connect(connector_, &ConnectorControl::disconnectRequested, this, &MainWindow::onDisconnectRequested);
 
     connect(comparison_, &ComparisonControl::logMessage, log_, &LogControl::appendLog);
     connect(comparison_, &ComparisonControl::exploreLocalRequested, explorer_,
@@ -184,6 +185,32 @@ void MainWindow::onProbeRequested(const relayer::app::ConnInfo &conn)
         return;
     }
     startAutoReceive();
+}
+
+// 用户在连接面板点了「断开」：真的结束常驻会话。
+//
+// 为什么不在 ConnectorControl 里直接 cancelCurrent：只有这里知道自动接收
+// 的状态机。不清 receiveWanted_ 的话，abort 引发的 operationFinished 会被
+// 下面的重试/重挂逻辑当成"接收会话失败"，立刻把连接又拉起来——用户会看到
+// "断开之后自己连回去了"。
+void MainWindow::onDisconnectRequested()
+{
+    receiveWanted_ = false;
+    receiveRetries_ = 0;
+
+    if (taskControl_->isRunning())
+    {
+        // 批次进行中：交给 stopBatch——它把当前项硬取消、剩余项标已取消、
+        // 收尾批次并通知恢复自动接收（此时 receiveWanted_ 已是 false，
+        // 那个通知不会真的重挂）。
+        taskControl_->stopBatch();
+    }
+    else
+    {
+        // abort 同语义：关闭会话、不发 cancel 帧；onDone 带回"中止"。
+        core_->cancelCurrent();
+    }
+    log_->appendLog(QStringLiteral("[连接] 已断开（会话结束，本机 id 作废）\n"));
 }
 
 void MainWindow::onAssignedIdChanged(const QString &id)
