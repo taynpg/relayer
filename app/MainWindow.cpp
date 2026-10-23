@@ -143,9 +143,9 @@ void MainWindow::wireSignals()
     connect(connector_, &ConnectorControl::disconnectRequested, this, &MainWindow::onDisconnectRequested);
     connect(connector_, &ConnectorControl::browsePeerRequested, this, &MainWindow::onBrowsePeerRequested);
     connect(remoteExplorer_, &ExplorerControl::remotePullRequested, this,
-            [this](const QString &peer, const QString &relPath)
+            [this](const QString &peer, const QString &relPath, bool asArchive)
             {
-                if (!core_->pullFileFromPeer(peer, relPath))
+                if (!core_->pullFileFromPeer(peer, relPath, asArchive))
                 {
                     log_->appendLog(QStringLiteral("[取回] %1：当前不能取回（未连接或正在传输）\n").arg(relPath));
                     remoteExplorer_->applyRemoteEntries(false, QStringLiteral("当前不能取回（会话不可用或正在传输）"),

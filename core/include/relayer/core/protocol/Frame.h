@@ -93,6 +93,11 @@ enum class FrameType : std::uint16_t
     kAskFilePull = 135,
     kAnswerFilePull = 136,
 
+    // 目录取回（PROTOCOL.md §11.10）：请对端把某个**目录**打包成 tar.xz
+    // 再发给我。应答复用 kAnswerFilePull（结论是同一类：接受/不存在/拒绝），
+    // 包本身走普通推流程。
+    kAskArchivePull = 137,
+
     // --- 文件传输会话管理（500..549） ---
     kFileRequestSend = 500,
     kFileAnswerSend = 501,

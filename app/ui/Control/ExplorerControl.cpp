@@ -650,19 +650,36 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
         const bool isFile = singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir");
         const QString peer = peerId_;
 
-        auto *pull = menu.addAction(QStringLiteral("下载到接收目录"));
-        // 目录不行：归档还没实现（§11.9.5），点了只会得到"对端没有这个文件"，
-        // 不如直接禁用并写明原因。
-        pull->setEnabled(isFile && !isPathLikeName(name));
-        pull->setToolTip(isFile ? QStringLiteral("文件会落到本机的接收目录")
-                                : QStringLiteral("目录暂不支持（需要先实现打包归档）"));
-        connect(pull, &QAction::triggered, this,
-                [this, peer, name]()
-                {
-                    const QString rel = joinRel(currentPath_, name);
-                    emit remotePullRequested(peer, rel);
-                    setStatus(QStringLiteral("已请求取回 %1 …").arg(rel));
-                });
+        // 文件走 §11.9（原样发），目录走 §11.10（对端打包成 tar.xz）。
+        // 分两项而不是一项自适应：两者的结果不一样——目录拿到的是一个包，
+        // 用户需要知道这件事，否则会以为文件没解压。
+        if (isFile)
+        {
+            auto *pull = menu.addAction(QStringLiteral("下载到接收目录"));
+            pull->setEnabled(!isPathLikeName(name));
+            pull->setToolTip(QStringLiteral("文件会落到本机的接收目录"));
+            connect(pull, &QAction::triggered, this,
+                    [this, peer, name]()
+                    {
+                        const QString rel = joinRel(currentPath_, name);
+                        emit remotePullRequested(peer, rel, false);
+                        setStatus(QStringLiteral("已请求取回 %1 …").arg(rel));
+                    });
+        }
+        else
+        {
+            auto *pullDir = menu.addAction(QStringLiteral("下载目录（打包为 tar.xz）"));
+            pullDir->setEnabled(singleRow && !isPathLikeName(name));
+            pullDir->setToolTip(QStringLiteral("对端会把它压缩成一个 .tar.xz 发过来，\n"
+                                               "落到接收目录；本版不自动解包"));
+            connect(pullDir, &QAction::triggered, this,
+                    [this, peer, name]()
+                    {
+                        const QString rel = joinRel(currentPath_, name);
+                        emit remotePullRequested(peer, rel, true);
+                        setStatus(QStringLiteral("已请求打包 %1（对方压缩中，可能要几秒）…").arg(rel));
+                    });
+        }
 
         connect(menu.addAction(QStringLiteral("刷新")), &QAction::triggered, this,
                 [this]() { enterPath(currentPath_); });

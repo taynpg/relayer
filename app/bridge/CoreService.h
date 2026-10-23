@@ -143,7 +143,9 @@ public:
     // 在常驻会话上请对端把某个文件发过来（PROTOCOL.md §11.9）。
     // relPath 相对对端共享根。文件会落到本机的接收目录——落点由本机配置
     // 决定，共享方无权指定（协议里这条是写死的）。
-    bool pullFileFromPeer(const QString &peerId, const QString &relPath);
+    // asArchive=true：relPath 指向**目录**，请对端打包成 tar.xz（§11.10）。
+    // 归档请求要等对端压缩完才回应答，超时是 120 秒。
+    bool pullFileFromPeer(const QString &peerId, const QString &relPath, bool asArchive);
 
     // 中止当前操作（硬停：不发 cancel 帧，与 CLI 的 abort 同语义）。
     void cancelCurrent();

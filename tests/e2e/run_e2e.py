@@ -33,6 +33,7 @@ import os
 import shutil
 import socket
 import subprocess
+import tarfile
 import sys
 import tempfile
 import time
@@ -861,9 +862,71 @@ def pull_file(workdir: Path, bin_dir: Path) -> None:
         expect(rc != 0, "`..` 越界竟然取回成功——共享根形同虚设")
         expect("拒绝取回" in out, f"越界应当报 kRejected：{out}")
 
-        rc, out = pull("pull-dir", "sub")
+        rc, out = pull("pull-on-dir", "sub")
         expect(rc != 0, "取回目录竟然成功（归档还没实现）")
         expect("对端没有这个文件" in out, f"目录应当报 kNotFound：{out}")
+    finally:
+        c.shutdown()
+
+
+@scenario("pull-dir", "目录取回：对端打包成 tar.xz，解开后条目与内容一致")
+def pull_dir(workdir: Path, bin_dir: Path) -> None:
+    """PROTOCOL.md §11.10 的端到端验收。
+
+    取目录不让请求方逐个文件要（那是 N 次往返，还有"列完了对方又变了"的
+    竞态），而是让对端**先打包再一次发过来**。所以这里必须真的把包解开看
+    内容 —— 只断言"收到一个文件"证明不了包是对的。
+
+    四条断言：
+      1. 取回成功，落到接收目录的是 `<目录名>.tar.xz`；
+      2. 包内条目与源目录一致，**含空目录**（只收文件会让解出来少几个目录）；
+      3. 嵌套文件的内容逐字节一致；
+      4. `--pull-dir` 指向文件、以及 `..` 越界，都必须明确拒绝。
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        share = workdir / "share"
+        sub = share / "sub"
+        (sub / "nested").mkdir(parents=True, exist_ok=True)
+        (sub / "empty").mkdir(parents=True, exist_ok=True)
+        (sub / "a.txt").write_bytes(b"alpha-content")
+        (sub / "nested" / "b.bin").write_bytes(b"beta-content-123")
+
+        bob = c.cli("recv-bob", "recv", "--to-dir", str(c.dst), *c.cli_common(), "--id", "bob",
+                    "--share", str(share), "--hard-timeout", "120", "--idle-timeout", "120")
+        bob.wait_for(ASSIGNED_PREFIX, 20.0)
+
+        dst_a = workdir / "dst-a"
+        dst_a.mkdir()
+
+        def pull_dir_cmd(tag: str, path: str) -> tuple[int, str]:
+            p = c.cli(tag, "recv", "--to-dir", str(dst_a), *c.cli_common(), "--id", tag,
+                      "--pull-from", "bob", "--pull-dir", path, "--hard-timeout", "40")
+            return p.wait_exit(60), "\n".join(p.pill())
+
+        rc, out = pull_dir_cmd("dir-ok", "sub")
+        expect_eq(rc, 0, f"取回目录应当成功：{out}")
+
+        archive = dst_a / "sub.tar.xz"
+        expect(archive.exists(), f"没收到 sub.tar.xz，目录内容：{list(dst_a.iterdir())}")
+
+        with tarfile.open(archive, "r:xz") as tf:
+            names = sorted(tf.getnames())
+            expect("a.txt" in names, f"包里没有 a.txt：{names}")
+            expect("nested/b.bin" in names, f"包里没有嵌套文件：{names}")
+            expect("empty" in names, f"空目录没进包：{names}")
+            expect(tf.extractfile("a.txt").read() == b"alpha-content", "a.txt 内容不一致")
+            expect(tf.extractfile("nested/b.bin").read() == b"beta-content-123", "嵌套文件内容不一致")
+
+        # --- 拒绝路径 ---
+        rc, out = pull_dir_cmd("dir-on-file", "sub/a.txt")
+        expect(rc != 0, "对一个文件请求目录取回竟然成功")
+        expect("对端没有这个目录" in out, f"指向文件时应当报 kNotFound（并说清是目录）：{out}")
+
+        rc, out = pull_dir_cmd("dir-escape", "../outside")
+        expect(rc != 0, "`..` 越界竟然打包成功——共享根形同虚设")
+        expect("拒绝取回" in out, f"越界应当报 kRejected：{out}")
     finally:
         c.shutdown()
 

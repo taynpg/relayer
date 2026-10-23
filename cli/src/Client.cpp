@@ -1,6 +1,8 @@
 #include "relayer/cli/Client.h"
 
 #include <algorithm>
+#include <chrono>
+#include <filesystem>
 #include <utility>
 
 #include <asio/post.hpp>
@@ -9,6 +11,7 @@
 #include "relayer/core/session/FileList.h"
 #include "relayer/core/session/PeerTable.h"
 #include "relayer/core/transfer/TransferPeer.h"
+#include "relayer/filestore/TarXzArchiver.h"
 
 // Client 的实现。
 //
@@ -115,6 +118,9 @@ struct Client::Impl
     // 会话内的一次"取回请求"（PROTOCOL.md §11.9）。只等到 kAnswerFilePull
     // 为止——真正的文件由常驻接收会话收下，走的是普通接收路径。
     bool pullActive = false;
+    // 这一次是"取目录"还是"取文件"。只影响失败文案：同一个 kNotFound，
+    // 对文件请求是"不存在或它是目录"，对目录请求是"不存在或它不是目录"。
+    bool pullIsArchive = false;
     std::function<void(const Outcome &)> onPullDone;
     asio::steady_timer pullTimer{ctx};
     std::string targetPath;
@@ -536,7 +542,7 @@ struct Client::Impl
             {
                 pullStarted = true;
                 const bool started =
-                    startPullOnSession(config.pullFrom, config.pullPath,
+                    startPullOnSession(config.pullFrom, config.pullPath, config.pullAsArchive,
                                        [this](const Outcome &o)
                                        {
                                            std::printf("PULL %s\n", o.ok ? "accepted" : "failed");
@@ -910,17 +916,19 @@ struct Client::Impl
     //
     // 回调在**收到 kAnswerFilePull 时就触发**，不等文件传完：上层要区分
     // "对方不给我"（立刻可知）和"给了但传得慢"（随后由接收路径报告）。
-    bool startPullOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done)
+    bool startPullOnSession(std::string peerId, std::string relPath, bool archive,
+                            std::function<void(const Outcome &)> done)
     {
         if (!canSendOnSession() || pullActive)
         {
             return false;
         }
         pullActive = true;
+        pullIsArchive = archive;
         onPullDone = std::move(done);
 
         Frame f;
-        f.type = FrameType::kAskFilePull;
+        f.type = archive ? FrameType::kAskArchivePull : FrameType::kAskFilePull;
         f.to = std::move(peerId);
         // 请求体与 kAskFileList 同构（相对共享根的路径），复用同一套编解码。
         f.body = core::session::encodeAskFileList(relPath);
@@ -933,7 +941,11 @@ struct Client::Impl
         }
 
         // 与列举同理：对端离线时服务端静默丢帧，不设超时就会一直等。
-        pullTimer.expires_after(std::chrono::seconds(10));
+        //
+        // 归档请求等 120 秒：对端要先遍历 + 压缩，应答是在**打包完成之后**
+        // 才发的（§11.10.2）。同一个 10 秒对"打开文件"够用，对"压缩一个
+        // 目录"不够——用 10 秒会让正常的目录取回被误判成对端离线。
+        pullTimer.expires_after(archive ? std::chrono::seconds(120) : std::chrono::seconds(10));
         pullTimer.async_wait(
             [this](const std::error_code &ec)
             {
@@ -966,6 +978,94 @@ struct Client::Impl
         {
             done(o);
         }
+    }
+
+    // 目录取回的打包上限（PROTOCOL.md §11.10.3）。压缩是同步做的，这两个
+    // 数字决定了"最坏卡多久"，所以写死而不做成配置。
+    static constexpr std::size_t kMaxPackFiles = 20000;
+    static constexpr std::uint64_t kMaxPackBytes = 256ULL * 1024 * 1024;
+
+    // 递归收集要打包的条目。DirEntry.name 只有文件名，所以这里自己拼相对
+    // 路径——store.list 的 recursive 模式不返回层级信息。
+    //
+    // 返回 false 表示超限（文件数或字节数），由调用方转成 status=2。
+    bool collectItems(const std::string &absDir, const std::string &relPrefix,
+                      std::vector<filestore::ArchiveItem> &items, std::uint64_t &bytes) const
+    {
+        std::vector<filestore::DirEntry> entries;
+        if (!store.list(absDir, false, entries).ok())
+        {
+            return true;  // 某一层读不了就跳过它，不因此让整次打包失败
+        }
+        for (const auto &e : entries)
+        {
+            if (e.isDir)
+            {
+                // 空目录也要进包：只收文件会让"解出来少了几个空目录"，
+                // 而空目录有时是有意义的（占位、目录结构约定）。
+                const std::string rel = relPrefix.empty() ? e.name : relPrefix + "/" + e.name;
+                filestore::ArchiveItem dirItem;
+                dirItem.sourcePath = absDir + "/" + e.name;
+                dirItem.entryName = rel + "/";
+                items.push_back(std::move(dirItem));
+
+                if (!collectItems(absDir + "/" + e.name, rel, items, bytes))
+                {
+                    return false;
+                }
+                continue;
+            }
+            bytes += e.size;
+            if (items.size() >= kMaxPackFiles || bytes > kMaxPackBytes)
+            {
+                return false;
+            }
+            filestore::ArchiveItem item;
+            item.sourcePath = absDir + "/" + e.name;
+            item.entryName = relPrefix.empty() ? e.name : relPrefix + "/" + e.name;
+            items.push_back(std::move(item));
+        }
+        return true;
+    }
+
+    // 把目录打包到系统临时目录，返回包路径（失败返回空串）。
+    //
+    // **不能放进共享根**：那会让对端在列举里看到这个临时包，也污染用户目录。
+    std::string packDirectory(const std::string &absDir, const std::string &dirName, std::string &err)
+    {
+        std::vector<filestore::ArchiveItem> items;
+        std::uint64_t bytes = 0;
+        if (!collectItems(absDir, std::string(), items, bytes))
+        {
+            err = "目录过大（超过 " + std::to_string(kMaxPackFiles) + " 个文件或 256 MiB），请分批取回";
+            return std::string();
+        }
+        if (items.empty())
+        {
+            err = "目录是空的";
+            return std::string();
+        }
+
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        const auto path =
+            std::filesystem::temp_directory_path() / ("relayer-pack-" + std::to_string(stamp) + ".tar.xz");
+
+        filestore::TarXzArchiver archiver(store);
+        filestore::ArchiveOptions options;
+        // 级别 1：传输场景里网络是瓶颈，压缩比多省的那点字节不值"多等 30 秒"
+        // （PROTOCOL.md §11.10.3）。
+        options.compressionLevel = 1;
+        std::vector<std::string> skipped;
+        const auto st = archiver.create(path.string(), items, options, skipped);
+        if (!st.ok())
+        {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);  // 半成品不能留下
+            err = "打包失败：" + st.message;
+            return std::string();
+        }
+        (void)dirName;
+        return path.string();
     }
 
     // 对端来要文件（B 侧）：校验共享根 → 回 status → 用普通"推"流程发送。
@@ -1031,6 +1131,92 @@ struct Client::Impl
             // 先回 status 再发文件：应答里那个 0 是"我接受"，文件随后才到。
             // 顺序反了的话，请求方会先看到一个陌生的 kFileRequestSend。
             (void)startSendOnSession(target, std::string(), req.from, [](const Outcome &) {});  // 结论由接收方自己报
+        }
+    }
+
+    // 对端来要目录（B 侧）：校验 → 打包 → **打包完成后**才回 status → 推包。
+    //
+    // 应答放在打包之后是刻意的（§11.10.2）：打包会失败（磁盘满、权限、
+    // 文件在压缩中被删）。先回 0 再失败，请求方只能看到"对方答应了但没来
+    // 东西"，直到会话空闲超时——所有失败里最难查的一种。
+    void serveArchivePullRequest(const Frame &req)
+    {
+        Frame answer;
+        answer.type = FrameType::kAnswerFilePull;
+        answer.to = req.from;
+
+        std::string rel;
+        std::string err;
+        auto status = core::session::FilePullStatus::kRejected;
+        std::string packPath;
+
+        if (!core::session::decodeAskFileList(req.body, rel, err))
+        {
+            status = core::session::FilePullStatus::kRejected;
+        }
+        else if (config.shareRoot.empty() || rel.empty())
+        {
+            // 空路径 = 整个共享根。不打包它：多半是点错了，而且一个根目录
+            // 打包出来对方也不知道该解到哪。
+            status = core::session::FilePullStatus::kRejected;
+        }
+        else if (!canStartSendOnSession())
+        {
+            status = core::session::FilePullStatus::kRejected;
+        }
+        else
+        {
+            const std::string resolved = store.resolveWithin(config.shareRoot, rel);
+            if (resolved.empty())
+            {
+                status = core::session::FilePullStatus::kRejected;  // 绝对路径 / 越界
+            }
+            else
+            {
+                const auto st = store.stat(resolved);
+                if (!st.exists || !st.isDir)
+                {
+                    status = core::session::FilePullStatus::kNotFound;  // 文件请走 §11.9
+                }
+                else
+                {
+                    std::string packErr;
+                    packPath = packDirectory(resolved, rel, packErr);
+                    status = packPath.empty() ? core::session::FilePullStatus::kRejected
+                                              : core::session::FilePullStatus::kAccepted;
+                }
+            }
+        }
+
+        answer.body = core::session::encodeAnswerFilePull(status);
+        if (const auto st = session->send(answer); !st.ok())
+        {
+            return;
+        }
+
+        if (status != core::session::FilePullStatus::kAccepted)
+        {
+            return;
+        }
+
+        // 包名用目录名，让对方一眼知道落到本地的是什么（§11.10.3）。
+        const auto slash = rel.find_last_of('/');
+        const std::string dirName = (slash == std::string::npos) ? rel : rel.substr(slash + 1);
+        const std::string packName = dirName + ".tar.xz";
+
+        const bool started = startSendOnSession(packPath, packName, req.from,
+                                                [packPath](const Outcome &)
+                                                {
+                                                    // 传完（成功、失败、取消）都删：留着的临时包
+                                                    // 只会越积越多，而它已经没用了。
+                                                    std::error_code ec;
+                                                    std::filesystem::remove(packPath, ec);
+                                                });
+        if (!started)
+        {
+            // 兜底：post 与发送之间的竞态（比如会话刚好断了）。
+            std::error_code ec;
+            std::filesystem::remove(packPath, ec);
         }
     }
 
@@ -1358,6 +1544,13 @@ struct Client::Impl
             return;
         }
 
+        // 目录取回：打包 + 推包，应答同样是 kAnswerFilePull。
+        if (f.type == FrameType::kAskArchivePull)
+        {
+            serveArchivePullRequest(f);
+            return;
+        }
+
         if (f.type == FrameType::kAnswerFilePull && pullActive)
         {
             core::session::FilePullStatus status = core::session::FilePullStatus::kRejected;
@@ -1375,8 +1568,8 @@ struct Client::Impl
                 finishPull(true, "对端已开始发送");
                 return;
             case core::session::FilePullStatus::kNotFound:
-                finishPull(false, "对端没有这个文件（或它是目录）",
-                           Status::Fail(ErrorCode::kNotFound, "remote file not found"));
+                finishPull(false, pullIsArchive ? "对端没有这个目录（或它不是目录）" : "对端没有这个文件（或它是目录）",
+                           Status::Fail(ErrorCode::kNotFound, "remote path not found"));
                 return;
             case core::session::FilePullStatus::kRejected:
             default:
@@ -1601,9 +1794,10 @@ bool Client::browseOnSession(std::string peerId, std::string relPath, std::funct
     return impl_->startBrowseOnSession(std::move(peerId), std::move(relPath), std::move(done));
 }
 
-bool Client::pullOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done)
+bool Client::pullOnSession(std::string peerId, std::string relPath, bool archive,
+                           std::function<void(const Outcome &)> done)
 {
-    return impl_->startPullOnSession(std::move(peerId), std::move(relPath), std::move(done));
+    return impl_->startPullOnSession(std::move(peerId), std::move(relPath), archive, std::move(done));
 }
 
 void Client::cancelSend()

@@ -431,7 +431,7 @@ bool CoreService::browsePeerOnSession(const QString &peerId, const QString &relP
     return true;
 }
 
-bool CoreService::pullFileFromPeer(const QString &peerId, const QString &relPath)
+bool CoreService::pullFileFromPeer(const QString &peerId, const QString &relPath, bool asArchive)
 {
     if (peerId.isEmpty() || relPath.isEmpty())
     {
@@ -445,14 +445,14 @@ bool CoreService::pullFileFromPeer(const QString &peerId, const QString &relPath
     }
 
     runOnIo(
-        [this, peer = fromQt(peerId), path = fromQt(relPath)]
+        [this, peer = fromQt(peerId), path = fromQt(relPath), asArchive]
         {
             if (!client_)
             {
                 emit remotePullFinished(false, QStringLiteral("没有可用的常驻会话"));
                 return;
             }
-            const bool started = client_->pullOnSession(peer, path,
+            const bool started = client_->pullOnSession(peer, path, asArchive,
                                                         [this](const cli::Outcome &o)
                                                         {
                                                             // 从 io 线程 emit 跨线程信号是安全的。

@@ -821,7 +821,7 @@ socket 回调里写就没法把每种组合都测到。
 
 当前 CTest 共 7 项：`common`（16 用例 / 1111 断言）、`filestore`（117 / 1718）、
 `core`（341 / 5482）、`arch`（架构规则 R1-R6）、`protocol_doc` 与 `transition_doc`
-（文档与代码一致性）、`e2e_quick`（三进程 16 场景，约 68s）。
+（文档与代码一致性）、`e2e_quick`（三进程 17 场景，约 62s）。
 合计 474 用例 / 8311 断言，全量 52 秒。
 
 ### 4.1 阶段 E 进度（2026-10-23 更新）
@@ -848,7 +848,8 @@ socket 回调里写就没法把每种组合都测到。
 | 子项 | 内容 | 状态 |
 | --- | --- | --- |
 | F1 | 远端目录列举：`kAskFileList`/`kAnswerFileList`（`PROTOCOL.md` §11.8）、`core/session/FileList` 编解码、客户端侧服务（共享根 + `resolveWithin`）、CLI `ls`、GUI：`ExplorerControl` 的本地/远端双数据源（v1 形状，同一个控件切数据源）+ 共享目录设置 + 对照表右键"检查远端"、e2e `remote-list` | ✅ 完成 |
-| F2 | 远端取回（下载）：`kAskFilePull`/`kAnswerFilePull`（`PROTOCOL.md` §11.9）、`FilePullStatus` 编解码、客户端侧服务（共享根 + `resolveWithin`）、复用 500-509 推流程、CLI `recv --pull-from/--pull-path`、GUI 远端面板右键「下载到接收目录」、e2e `pull-file` | ✅ 完成（目录取回**未做**：要等归档打包） |
+| F2 | 远端取回（下载）：`kAskFilePull`/`kAnswerFilePull`（`PROTOCOL.md` §11.9）、`FilePullStatus` 编解码、客户端侧服务（共享根 + `resolveWithin`）、复用 500-509 推流程、CLI `recv --pull-from/--pull-path`、GUI 远端面板右键「下载到接收目录」、e2e `pull-file` | ✅ 完成（目录取回见 F3） |
+| F3 | 目录取回（打包）：`kAskArchivePull`（`PROTOCOL.md` §11.10）、tar.xz 打包（级别 1、上限 20000 文件 / 256 MiB）、临时包在系统 temp 并传完即删、复用 500-509 推流程、CLI `--pull-dir`、GUI 右键「下载目录（打包为 tar.xz）」、e2e `pull-dir` | ✅ 完成（**不自动解包**，见 §11.10.6） |
 
 剩余（下一次从这里接）：
 

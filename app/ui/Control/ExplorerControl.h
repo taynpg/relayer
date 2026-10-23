@@ -95,7 +95,8 @@ signals:
 
     // 远端模式下"下载到接收目录"（PROTOCOL.md §11.9）。本控件不碰网络：
     // 只把"从谁取、取哪个相对路径"交给 MainWindow。
-    void remotePullRequested(const QString &peerId, const QString &relPath);
+    // asArchive=true 表示选中的是目录，请对端打包（PROTOCOL.md §11.10）。
+    void remotePullRequested(const QString &peerId, const QString &relPath, bool asArchive);
 
 private:
     struct FileEntry

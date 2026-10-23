@@ -59,6 +59,7 @@ void printUsage()
                 "      --self-browse        自检：recv 时在接收会话上列一次自己的共享根\n"
                 "      --pull-from <id>     取回：recv 时请这个对端把文件发过来\n"
                 "      --pull-path <rel>    取回的文件（相对对端共享根）\n"
+                "      --pull-dir <rel>     取回的目录（对端打包成 tar.xz 发来）\n"
                 "      --share <dir>        recv 时允许对端列举这个目录（不给则不响应）\n"
                 "      --path <rel>         ls 的相对路径（相对对端共享根，默认根目录）\n"
                 "      --chunk-size <bytes> 分块大小（默认 256 KiB，上限 4 MiB）\n"
@@ -358,6 +359,17 @@ ParseResult parseArgs(int argc, char **argv)
                 return r;
             }
         }
+        else if (a == "--pull-dir")
+        {
+            // 目录取回：请对端打包成 tar.xz 再发（PROTOCOL.md §11.10）。
+            // 复用 pullPath 存路径，用 pullAsArchive 区分"文件"与"目录"——
+            // 两者在请求侧只差一个帧类型。
+            if (!takeValue(a, r.args.config.pullPath))
+            {
+                return r;
+            }
+            r.args.config.pullAsArchive = true;
+        }
         else if (a == "--path")
         {
             if (!takeValue(a, r.args.path))
@@ -424,6 +436,11 @@ ParseResult parseArgs(int argc, char **argv)
     if (!r.args.config.pullPath.empty() && r.args.config.pullFrom.empty())
     {
         r.error = "--pull-path 需要配合 --pull-from（说明从哪个对端取）";
+        return r;
+    }
+    if (r.args.config.pullAsArchive && r.args.command != "recv")
+    {
+        r.error = "--pull-dir 只能与 recv 一起用";
         return r;
     }
     if (!r.args.config.pullFrom.empty() && r.args.config.pullPath.empty())

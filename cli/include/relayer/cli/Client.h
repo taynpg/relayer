@@ -213,6 +213,10 @@ struct ClientConfig
     std::string pullFrom;
     std::string pullPath;  // 相对对端共享根
 
+    // true 表示 pullPath 指向**目录**，请对端打包成 tar.xz 再发（PROTOCOL.md
+    // §11.10）。收到的是包本身，不会自动解包。
+    bool pullAsArchive = false;
+
     // 远端目录列举的共享根（PROTOCOL.md §11.8）。空 = **不响应**列举请求。
     //
     // 只有这个目录之下的内容能被对端看到：请求里的路径一律按"相对该根"
@@ -322,7 +326,10 @@ public:
     // "对方不给我"（立刻可知）和"给了但传得慢"（接收进度会报）。
     //
     // 返回 false = 没有可用的常驻会话，或已经有一个取回请求在等应答。
-    bool pullOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done);
+    // archive=true 表示 relPath 指向目录，请对端打包（PROTOCOL.md §11.10）。
+    // 归档请求的应答超时是 120 秒：对端要先压缩，应答在打包完成后才发。
+    bool pullOnSession(std::string peerId, std::string relPath, bool archive,
+                       std::function<void(const Outcome &)> done);
 
     // 取消正在进行的"会话内发送"（对端的收尾会看到 kLocalCancelled）。
     // 会话本身不受影响——接收继续等下一个文件。
