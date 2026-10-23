@@ -63,6 +63,17 @@ public:
         return source_;
     }
 
+    // 远端模式下当前浏览的对端 id（本地面板为空），以及当前所在路径
+    // （本地为绝对路径、远端为相对共享根）。校验用它俩发列举请求。
+    [[nodiscard]] QString remotePeerId() const
+    {
+        return peerId_;
+    }
+    [[nodiscard]] QString currentPathForCompare() const
+    {
+        return currentPath_;
+    }
+
     // 远端列举的结果（MainWindow 从 CoreService 送回来）。
     // ok=false 时 summary 说明原因（未开共享 / 目录不存在 / 会话不可用）。
     void applyRemoteEntries(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows);
@@ -102,6 +113,11 @@ signals:
     // 本控件不碰网络与任务表；路径怎么变成任务项由 MainWindow 决定
     // （目录要递归展开、文件用"父目录 + 文件名"两种形状）。
     void localTransferRequested(const QStringList &paths);
+
+    // 粗校验 / 时间戳校验（v1 的语义：与**另一个面板当前目录下的同名文件**
+    // 比）。本控件不知道自己对面是谁——由 MainWindow 取另一侧路径并决定
+    // 哪一边是远端。wantTime=false 比大小，true 比修改时间。
+    void compareRequested(const QString &name, bool wantTime);
 
 private:
     struct FileEntry
@@ -158,6 +174,8 @@ private:
     // 当前选中的本地绝对路径（去重、保持表格顺序）。远端模式返回空。
     [[nodiscard]] QStringList selectedLocalPaths() const;
 
+    // 当前所在路径。本地是绝对路径，远端是相对共享根——由调用方
+    // （MainWindow）按 source() 判断是哪一种。
     // 状态行。每一次列举都必须留下可见结果（读取中 / 共 N 项 / 失败原因），
     // 否则失败与"没反应"在界面上无法区分。
     void setStatus(const QString &text, bool error = false);

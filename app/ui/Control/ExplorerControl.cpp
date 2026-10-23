@@ -5,8 +5,8 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDesktopServices>
-#include <QFileDialog>
 #include <QDir>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QHeaderView>
@@ -829,6 +829,14 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
              emit notice(QStringLiteral("[解压] %1").arg(QString::fromStdString(dir)));
              enterPath(currentPath_);
          }},
+        // 粗校验 / 时间戳校验：与**另一侧面板当前目录下的同名文件**比。
+        // 本控件不知道对面是谁，只把文件名交出去（MainWindow 取路径）。
+        {singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir"),
+         QStringLiteral("粗校验（与对端同名文件比大小）"),
+         [this, rows]() { emit compareRequested(table_->item(rows[0], toInt(ExpColumn::Name))->text(), false); }},
+        {singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir"),
+         QStringLiteral("时间戳校验（比修改时间）"),
+         [this, rows]() { emit compareRequested(table_->item(rows[0], toInt(ExpColumn::Name))->text(), true); }},
         {singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir"),
          QStringLiteral("SHA256"),
          [this, selectedPath]()

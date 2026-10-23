@@ -142,6 +142,7 @@ void MainWindow::wireSignals()
     connect(connector_, &ConnectorControl::probeRequested, this, &MainWindow::onProbeRequested);
     connect(connector_, &ConnectorControl::disconnectRequested, this, &MainWindow::onDisconnectRequested);
     connect(connector_, &ConnectorControl::browsePeerRequested, this, &MainWindow::onBrowsePeerRequested);
+    connect(explorer_, &ExplorerControl::compareRequested, this, &MainWindow::onCompareRequested);
     connect(explorer_, &ExplorerControl::localTransferRequested, this,
             [this](const QStringList &paths)
             {
@@ -493,6 +494,84 @@ void MainWindow::onOperationFinished(bool ok, const QString &summary, const QStr
 // 任务入口（E3.5）：只做闸门检查，展示与执行交给 RelayTaskControl。
 // ---------------------------------------------------------------------------
 
+// 粗校验 / 时间戳校验：本地选中的文件 vs **远端面板当前目录下的同名文件**。
+//
+// 为什么放在 MainWindow 而不是 ExplorerControl：需要同时知道两个面板各自的
+// 当前路径，而两个面板互相不认识。v1 用共享状态回调（tellInfoCall_）解决，
+// v2 让 MainWindow 做中间人——它本来就持有两者。
+void MainWindow::onCompareRequested(const QString &name, bool wantTime)
+{
+    if (!core_->busy())
+    {
+        log_->appendLog(QStringLiteral("[校验] 请先连接中继\n"));
+        return;
+    }
+    if (compareActive_)
+    {
+        log_->appendLog(QStringLiteral("[校验] 上一次校验还没结束\n"));
+        return;
+    }
+
+    const QFileInfo local(QDir(explorer_->currentPathForCompare()).filePath(name));
+    if (!local.exists() || !local.isFile())
+    {
+        log_->appendLog(QStringLiteral("[校验] 本地没有这个文件：%1\n").arg(name));
+        return;
+    }
+
+    pendingCompare_.name = name;
+    pendingCompare_.wantTime = wantTime;
+    pendingCompare_.localSize = local.size();
+    pendingCompare_.localMtime = local.lastModified().toMSecsSinceEpoch();
+    compareActive_ = true;
+
+    log_->appendLog(QStringLiteral("[校验] %1：本地 %2 字节，正在取对端信息…\n")
+                        .arg(name, QString::number(pendingCompare_.localSize)));
+
+    // 对端就是远端面板当前所在的那个目录。没选对端 / 没有会话时它会返回
+    // false，下面的日志说明原因——不必在这里重复判断。
+    if (!core_->browsePeerOnSession(remoteExplorer_->remotePeerId(), remoteExplorer_->currentPathForCompare()))
+    {
+        compareActive_ = false;
+        log_->appendLog(QStringLiteral("[校验] 当前不能列举对端（未连接或正在传输）\n"));
+    }
+}
+
+// 对端信息到手：比大小，或比修改时间。
+void MainWindow::finishCompare(qint64 peerSize, qint64 peerMtime)
+{
+    const auto pc = pendingCompare_;
+    compareActive_ = false;
+
+    QString conclusion;
+    bool same = true;
+    if (!pc.wantTime)
+    {
+        same = (pc.localSize == peerSize);
+        conclusion = same ? QStringLiteral("大小一致（%1 字节）").arg(pc.localSize)
+                          : QStringLiteral("大小不符：本地 %1，对端 %2 字节").arg(pc.localSize).arg(peerSize);
+    }
+    else
+    {
+        same = (pc.localMtime == peerMtime);
+        const auto fmt = [](qint64 ms)
+        { return QDateTime::fromMSecsSinceEpoch(ms).toString(QStringLiteral("yyyy-MM-dd hh:mm:ss")); };
+        if (same)
+        {
+            conclusion = QStringLiteral("两端修改时间相同（%1）").arg(fmt(pc.localMtime));
+        }
+        else
+        {
+            conclusion = QStringLiteral("修改时间不同：本地 %1，对端 %2（%3 更新）")
+                             .arg(fmt(pc.localMtime), fmt(peerMtime),
+                                  pc.localMtime > peerMtime ? QStringLiteral("本地") : QStringLiteral("对端"));
+        }
+    }
+
+    log_->appendLog(
+        QStringLiteral("[校验] %1：%2%3\n").arg(pc.name, conclusion, same ? QString() : QStringLiteral("  ← 不一致")));
+}
+
 // 对照表右键"检查远端"：逐行问对方"这个文件在不在这、大小对不对"。
 //
 // 这是"粗校验"——比对的是文件名 + 大小，不是内容哈希。理由：哈希要对方
@@ -593,8 +672,33 @@ void MainWindow::nextRemoteCheck()
 
 void MainWindow::onRemoteBrowseFinished(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows)
 {
+    // 三个消费者，按优先级：一次性的比对 > 检查队列 > 远端面板（默认落点）。
+    if (compareActive_)
+    {
+        if (!ok)
+        {
+            compareActive_ = false;
+            log_->appendLog(QStringLiteral("[校验] 取对端信息失败：%1\n").arg(summary));
+            return;
+        }
+        const auto pc = pendingCompare_;
+        const auto it =
+            std::find_if(rows.begin(), rows.end(), [&](const relayer::app::RemoteRow &r) { return r.name == pc.name; });
+        if (it == rows.end())
+        {
+            compareActive_ = false;
+            log_->appendLog(QStringLiteral("[校验] %1：对端目录里没有这个文件\n").arg(pc.name));
+            return;
+        }
+        finishCompare(static_cast<qint64>(it->size), it->mtime > 0 ? it->mtime * 1000 : 0);
+        return;
+    }
+
     if (remoteCheckIndex_ < 0 || remoteCheckIndex_ >= remoteChecks_.size())
     {
+        // 不是检查队列要的，那就是远端面板的——**必须回填**，否则浏览
+        // 请求有去无回，面板永远停在"正在读取"、表格永远是空的。
+        remoteExplorer_->applyRemoteEntries(ok, summary, rows);
         return;
     }
     const auto rc = remoteChecks_.at(remoteCheckIndex_);

@@ -60,6 +60,10 @@ private slots:
     void onDisconnectRequested();
     void onTransTaskRun(const relayer::app::RelayTaskItems &items);
     void onRemoteCheckRequested(const relayer::app::RelayTaskItems &items);
+
+    // 粗校验 / 时间戳校验（从本地面板发起）：与**远端面板当前目录下的同名
+    // 文件**比。v1 的语义是跨面板比，v2 的两个面板正好是左本地、右远端。
+    void onCompareRequested(const QString &name, bool wantTime);
     void onBrowsePeerRequested(const QString &peerId, const QString &peerName);
     void onRemoteBrowseFinished(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows);
 
@@ -80,6 +84,19 @@ private:
 
     QList<RemoteCheck> remoteChecks_;
     int remoteCheckIndex_ = -1;
+
+    // 一次待完成的比对。远端那一侧要先列举才能拿到 size/mtime，所以这里
+    // 记住本地侧的数值，等应答回来再比。
+    struct PendingCompare
+    {
+        QString name;
+        bool wantTime = false;
+        qint64 localSize = 0;
+        qint64 localMtime = 0;
+    };
+    PendingCompare pendingCompare_;
+    bool compareActive_ = false;
+    void finishCompare(qint64 peerSize, qint64 peerMtime);
 
     Ui::MainWindow *ui_;
     relayer::app::CoreService *core_;
