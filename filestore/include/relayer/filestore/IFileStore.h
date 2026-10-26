@@ -10,7 +10,7 @@
 
 // 文件子系统抽象接口。
 //
-// 设计约束（修改前请先读 docs/REWRITE-PLAN.md 第 3.1 节）：
+// 设计约束（修改前请先读 docs/DESIGN.md §3.6）：
 //
 // 1. 路径一律 UTF-8 编码的 std::string，Windows 宽字符转换由实现负责。
 //    不要在接口上暴露 std::wstring / QString / std::filesystem::path，

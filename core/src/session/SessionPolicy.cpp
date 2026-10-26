@@ -225,7 +225,7 @@ RoutePlan planRoute(Role role, bool established, const RouteConfig &config, std:
         // 时 from 仍会被绑成真实身份（见 forward()），伪造依然不可能。
         //
         // 注意不能用 kAcceptLocal：本地受理等于交给服务端处理，而服务端
-        // 不做文件业务（REWRITE-PLAN §6.1），帧会在这里凭空消失——比
+        // 不做文件业务（docs/DESIGN.md §3.1），帧会在这里凭空消失——比
         // 明确拒绝更难排查。
         plan.action = RouteAction::kForward;
         plan.to = f.to;

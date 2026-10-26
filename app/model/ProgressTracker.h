@@ -11,7 +11,7 @@ namespace relayer::app
 // RelayTaskControl 各有一份相同实现，收拢到这里。
 [[nodiscard]] QString humanBytes(std::uint64_t n);
 
-// 单文件进度/速度跟踪（REWRITE-PLAN §3.7.2 清单 #11）。
+// 单文件进度/速度跟踪。
 //
 // v1 的进度计算散落在 RelayTask.cpp 的循环里，空文件除零靠事后补丁。
 // v2 把除零与时间边界收进本类闭环：

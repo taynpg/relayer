@@ -643,7 +643,7 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
     {
         // 校验不过的残片**必须删掉**。
         //
-        // 这是"伪造残片"场景（REWRITE-PLAN §3.5.3）真正的落点。续传点只按
+        // 这是"伪造残片"场景（docs/DESIGN.md §3.5）真正的落点。续传点只按
         // 残片长度算（见 scanResumePoint），所以一份"前一半对、后一半是垃圾"
         // 的残片会被当成"已经下了一半"，从中间接着收。最终根自然对不上——
         // 但如果把这份残片留在盘上，**下一次传输会再次在它上面续传，于是永远

@@ -116,7 +116,7 @@ void ConnectorControl::initAuth()
     ui_->edPassword->setEnabled(!ui_->ckNoAuth->isChecked());
 
     // 本机标识：持久化，因为它的全部价值就是"跨重启保持同一个名字"
-    // （对照表按 id 固定投递，见 REWRITE-PLAN §6.2）。空 = 让中继分配。
+    // （对照表按 id 固定投递，见 docs/DESIGN.md §3.2）。空 = 让中继分配。
     ui_->edMyId->setText(settings.value(relayer::app::settings::kConnectorMyId).toString());
     connect(ui_->edMyId, &QLineEdit::editingFinished, this,
             [this]()

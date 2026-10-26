@@ -568,7 +568,7 @@ TEST_CASE("receiver finalize reports a root mismatch and discards the part", "[t
     // **内容不对**——留着它只会让下一次传输从错误的偏移接着收，于是每次
     // 都传满 100%、每次都报 root_mismatch，重试永远救不回来。
     //
-    // 触发这一改动的真实事故见 docs/HANDOFF.md §2.3：伪造残片（前 16MB 对、
+    // 触发这一改动的真实事故：伪造残片（前 16MB 对、
     // 后 16MB 是 0）能通过 open() 阶段的一切检查——描述里只有整文件 sha256
     // 和一个只覆盖前 64KB 的 fingerprint，而伪造残片的前 64KB 恰好是对的。
     // 唯一能识破它的地方就是算完真实根的这一刻，所以此刻必须自清。

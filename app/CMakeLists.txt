@@ -3,14 +3,13 @@
 # 这是全仓库唯一允许 #include <Q...> 的地方（架构规则 R5，tools/check_arch.py
 # 在 CTest 里强制）。core / filestore / common 全部零 Qt，服务端因此不链接 Qt。
 #
-# 层次（REWRITE-PLAN §2.1 / §3.7）：
+# 层次（见 docs/DESIGN.md §2.1 / §3.7）：
 #   MainWindow   主窗口，组装各控件
-#   ui/          .ui 文件 + 控件类（布局自 v1 原样搬迁，逻辑重写）
+#   ui/          .ui 文件 + 控件类（布局沿用既有设计，逻辑重写）
 #   bridge/      Core → Qt 适配层（事件投递、字符串转换、生命周期）
 #   model/       业务模型（TaskRowModel 等），控件类不直接持有业务逻辑
 #
-# .ui 的来源：v1 仓库 D:/Code/relayFile/Gui/，除 <class> 名统一改为 PascalCase
-# 外，布局零改动（REWRITE-PLAN §3.7.1）。
+# .ui 的约定：除 <class> 名统一用 PascalCase 外，布局零改动（docs/DESIGN.md §3.7）。
 
 # GUI 打开但机器上没有 Qt 时，给出能直接照做的错误，而不是一层嵌套的
 # "Could not find a package configuration file"。
@@ -50,9 +49,9 @@ add_executable(relayer WIN32
 target_include_directories(relayer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}
-    # .ui 里的提升控件写的是 "Control/CheckableComboBox.h"（v1 的目录
+    # .ui 里的提升控件写的是 "Control/CheckableComboBox.h"（既有的目录
     # 结构），生成的 ui_XXX.h 会原样引用；把 ui/ 加进搜索路径让它在
-    # v2 的目录布局下也能解析，.ui 文件因而不必改动。
+    # 当前的目录布局下也能解析，.ui 文件因而不必改动。
     ${CMAKE_CURRENT_SOURCE_DIR}/ui
 )
 

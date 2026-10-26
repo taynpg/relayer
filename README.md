@@ -2,12 +2,12 @@
 
 跨网络的点对点文件传输工具。一端选文件，另一端收，中间的路径由 relayer 自己找。
 
-> **状态：重写中（v2）**。阶段 A-D 已完成（filestore / 协议与认证 / 传输引擎 /
-> 三进程集成测试），阶段 E（Qt 前端）进行中：GUI 已能连接中继、稳定收 id、
-> 自动接收、对照表批量发送。剩余项见 `docs/REWRITE-PLAN.md` §4.1。
-> 可用的旧版本在 [`taynpg/relayFile`](https://github.com/taynpg/relayFile)（v0.5）。
-> 设计文档见 [`docs/REWRITE-PLAN.md`](docs/REWRITE-PLAN.md)，当前交接见
-> [`docs/HANDOFF.md`](docs/HANDOFF.md) §0。
+> **状态：可用**。中继、认证、传输引擎、Qt 客户端与命令行客户端均已实装，
+> 本机三进程端到端测试覆盖收发、中断续传、伪造残片、乱序丢包、固定标识、
+> 自投、远端浏览/取回/打包等场景。尚未做：P2P 直连、载荷加密（见下）。
+>
+> 文档：[`docs/DESIGN.md`](docs/DESIGN.md) 是架构与决策，
+> [`docs/PROTOCOL.md`](docs/PROTOCOL.md) 是线协议（唯一权威）。
 
 [![CI](https://github.com/taynpg/relayer/actions/workflows/ci.yml/badge.svg)](https://github.com/taynpg/relayer/actions/workflows/ci.yml)
 
@@ -21,19 +21,26 @@ CI 只在打 tag 时运行（`v*`），也支持手动触发。
 
 | 场景 | 常见做法的痛点 | relayer 的做法 |
 | --- | --- | --- |
-| 两台机器在不同 NAT 后面 | 要么装内网穿透，要么走第三方网盘 | 服务端只做信令与中继，能直连就直连 |
-| 文件几个 GB，网络不稳 | 断了从头再来 | 分块传输 + 断点续传，残片可续 |
-| 不想把文件传给第三方 | 网盘中转意味着文件过别人的机器 | 直连时数据不出两端；中继时端到端加密 |
+| 两台机器在不同 NAT 后面 | 要么装内网穿透，要么走第三方网盘 | 一台可达的中继做转发；两端都只发起出站连接，不用改防火墙 |
+| 文件几个 GB，网络不稳 | 断了从头再来 | 分块传输 + 断点续传；残片可疑时用分块 Merkle 校验定位到具体哪一块 |
+| 不想把文件留在别人的机器上 | 网盘中转意味着文件落到对方磁盘 | 中继只转发字节：不落盘、不缓存分片、不解析内容 |
 
 ---
 
 ## 设计取向
 
-这几条是硬约束，写在 [`docs/REWRITE-PLAN.md`](docs/REWRITE-PLAN.md) 里，也由
-`tools/check_arch.py` 在 CI 上强制执行。
+这几条是硬约束，写在 [`docs/DESIGN.md`](docs/DESIGN.md) 里，也由
+`tools/check_arch.py` 在 CTest 上强制执行。
 
 **核心库零 Qt。** `core/` 只依赖标准库与 vendored 的 header-only 库，
 能单独编译进任何 C++ 项目。GUI 只是它的一种前端。
+
+**服务端只做转发。** `relayerd` 不链接 `filestore`、不读写用户数据、不解析
+传输载荷。这条边界让"中继看不到你的文件"成为结构性事实，而不是靠纪律维持。
+
+> **载荷目前不加密。** 协议里留了 `kFlagEncrypted` 位与 AES-256-GCM 的载荷
+> 布局（[`PROTOCOL.md`](docs/PROTOCOL.md) §6），但发送路径还没有实装加密，也
+> 没有密钥协商——中继能看到明文字节。需要保密时请套隧道（VPN / SSH 端口转发）。
 
 **文件操作有接口。** `IFileStore` 把路径、读写、原子替换、目录遍历收成一组虚函数。
 默认实现用 `std::filesystem`，出问题可以换。`core/` 只允许看到这个接口头，
@@ -89,14 +96,14 @@ Windows（MSYS2 UCRT64）下的完整依赖安装见 [`CONTRIBUTING.md`](CONTRIB
 
 ```
 common/        最底层共用件，零 Qt。Status/ErrorCode 与密码学原语
-core/          通信库，零 Qt。协议、加密、认证、传输、发现
+core/          通信库，零 Qt。协议、认证、连接、会话、传输引擎
 filestore/     文件子系统，零 Qt。IFileStore 与各实现、归档格式
 app/           Qt GUI，唯一允许使用 Qt 的模块
 server/        无界面服务端
 cli/           命令行客户端
 tests/         单元测试 + 架构约束与文档一致性检查
 tools/         开发脚本
-docs/          设计文档
+docs/          设计文档与线协议
 third_party/   三方库源码
 ```
 

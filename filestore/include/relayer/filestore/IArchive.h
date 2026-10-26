@@ -8,7 +8,7 @@
 
 // 归档格式的读写。
 //
-// 设计约束（改之前先读 docs/REWRITE-PLAN.md 3.1.4）：
+// 设计约束（改之前先读 docs/DESIGN.md §3.6）：
 //
 // 1. **不碰具体文件系统实现**，只依赖 IFileStore。归档层因此可以在内存里
 //    跑完整测试（MemFileStore），不必为了测 zip-slip 真去落盘。

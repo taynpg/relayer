@@ -13,7 +13,7 @@
 
 #include "relayer/cli/Client.h"
 
-// Core → Qt 适配层（REWRITE-PLAN §3.7.3 的第一件实事）。
+// Core → Qt 适配层（见 docs/DESIGN.md §3.7）。
 //
 // 职责只有三条：
 //   1. 生命周期：持有 io_context 与运行它的 io 线程；cli::Client 的实例

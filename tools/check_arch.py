@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """架构约束检查。
 
-这个脚本把 docs/REWRITE-PLAN.md 第 2.2 节的"依赖方向"变成可执行的检查，
+这个脚本把 docs/DESIGN.md §2.2 的"依赖方向"变成可执行的检查，
 任何一个违反都会让 CI 失败。
 
 规则
@@ -127,7 +127,7 @@ def main() -> int:
         print("架构约束检查失败：\n")
         for v in violations:
             print("  " + v)
-        print(f"\n共 {len(violations)} 处违反。规则说明见 docs/REWRITE-PLAN.md 2.2 节。")
+        print(f"\n共 {len(violations)} 处违反。规则说明见 docs/DESIGN.md §2.2。")
         return 1
 
     total = (

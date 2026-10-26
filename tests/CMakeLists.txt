@@ -63,7 +63,7 @@ set_tests_properties(core PROPERTIES LABELS "unit")
 # 把它变成 CTest 里的断言，忘了同步就会红。
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
-    # 架构约束：把 docs/REWRITE-PLAN.md 2.2 节的依赖方向变成可执行断言。
+    # 架构约束：把 docs/DESIGN.md §2.2 的依赖方向变成可执行断言。
     # 放在 CTest 里是因为"人忘了跑脚本"比"人忘了写规则"更常见。
     add_test(NAME arch
              COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/check_arch.py)
@@ -85,7 +85,7 @@ if(Python3_Interpreter_FOUND)
                          WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
                          LABELS "docs")
 
-    # 三进程集成测试（REWRITE-PLAN §3.5.3 的全表）。
+    # 三进程集成测试（docs/DESIGN.md §3.5）。
     #
     # 这是**唯一**能验证"跨进程"这一维度的测试：其余测试都在一个进程里
     # 把发送端和接收端接起来，于是真实 socket、真实 TCP 缓冲、真实进程

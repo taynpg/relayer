@@ -2,8 +2,10 @@
 
 本文写给两类人：想给 relayer 提 PR 的人，和三个月后回来改自己代码的人。
 
-工程的整体设计见 [`docs/REWRITE-PLAN.md`](docs/REWRITE-PLAN.md)。改动涉及分层、
-协议、依赖方向时，请先读那份文档的对应章节。
+工程的整体设计见 [`docs/DESIGN.md`](docs/DESIGN.md)，线协议见
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md)。改动涉及分层、协议、依赖方向时，
+先读这两份文档的对应章节；要推翻某个既有决策，先在 `DESIGN.md` 的决策记录
+里补一条再动实现。
 
 ---
 
@@ -14,7 +16,7 @@
 | 编译器 | MSVC 2022 / GCC 13+ / Clang 16+ | 需要完整的 C++17 支持 |
 | CMake | 3.20+ | |
 | 构建器 | Ninja（推荐）或任意 | |
-| Qt | **6.5+**（仅构建 GUI 时需要） | v2 不再支持 Qt5 |
+| Qt | **6.5+**（仅构建 GUI 时需要） | 只支持 Qt 6 |
 | Python | 3.9+（仅跑架构检查时需要） | 可选，但强烈建议装上 |
 
 三方库全部 vendored 在 `third_party/`，版本与许可证见
@@ -119,7 +121,8 @@ fs.remove(path);   // throws
 
 接口上的路径参数与环境变量保持一致：`std::string`，内容是 UTF-8。
 Windows 上的宽字符转换由 `filestore` 的实现负责，**不要**在调用方各自
-`MultiByteToWideChar`。历史上 v1 因为各处转换方式不同踩过中文路径找不到的坑。
+`MultiByteToWideChar`。各处转换方式不一时，症状是"文件名看起来一样但打不开"，
+定位成本极高——转换只允许出现在 `filestore` 的实现里。
 
 ### 3.5 注释写"为什么"，不写"做了什么"
 

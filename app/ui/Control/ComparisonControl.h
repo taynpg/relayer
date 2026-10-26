@@ -14,20 +14,19 @@ namespace Ui
 class ComparisonControl;
 }
 
-// 传输配置表（v1 ComparisonControl 的 v2 重写，REWRITE-PLAN §3.7.2 #4-#6/#8/#9）。
+// 传输配置表：每行描述"把哪个本地目录下的哪个名字，发给哪个对端的哪个相对目录"。
 //
 // 行语义：「把 localDir 下的 name 发给 peer，落到对方接收根目录下的 relDir」。
-// 与 v1 的差异：
-//   - 「远程目录」列改为「对端 id + 相对目录」两列（用户认可的核心场景：
-//     频繁把固定文件发到对方某个目录）。远端绝对路径语义需要远端目录浏览
-//     协议支持，属阶段 F。
-//   - 持久化用单个 JSON 文件（AppDataLocation/comparison.json）替代 v1 的
-//     Sqlite——每配置一张表、ensureSchema 补列这些是结构性包袱，行数据
-//     规模（几百行内）用 JSON 足够。
-//   - 编辑直接同步进内存模型（v1 的表格是唯一真身、筛选重排会丢编辑，
-//     v2 用 rows_ + 视图投影，清单 #8 的"行号不再是状态"）。
-//   - 下载落到**每行自己的本地目录**（v1 语义），不扔进全局接收目录：
-//     行说"name 属于 (localDir, peer, relDir)"，上下行因此对称。
+// 上下行因此是对称的：发送是 localDir → peer:relDir，下载反过来。
+//
+// 几个刻意的取舍：
+//   - 「对端 id + 相对目录」两列，而不是一个绝对路径列：真实用法是"把固定的
+//     文件发到对方某个目录"，相对共享根的语义让接收方的实际落点由它自己决定，
+//     发送方不需要知道、也不该知道对方的盘符布局。
+//   - 持久化用单个 JSON 文件（AppDataLocation/comparison.json）：每配置一张表、
+//     ensureSchema 补列这类东西是结构性包袱，几百行的数据量用 JSON 足够。
+//   - 编辑直接同步进内存模型，表格只是投影：行号不承担"状态"职责，筛选重排
+//     不会丢编辑。
 class ComparisonControl : public QWidget
 {
     Q_OBJECT
@@ -37,7 +36,7 @@ public:
 
 signals:
     // 用户点了"发送到对端"。items 已过基本校验（名称/本地目录/对端非空），
-    // 目录行的展开由消费者负责（E3.5 RelayTask / 暂由 MainWindow 顺序执行）。
+    // 目录行的展开由消费者负责（RelayTaskControl）。
     void transTaskRun(const relayer::app::RelayTaskItems &items);
 
     // 本表状态的一句话描述（保存/加载结果等），交给日志面板。
