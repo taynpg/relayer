@@ -10,8 +10,7 @@
 #include <windows.h>
 #endif
 
-namespace relayer::test
-{
+namespace relayer::test {
 
 // 测试用临时目录：构造时创建唯一目录，析构时递归删除。
 //
@@ -38,8 +37,8 @@ public:
         std::filesystem::remove_all(path_, ec);
     }
 
-    TempDir(const TempDir &) = delete;
-    TempDir &operator=(const TempDir &) = delete;
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
 
     // 以 UTF-8 返回，与 IFileStore 的路径约定一致
     [[nodiscard]] std::string utf8() const
@@ -49,8 +48,7 @@ public:
         // 避免依赖标准版本差异。
 #ifdef _WIN32
         const std::wstring w = path_.generic_wstring();
-        const int need =
-            ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+        const int need = ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
         std::string out(static_cast<std::size_t>(need), '\0');
         ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), out.data(), need, nullptr, nullptr);
         return out;
@@ -59,12 +57,12 @@ public:
 #endif
     }
 
-    [[nodiscard]] std::string path(const std::string &leaf) const
+    [[nodiscard]] std::string path(const std::string& leaf) const
     {
         return utf8() + "/" + leaf;
     }
 
-    [[nodiscard]] const std::filesystem::path &native() const
+    [[nodiscard]] const std::filesystem::path& native() const
     {
         return path_;
     }
@@ -74,18 +72,17 @@ private:
 };
 
 // 用 C 流写一个文件（测试自身准备数据用，不经过被测实现）
-inline bool writeFile(const std::string &utf8Path, const std::string &content)
+inline bool writeFile(const std::string& utf8Path, const std::string& content)
 {
 #ifdef _WIN32
     const int need = ::MultiByteToWideChar(CP_UTF8, 0, utf8Path.data(), static_cast<int>(utf8Path.size()), nullptr, 0);
     std::wstring wide(static_cast<std::size_t>(need), L'\0');
     ::MultiByteToWideChar(CP_UTF8, 0, utf8Path.data(), static_cast<int>(utf8Path.size()), wide.data(), need);
-    std::FILE *fp = ::_wfopen(wide.c_str(), L"wb");
+    std::FILE* fp = ::_wfopen(wide.c_str(), L"wb");
 #else
-    std::FILE *fp = std::fopen(utf8Path.c_str(), "wb");
+    std::FILE* fp = std::fopen(utf8Path.c_str(), "wb");
 #endif
-    if (fp == nullptr)
-    {
+    if (fp == nullptr) {
         return false;
     }
     const bool ok = content.empty() || std::fwrite(content.data(), 1, content.size(), fp) == content.size();
@@ -93,4 +90,4 @@ inline bool writeFile(const std::string &utf8Path, const std::string &content)
     return ok;
 }
 
-}  // namespace relayer::test
+}   // namespace relayer::test

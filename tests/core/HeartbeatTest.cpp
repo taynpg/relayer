@@ -1,13 +1,11 @@
 #include "relayer/core/transport/Heartbeat.h"
 
-#include <chrono>
-
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
 
 using namespace relayer::core::transport;
 
-namespace
-{
+namespace {
 
 // 虚构的时间起点。所有测试都基于它做偏移，不依赖真实时钟。
 const heartbeat::TimePoint kT0 = heartbeat::TimePoint{} + std::chrono::hours(1);
@@ -24,7 +22,7 @@ HeartbeatPolicy fresh()
     return p;
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // 常量
@@ -54,8 +52,7 @@ TEST_CASE("heartbeat constants are pinned", "[heartbeat]")
 TEST_CASE("no action while recently active", "[heartbeat]")
 {
     auto p = fresh();
-    for (int s = 0; s < 19; ++s)
-    {
+    for (int s = 0; s < 19; ++s) {
         p.onBytesReceived(at(s));
         REQUIRE(p.check(at(s)) == HeartbeatAction::kNone);
     }
@@ -129,11 +126,9 @@ TEST_CASE("a live peer never times out", "[heartbeat]")
     // 永远不该判超时。
     auto p = fresh();
     int pings = 0;
-    for (int s = 0; s <= 600; ++s)
-    {
+    for (int s = 0; s <= 600; ++s) {
         const auto action = p.check(at(s));
-        if (action == HeartbeatAction::kSendPing)
-        {
+        if (action == HeartbeatAction::kSendPing) {
             ++pings;
             // 模拟对端 2 秒后回应
             p.onBytesReceived(at(s + 2));
@@ -202,9 +197,8 @@ TEST_CASE("business traffic suppresses the ping", "[heartbeat]")
 {
     // 正在传文件的连接上不该发心跳：数据本身就在证明对方活着。
     auto p = fresh();
-    for (int s = 0; s < 100; ++s)
-    {
-        p.onBytesReceived(at(s));  // 每秒都有业务数据
+    for (int s = 0; s < 100; ++s) {
+        p.onBytesReceived(at(s));   // 每秒都有业务数据
         REQUIRE(p.check(at(s)) == HeartbeatAction::kNone);
     }
     REQUIRE(p.pingsSent() == 0);

@@ -10,8 +10,7 @@
 // 头（含 SendWindow、WorkerPool）拖进来——依赖关系与直觉相反，将来想
 // 单独复用接收侧时立刻绊住。
 
-namespace relayer::core::transfer
-{
+namespace relayer::core::transfer {
 
 // 读盘/写盘完成后的投递函数。
 //
@@ -28,4 +27,4 @@ namespace relayer::core::transfer
 //     多线程跑 io_context 时才暴露，把绑定变成显式参数能让人看见它。
 using PostFn = std::function<void(std::function<void()>)>;
 
-}  // namespace relayer::core::transfer
+}   // namespace relayer::core::transfer

@@ -1,13 +1,12 @@
 #pragma once
 
+#include <asio/io_context.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
 #include <string>
-
-#include <asio/io_context.hpp>
 
 #include "relayer/common/Status.h"
 #include "relayer/core/protocol/Frame.h"
@@ -41,12 +40,10 @@
 // app 要做的事只有三件：创建它、把 Session 的 onFrame 转发给 onFrame()、
 // 在事件循环上定时调 pump()。
 
-namespace relayer::core::transfer
-{
+namespace relayer::core::transfer {
 
 // 一次传输的进度事件。上层用它更新界面。
-struct TransferProgress
-{
+struct TransferProgress {
     std::uint32_t chunksDone = 0;
     std::uint32_t chunksTotal = 0;
     std::uint64_t bytesDone = 0;
@@ -54,20 +51,18 @@ struct TransferProgress
 };
 
 // 传输结束的原因。
-enum class TransferOutcome
-{
-    kCompleted,       // 校验通过，文件已落盘
-    kPeerCancelled,   // 对端发了 cancel
-    kLocalCancelled,  // 本端取消
-    kFailed,          // 出错（磁盘、协议、校验）
-    kPeerGone,        // 连接断了
+enum class TransferOutcome {
+    kCompleted,        // 校验通过，文件已落盘
+    kPeerCancelled,    // 对端发了 cancel
+    kLocalCancelled,   // 本端取消
+    kFailed,           // 出错（磁盘、协议、校验）
+    kPeerGone,         // 连接断了
 };
 
-struct TransferResult
-{
+struct TransferResult {
     TransferOutcome outcome = TransferOutcome::kFailed;
     Status status;
-    std::string targetPath;  // 接收方落点（发送方为空）
+    std::string targetPath;   // 接收方落点（发送方为空）
 };
 
 class TransferPeer : public std::enable_shared_from_this<TransferPeer>
@@ -78,14 +73,12 @@ public:
     // 分成两个工厂函数而不是让调用方传 role：这个字段填错会走完全错误的
     // 帧序列（发送方去等 kFileRequestSend），而错误要到对端回帧时才暴露，
     // 中间隔着一次网络往返。
-    enum class Role
-    {
+    enum class Role {
         kSender,
         kReceiver,
     };
 
-    struct Config
-    {
+    struct Config {
         // 发送方切块大小。接收方从描述里读，本字段对它无意义。
         //
         // 默认 256 KiB（见 kDefaultChunkSize 的说明）：块的大小直接决定
@@ -135,9 +128,9 @@ public:
 
     // 发送方：打开 sourcePath 并开始。
     [[nodiscard]] static std::shared_ptr<TransferPeer>
-    createSender(asio::io_context &ctx, std::shared_ptr<session::Session> session, filestore::IFileStore &store,
-                 WorkerPool &pool, std::string sourcePath, std::string remoteName, std::string toPeerId,
-                 std::int64_t sessionId, Config config, std::function<void(const TransferResult &)> onDone);
+    createSender(asio::io_context& ctx, std::shared_ptr<session::Session> session, filestore::IFileStore& store, WorkerPool& pool,
+                 std::string sourcePath, std::string remoteName, std::string toPeerId, std::int64_t sessionId, Config config,
+                 std::function<void(const TransferResult&)> onDone);
 
     // 接收方：登记要收的目标路径并等对端发描述。
     //
@@ -151,20 +144,20 @@ public:
     // 传非 0 则严格按它过滤，与发送方一侧对称。已有调用点（测试、同进程
     // 双方）都显式给出同一个号，行为不变。
     [[nodiscard]] static std::shared_ptr<TransferPeer>
-    createReceiver(asio::io_context &ctx, std::shared_ptr<session::Session> session, filestore::IFileStore &store,
-                   WorkerPool &pool, std::string targetPath, std::int64_t sessionId, Config config,
-                   std::function<void(const TransferResult &)> onDone);
+    createReceiver(asio::io_context& ctx, std::shared_ptr<session::Session> session, filestore::IFileStore& store,
+                   WorkerPool& pool, std::string targetPath, std::int64_t sessionId, Config config,
+                   std::function<void(const TransferResult&)> onDone);
 
     ~TransferPeer();
 
-    TransferPeer(const TransferPeer &) = delete;
-    TransferPeer &operator=(const TransferPeer &) = delete;
+    TransferPeer(const TransferPeer&) = delete;
+    TransferPeer& operator=(const TransferPeer&) = delete;
 
     // 把一帧交给本层。已认证的会话把 onFrame 转进来即可。
     //
     // 不属于本会话（sessionId 不符）或本层不处理的帧会被静默忽略——
     // 返回 false 只是给上层做统计，不代表错误。
-    bool onFrame(const protocol::Frame &frame);
+    bool onFrame(const protocol::Frame& frame);
 
     // 推进一次。由调用方在事件循环上定时（比如每 10ms）调用。
     //
@@ -201,8 +194,7 @@ public:
     }
 
     // 诊断计数。
-    struct Stats
-    {
+    struct Stats {
         std::uint64_t chunksSent = 0;
         std::uint64_t chunksReceived = 0;
         std::uint64_t acksSent = 0;
@@ -216,32 +208,31 @@ public:
         // 丢掉 N 个数据帧，这里应当 ≈ N，而不是块总数。
         std::uint64_t chunksRetransmitted = 0;
     };
-    [[nodiscard]] const Stats &stats() const noexcept
+    [[nodiscard]] const Stats& stats() const noexcept
     {
         return stats_;
     }
 
 private:
-    TransferPeer(asio::io_context &ctx, std::shared_ptr<session::Session> session, filestore::IFileStore &store,
-                 WorkerPool &pool, Role role, std::int64_t sessionId, Config config,
-                 std::function<void(const TransferResult &)> onDone);
+    TransferPeer(asio::io_context& ctx, std::shared_ptr<session::Session> session, filestore::IFileStore& store, WorkerPool& pool,
+                 Role role, std::int64_t sessionId, Config config, std::function<void(const TransferResult&)> onDone);
 
     // 发送方
     void startSending();
 
     // 摘要算完（在 strand 上）。异步计算的回投点，见 startSending()。
     void onDigestReady(TransferSender::DigestResult digest);
-    void handleAnswerSend(const protocol::Frame &frame);
-    void handleChunkAck(const protocol::Frame &frame);
-    void handleAnswerComplete(const protocol::Frame &frame);
+    void handleAnswerSend(const protocol::Frame& frame);
+    void handleChunkAck(const protocol::Frame& frame);
+    void handleAnswerComplete(const protocol::Frame& frame);
     void sendReadyChunks();
     void sendCompleteRequest();
     void checkRetransmit();
 
     // 接收方
-    void handleRequestSend(const protocol::Frame &frame);
-    void handleChunkData(const protocol::Frame &frame);
-    void handleCompleteRequest(const protocol::Frame &frame);
+    void handleRequestSend(const protocol::Frame& frame);
+    void handleChunkData(const protocol::Frame& frame);
+    void handleCompleteRequest(const protocol::Frame& frame);
     void sendAck();
     void sendAnswerSend(AnswerStatus status, std::uint32_t resumeFrom, std::string_view reason);
 
@@ -249,15 +240,15 @@ private:
     void sendFrame(protocol::Frame frame);
     void finish(TransferOutcome outcome, Status status, std::string targetPath = {});
 
-    asio::io_context &ctx_;
+    asio::io_context& ctx_;
     std::shared_ptr<session::Session> session_;
-    filestore::IFileStore &store_;
-    WorkerPool &pool_;
+    filestore::IFileStore& store_;
+    WorkerPool& pool_;
 
     Role role_;
     std::int64_t sessionId_ = 0;
     Config config_;
-    std::function<void(const TransferResult &)> onDone_;
+    std::function<void(const TransferResult&)> onDone_;
 
     std::unique_ptr<TransferSender> sender_;
     std::unique_ptr<TransferReceiver> receiver_;
@@ -341,4 +332,4 @@ private:
     Stats stats_;
 };
 
-}  // namespace relayer::core::transfer
+}   // namespace relayer::core::transfer

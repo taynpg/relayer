@@ -1,13 +1,12 @@
 #pragma once
 
+#include <asio/io_context.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
-
-#include <asio/io_context.hpp>
 
 #include "relayer/common/Status.h"
 #include "relayer/core/session/FileList.h"
@@ -31,19 +30,17 @@
 // 发生的一切"——握手、等对端上线、发起或等待传输、以及结束时把结论汇总成
 // 一个退出码。
 
-namespace relayer::cli
-{
+namespace relayer::cli {
 
 // 传输层的诊断计数，只挑验收用得着的那几个。
 //
 // 刻意**不**直接暴露 core::transfer::TransferPeer::Stats：那会把
 // TransferPeer.h（连带 SendWindow / TransferPayload）拖进这个头文件，
 // 而 CLI 的上层只需要几个整数。转换在 Client.cpp 里一次做完。
-struct TransferStats
-{
+struct TransferStats {
     std::uint64_t chunksSent = 0;
     std::uint64_t chunksReceived = 0;
-    std::uint64_t chunksRetransmitted = 0;  // 丢包后补空洞的次数（不是块总数）
+    std::uint64_t chunksRetransmitted = 0;   // 丢包后补空洞的次数（不是块总数）
     std::uint64_t duplicateChunks = 0;
     std::uint64_t acksSent = 0;
     std::uint64_t acksReceived = 0;
@@ -53,8 +50,7 @@ struct TransferStats
 //
 // 之前只存在于 Impl 里、以拼好的文本出现在 summary 中。GUI 需要结构化的
 // 列表来填表格，文本拼回去再拆开是往显示格式上挂逻辑，所以提到这里。
-struct PeerEntry
-{
+struct PeerEntry {
     std::string id;
     std::string address;
 };
@@ -65,8 +61,7 @@ struct PeerEntry
 // 失败有好几类需要调用方区别对待（对端不在线可以重试，校验不符重试也没用，
 // 目标被占用得先解决占用）。把它们压成一个 kUnknown 之后，上层再想区分
 // 就只能去解析 message 字符串——那是往日志文案上挂逻辑。
-struct Outcome
-{
+struct Outcome {
     bool ok = false;
     // 给用户看的结论（中文，一句话）。不用于程序判断。
     std::string summary;
@@ -90,15 +85,13 @@ struct Outcome
 
 // 进度回调。bytesPerSecond 由 Client 自己算——传原始计数让每个调用方
 // 各算一遍速度，必然出现三个略有出入的实现。
-struct ProgressReport
-{
+struct ProgressReport {
     std::uint64_t bytesDone = 0;
     std::uint64_t bytesTotal = 0;
     double bytesPerSecond = 0.0;
 };
 
-struct ClientConfig
-{
+struct ClientConfig {
     // 中继地址。
     std::string host = "127.0.0.1";
     std::uint16_t port = 9527;
@@ -135,7 +128,7 @@ struct ClientConfig
     // stdout 可抓，靠它把自己的 id 显示出来。**可能被多次调用**：认证刚过
     // 时 id 为空，收到 kAnswerId 后是真实 id，服务端改名再通知也会再来。
     // 与 onDone 不同，回调之后操作还会继续。
-    std::function<void(const std::string &)> onIdAssigned;
+    std::function<void(const std::string&)> onIdAssigned;
 
     // 常驻接收：接收完成一个文件后**不断开**，原地重建 receiver 继续等
     // 下一个请求。整个会话期间服务端分配的 id 保持不变。
@@ -152,17 +145,17 @@ struct ClientConfig
 
     // 常驻接收模式下每收完一个文件的回调（kCompleted 时触发）。操作本身
     // 不结束，onDone 不会来；GUI 靠它把"接收完成：路径"写进日志。
-    std::function<void(const std::string &targetPath)> onFileReceived;
+    std::function<void(const std::string& targetPath)> onFileReceived;
 
     // 常驻接收模式下某次接收**失败**的回调。与 onFileReceived 对称：
     // 失败同样不会结束操作（连接还活着就原地重建 receiver 继续等），
     // 上层只能靠它把失败写进日志。连接已死（kPeerGone）或本端主动取消
     // 时走 onDone，不走这里。
-    std::function<void(const std::string &message)> onReceiveFailed;
+    std::function<void(const std::string& message)> onReceiveFailed;
 
     // 常驻接收会话上刷新在线列表的结果（refreshPeers 的回程）。列表是
     // **结构化**的：GUI 要填表格，文本拼回去再拆开是往显示格式上挂逻辑。
-    std::function<void(const std::vector<PeerEntry> &peers)> onPeerList;
+    std::function<void(const std::vector<PeerEntry>& peers)> onPeerList;
 
     // 认证拿到真实 id 后自动问一次在线列表（结果走 onPeerList）。
     //
@@ -211,7 +204,7 @@ struct ClientConfig
     //
     // pullFrom 为空表示不做取回。
     std::string pullFrom;
-    std::string pullPath;  // 相对对端共享根
+    std::string pullPath;   // 相对对端共享根
 
     // true 表示 pullPath 指向**目录**，请对端打包成 tar.xz 再发（PROTOCOL.md
     // §11.10）。收到的是包本身，不会自动解包。
@@ -232,7 +225,7 @@ struct ClientConfig
 
     // 传输参数。chunkSize 在命令行可调，主要用于把"小文件测不出多块"
     // 这条路堵上（见 TransferPeer::Config 的注释）。
-    std::uint32_t chunkSize = 0;  // 0 = 用协议默认值（256 KiB）
+    std::uint32_t chunkSize = 0;   // 0 = 用协议默认值（256 KiB）
 
     // 接收方在收到描述后，最多等多久让发送方把数据发完。
     //
@@ -258,12 +251,11 @@ struct ClientConfig
 
 // 命令行用法之外的两种操作。放在一个枚举里而不是两个类：
 // 两者共享 90% 的骨架（连、等、收尾），拆开就是复制粘贴。
-enum class Action
-{
-    kSend,     // 把本地文件推给对端
-    kReceive,  // 把收到的文件落到本地
-    kList,     // 只连上去打印在线列表，然后退出
-    kBrowse,   // 问对端要一次目录列举（远端浏览 / 对照表粗校验的前置）
+enum class Action {
+    kSend,      // 把本地文件推给对端
+    kReceive,   // 把收到的文件落到本地
+    kList,      // 只连上去打印在线列表，然后退出
+    kBrowse,    // 问对端要一次目录列举（远端浏览 / 对照表粗校验的前置）
 };
 
 class Client
@@ -271,13 +263,13 @@ class Client
 public:
     // callback 在事件循环上调用，可能被调用多次（进度）或一次（结束）。
     // 结束之后不会再调用任何回调。
-    Client(asio::io_context &ctx, ClientConfig config, std::function<void(const ProgressReport &)> onProgress,
-           std::function<void(const Outcome &)> onDone);
+    Client(asio::io_context& ctx, ClientConfig config, std::function<void(const ProgressReport&)> onProgress,
+           std::function<void(const Outcome&)> onDone);
 
     ~Client();
 
-    Client(const Client &) = delete;
-    Client &operator=(const Client &) = delete;
+    Client(const Client&) = delete;
+    Client& operator=(const Client&) = delete;
 
     // 发文件。remoteName 为空时用 sourcePath 的文件名。
     void sendFile(std::string sourcePath, std::string remoteName, std::string toPeerId);
@@ -315,7 +307,7 @@ public:
     // GUI 里"点一次发送，自己的 id 就涨一号"，发送方自己也因此从对端表里
     // 消失。v1 是常驻连接天然没这问题，v2 用这个方法补回来。
     bool sendOnSession(std::string sourcePath, std::string remoteName, std::string toPeerId,
-                       std::function<void(const Outcome &)> done);
+                       std::function<void(const Outcome&)> done);
 
     // 在**现有常驻会话**上问一次远端目录（PROTOCOL.md §11.8）。
     //
@@ -323,7 +315,7 @@ public:
     // 警告的那类回归）。done 在这一次列举结束时调用，会话继续存活。
     // 返回 false = 当前没有可用的常驻会话（没连上 / 正在跑别的操作），
     // 调用方应提示"先连接"而不是偷偷降级成新连接。
-    bool browseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done);
+    bool browseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome&)> done);
 
     // 在**现有常驻会话**上请对端把某个文件发过来（PROTOCOL.md §11.9）。
     //
@@ -334,8 +326,7 @@ public:
     // 返回 false = 没有可用的常驻会话，或已经有一个取回请求在等应答。
     // archive=true 表示 relPath 指向目录，请对端打包（PROTOCOL.md §11.10）。
     // 归档请求的应答超时是 120 秒：对端要先压缩，应答在打包完成后才发。
-    bool pullOnSession(std::string peerId, std::string relPath, bool archive,
-                       std::function<void(const Outcome &)> done);
+    bool pullOnSession(std::string peerId, std::string relPath, bool archive, std::function<void(const Outcome&)> done);
 
     // 改**现有接收会话**的落点（GUI 的对照表行级下载用）。
     //
@@ -362,14 +353,13 @@ public:
     //     必须解到子目录里，否则内容散在接收目录；
     //   - 手动压缩的包**有顶层目录**（entryName 含源名），解到父目录即可；
     //     再套一层会变成 a/a/。
-    static std::string unpackArchive(const std::string &archivePath, bool intoSubdir = true);
+    static std::string unpackArchive(const std::string& archivePath, bool intoSubdir = true);
 
     // 把若干本地路径打成 tar.xz（手动压缩，GUI 右键用）。
     //
     // 包内路径相对**各源的父目录**，所以包里有顶层目录——与取回目录的包相反，
     // 解压时要配 unpackArchive(path, false)。
-    static bool createArchive(const std::vector<std::string> &sources, const std::string &archivePath,
-                              std::string &err);
+    static bool createArchive(const std::vector<std::string>& sources, const std::string& archivePath, std::string& err);
 
     // 取消正在进行的"会话内发送"（对端的收尾会看到 kLocalCancelled）。
     // 会话本身不受影响——接收继续等下一个文件。
@@ -380,11 +370,11 @@ public:
     // "发送方突然消失"。正常退出走 finishIdle()。
     void abort();
 
-    [[nodiscard]] const std::string &assignedId() const noexcept;
+    [[nodiscard]] const std::string& assignedId() const noexcept;
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace relayer::cli
+}   // namespace relayer::cli

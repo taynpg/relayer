@@ -26,8 +26,7 @@
 // 4. 没有全局状态、没有单例。实例由调用方创建并注入，
 //    传输引擎只认接口，不认具体实现。
 
-namespace relayer::filestore
-{
+namespace relayer::filestore {
 
 // ---------------------------------------------------------------------------
 // 错误
@@ -48,13 +47,12 @@ using ErrorCode = ::relayer::ErrorCode;
 // 元信息
 // ---------------------------------------------------------------------------
 
-struct FileStat
-{
+struct FileStat {
     bool exists{};
     bool isDir{};
     bool isSymlink{};
-    std::uint64_t size{};  // 目录为 0
-    std::int64_t mtime{};  // Unix epoch 秒；取不到时为 0
+    std::uint64_t size{};   // 目录为 0
+    std::int64_t mtime{};   // Unix epoch 秒；取不到时为 0
     bool readable{};
     bool writable{};
     bool executable{};
@@ -67,9 +65,8 @@ struct FileStat
     std::uint16_t mode{};
 };
 
-struct DirEntry
-{
-    std::string name;  // 仅文件名，不含目录部分
+struct DirEntry {
+    std::string name;   // 仅文件名，不含目录部分
     bool isDir{};
     std::uint64_t size{};
     std::int64_t mtime{};
@@ -86,7 +83,7 @@ public:
     virtual ~IReadStream() = default;
 
     // 读取至多 len 字节到 buf。返回实际字节数，失败时置 st 并返回 0。
-    virtual std::size_t read(void *buf, std::size_t len, Status &st) = 0;
+    virtual std::size_t read(void* buf, std::size_t len, Status& st) = 0;
 
     // 绝对定位。用于断点续传与乱序落盘。
     virtual Status seek(std::uint64_t offset) = 0;
@@ -102,7 +99,7 @@ public:
 
     // 写入 len 字节。必须全部写入或返回失败，不允许"部分写入但返回成功"
     // ——传输引擎依赖这一点来判断是否需要重传。
-    virtual Status write(const void *buf, std::size_t len) = 0;
+    virtual Status write(const void* buf, std::size_t len) = 0;
 
     // 绝对定位到 offset（从文件头算），后续 write 从这里开始。
     //
@@ -167,12 +164,12 @@ public:
     [[nodiscard]] virtual Status probeWritable(std::string_view path) const = 0;
 
     // ---- 读写 ----
-    virtual std::unique_ptr<IReadStream> openRead(std::string_view path, Status &st) const = 0;
-    virtual std::unique_ptr<IWriteStream> openWrite(std::string_view path, bool truncate, Status &st) const = 0;
+    virtual std::unique_ptr<IReadStream> openRead(std::string_view path, Status& st) const = 0;
+    virtual std::unique_ptr<IWriteStream> openWrite(std::string_view path, bool truncate, Status& st) const = 0;
 
     // ---- 目录 ----
     // 不递归时只列直接子项；递归时深度优先，结果顺序不保证。
-    virtual Status list(std::string_view dir, bool recursive, std::vector<DirEntry> &out) const = 0;
+    virtual Status list(std::string_view dir, bool recursive, std::vector<DirEntry>& out) const = 0;
     virtual Status mkdirs(std::string_view dir) const = 0;
 
     // ---- 变更 ----
@@ -204,4 +201,4 @@ public:
     [[nodiscard]] virtual std::string quickFingerprint(std::string_view path, std::int64_t sizeOverride = -1) const = 0;
 };
 
-}  // namespace relayer::filestore
+}   // namespace relayer::filestore

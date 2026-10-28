@@ -1,10 +1,9 @@
 #include "relayer/core/transfer/MerkleTree.h"
 
+#include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <string>
 #include <vector>
-
-#include <catch2/catch_test_macros.hpp>
 
 #include "relayer/common/crypto/Sha256.h"
 
@@ -17,26 +16,23 @@ using Digest = relayer::crypto::Sha256::Digest;
 // **树的形状**。形状错了的表现是"两端都对、就是不一致"，而那种问题
 // 在现场几乎无法定位——只能靠这里把规则一条条钉死。
 
-namespace
-{
+namespace {
 
 // 独立于生产代码的参考实现。
 //
 // 刻意不调用 computeRoot / MerkleBuilder：那样测试就退化成"实现和自己相等"，
 // 永远不会失败。这里按 PROTOCOL.md §8.3.1 的文字重新拼一遍。
-Digest referenceRoot(const std::vector<std::string> &chunks, std::uint32_t chunkSize)
+Digest referenceRoot(const std::vector<std::string>& chunks, std::uint32_t chunkSize)
 {
-    if (chunks.empty())
-    {
+    if (chunks.empty()) {
         return relayer::crypto::Sha256::hash("", 0);
     }
 
     std::vector<Digest> leaves;
     leaves.reserve(chunks.size());
-    for (const auto &c : chunks)
-    {
+    for (const auto& c : chunks) {
         std::vector<std::uint8_t> buf(c.begin(), c.end());
-        buf.resize(chunkSize, 0);  // 补零到整块
+        buf.resize(chunkSize, 0);   // 补零到整块
 
         relayer::crypto::Sha256 h;
         const std::uint8_t prefix = 0x00;
@@ -45,11 +41,9 @@ Digest referenceRoot(const std::vector<std::string> &chunks, std::uint32_t chunk
         leaves.push_back(h.digest());
     }
 
-    while (leaves.size() > 1)
-    {
+    while (leaves.size() > 1) {
         std::vector<Digest> next;
-        for (std::size_t i = 0; i + 1 < leaves.size(); i += 2)
-        {
+        for (std::size_t i = 0; i + 1 < leaves.size(); i += 2) {
             relayer::crypto::Sha256 h;
             const std::uint8_t prefix = 0x01;
             h.update(&prefix, 1);
@@ -57,9 +51,8 @@ Digest referenceRoot(const std::vector<std::string> &chunks, std::uint32_t chunk
             h.update(leaves[i + 1].data(), 32);
             next.push_back(h.digest());
         }
-        if (leaves.size() % 2 == 1)
-        {
-            next.push_back(leaves.back());  // 单独上提
+        if (leaves.size() % 2 == 1) {
+            next.push_back(leaves.back());   // 单独上提
         }
         leaves.swap(next);
     }
@@ -69,14 +62,13 @@ Digest referenceRoot(const std::vector<std::string> &chunks, std::uint32_t chunk
 std::string makeChunk(std::size_t len, std::uint8_t seed)
 {
     std::string s(len, '\0');
-    for (std::size_t i = 0; i < len; ++i)
-    {
+    for (std::size_t i = 0; i < len; ++i) {
         s[i] = static_cast<char>((seed + i * 7) & 0xFF);
     }
     return s;
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // 分块几何
@@ -113,7 +105,7 @@ TEST_CASE("chunk length is short only for the last block", "[transfer][merkle]")
     REQUIRE(chunkLengthAt(0, total, cs) == 1024);
     REQUIRE(chunkLengthAt(1, total, cs) == 1024);
     REQUIRE(chunkLengthAt(2, total, cs) == 452);
-    REQUIRE(chunkLengthAt(3, total, cs) == 0);  // 越界
+    REQUIRE(chunkLengthAt(3, total, cs) == 0);   // 越界
 
     // 恰好整除时没有短块。
     REQUIRE(chunkLengthAt(1, 2048, 1024) == 1024);
@@ -168,10 +160,9 @@ TEST_CASE("root matches golden vectors computed independently", "[transfer][merk
     //
     // 数据构造与 merkle_ref.py 一致：第 i 块的第 j 字节 = (i*13+1+j*7) & 0xFF。
     const std::uint32_t cs = 1024;
-    struct Vec
-    {
+    struct Vec {
         int n;
-        const char *root;
+        const char* root;
     };
     const Vec vectors[] = {
         {0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
@@ -186,15 +177,12 @@ TEST_CASE("root matches golden vectors computed independently", "[transfer][merk
         {9, "1f0ad93873ff3b200b2843675a0938f5af8c439ab6858647c3aad05a0b5d03fb"},
     };
 
-    for (const auto &v : vectors)
-    {
+    for (const auto& v : vectors) {
         std::string joined;
         MerkleBuilder b(cs);
-        for (int i = 0; i < v.n; ++i)
-        {
+        for (int i = 0; i < v.n; ++i) {
             std::string chunk(cs, '\0');
-            for (std::size_t j = 0; j < cs; ++j)
-            {
+            for (std::size_t j = 0; j < cs; ++j) {
                 chunk[j] = static_cast<char>((i * 13 + 1 + static_cast<int>(j) * 7) & 0xFF);
             }
             joined += chunk;
@@ -236,7 +224,7 @@ TEST_CASE("odd node is promoted, not duplicated", "[transfer][merkle]")
         three[0],
         three[1],
         three[2],
-        three[2],  // 复制最后一个
+        three[2],   // 复制最后一个
     };
 
     const auto r3 = computeRoot(three);
@@ -254,18 +242,15 @@ TEST_CASE("root matches an independent reference for many shapes", "[transfer][m
     // 覆盖 1..9 个块。9 个块会经过四层，奇数上提会在多个层级上发生，
     // 只测 3 个块不足以暴露"只在最后一层处理奇数"的半吊子实现。
     const std::uint32_t cs = 1024;
-    for (int n = 1; n <= 9; ++n)
-    {
+    for (int n = 1; n <= 9; ++n) {
         std::vector<std::string> chunks;
-        for (int i = 0; i < n; ++i)
-        {
+        for (int i = 0; i < n; ++i) {
             // 每块内容不同，否则"顺序错了"这件事测不出来。
             chunks.push_back(makeChunk(cs, static_cast<std::uint8_t>(i * 13 + 1)));
         }
 
         std::string joined;
-        for (const auto &c : chunks)
-        {
+        for (const auto& c : chunks) {
             joined += c;
         }
 
@@ -296,8 +281,7 @@ TEST_CASE("content change in any block changes the root", "[transfer][merkle]")
     std::string base(4096, 'x');
     const auto baseRoot = toHex(rootOfBuffer(base.data(), base.size(), cs));
 
-    for (std::size_t pos : {std::size_t{0}, std::size_t{1500}, std::size_t{4095}})
-    {
+    for (std::size_t pos : {std::size_t{0}, std::size_t{1500}, std::size_t{4095}}) {
         std::string mutated = base;
         mutated[pos] = 'y';
         INFO("mutated byte at " << pos);
@@ -317,8 +301,7 @@ TEST_CASE("last block is zero padded to chunkSize", "[transfer][merkle]")
     std::string padded = shortData;
     padded.resize(1024, '\0');
 
-    REQUIRE(toHex(leafHash(shortData.data(), shortData.size(), 1024)) ==
-            toHex(leafHash(padded.data(), padded.size(), 1024)));
+    REQUIRE(toHex(leafHash(shortData.data(), shortData.size(), 1024)) == toHex(leafHash(padded.data(), padded.size(), 1024)));
 }
 
 TEST_CASE("padded leaf is unaffected by buffer that already has trailing zeros", "[transfer][merkle]")
@@ -339,14 +322,12 @@ TEST_CASE("padded leaf is unaffected by buffer that already has trailing zeros",
 TEST_CASE("incremental builder agrees with one-shot root", "[transfer][merkle]")
 {
     const std::uint32_t cs = 1024;
-    for (int n = 0; n <= 9; ++n)
-    {
+    for (int n = 0; n <= 9; ++n) {
         std::string joined;
         MerkleBuilder b(cs);
         REQUIRE(b.valid());
 
-        for (int i = 0; i < n; ++i)
-        {
+        for (int i = 0; i < n; ++i) {
             const auto chunk = makeChunk(cs, static_cast<std::uint8_t>(i * 5 + 3));
             joined += chunk;
             const auto st = b.addChunk(chunk.data(), chunk.size());
@@ -363,10 +344,10 @@ TEST_CASE("builder rejects out-of-range chunk size", "[transfer][merkle]")
 {
     // 构造不抛异常，越界时进入非法状态，addChunk 报错。
     // 这是"跨模块边界不用异常"的既定约定。
-    REQUIRE_FALSE(MerkleBuilder(512).valid());                      // 小于下限
-    REQUIRE_FALSE(MerkleBuilder(0).valid());                        //
-    REQUIRE_FALSE(MerkleBuilder(4u * 1024 * 1024 + 1024).valid());  // 超过上限
-    REQUIRE_FALSE(MerkleBuilder(1500).valid());                     // 未按 1024 对齐
+    REQUIRE_FALSE(MerkleBuilder(512).valid());                       // 小于下限
+    REQUIRE_FALSE(MerkleBuilder(0).valid());                         //
+    REQUIRE_FALSE(MerkleBuilder(4u * 1024 * 1024 + 1024).valid());   // 超过上限
+    REQUIRE_FALSE(MerkleBuilder(1500).valid());                      // 未按 1024 对齐
 
     MerkleBuilder bad(512);
     REQUIRE_FALSE(bad.addChunk("x", 1).ok());
@@ -445,10 +426,8 @@ TEST_CASE("hex round trip and rejection", "[transfer][merkle]")
 
     // 大写也接受（对照用的工具常输出大写）。
     std::string upper = hex;
-    for (auto &c : upper)
-    {
-        if (c >= 'a' && c <= 'f')
-        {
+    for (auto& c : upper) {
+        if (c >= 'a' && c <= 'f') {
             c = static_cast<char>(c - 'a' + 'A');
         }
     }

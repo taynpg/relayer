@@ -25,20 +25,18 @@
 //
 // 4. 失败返回 Status，不抛异常（与 IFileStore 一致）。
 
-namespace relayer::filestore
-{
+namespace relayer::filestore {
 
 // 归档格式。
-enum class ArchiveFormat
-{
-    kZip,    // .zip，miniz 实现，可随机访问
-    kTarXz,  // .tar.xz，ustar + PAX + LZMA2，流式压缩率更高
+enum class ArchiveFormat {
+    kZip,     // .zip，miniz 实现，可随机访问
+    kTarXz,   // .tar.xz，ustar + PAX + LZMA2，流式压缩率更高
 };
 
 [[nodiscard]] std::string_view toString(ArchiveFormat format);
 
 // 根据文件名后缀猜格式。不认识返回 false。
-[[nodiscard]] bool guessFormat(std::string_view fileName, ArchiveFormat &out);
+[[nodiscard]] bool guessFormat(std::string_view fileName, ArchiveFormat& out);
 
 // 清洗一个待打包的条目名，返回空串表示"这个条目不能进归档"。
 //
@@ -57,8 +55,7 @@ enum class ArchiveFormat
 [[nodiscard]] std::string sanitizeEntryName(std::string_view entryName);
 
 // 打包时的一个条目。
-struct ArchiveItem
-{
+struct ArchiveItem {
     // 源路径（在 IFileStore 里）
     std::string sourcePath;
 
@@ -70,16 +67,14 @@ struct ArchiveItem
 };
 
 // 解包时的一个条目（供列表/预览用）。
-struct ArchiveEntry
-{
-    std::string name;  // 归档里的原始名字（未经清洗，可能是恶意路径）
+struct ArchiveEntry {
+    std::string name;   // 归档里的原始名字（未经清洗，可能是恶意路径）
     bool isDir{};
     std::uint64_t size{};
-    std::uint32_t crc32{};  // zip 有；tar 恒为 0
+    std::uint32_t crc32{};   // zip 有；tar 恒为 0
 };
 
-struct ArchiveOptions
-{
+struct ArchiveOptions {
     // 压缩级别。zip: 0-10（0 = 只存储）；tar.xz: 0-9。
     // 默认 6：对传输场景来说，压缩时间不敏感（相比网络），
     // 但过高的级别收益递减明显。
@@ -105,18 +100,18 @@ public:
     // 每项的 entryName 会先过一遍路径检查：必须是相对路径、不含 `..`、
     // 不以分隔符开头。不合规的条目不进归档（并在 skipped 里记下），
     // 因为"打出一个自己解不开的包"比"少打一个文件"更糟。
-    virtual Status create(std::string_view archivePath, const std::vector<ArchiveItem> &items,
-                          const ArchiveOptions &options, std::vector<std::string> &skipped) const = 0;
+    virtual Status create(std::string_view archivePath, const std::vector<ArchiveItem>& items, const ArchiveOptions& options,
+                          std::vector<std::string>& skipped) const = 0;
 
     // 列出归档内容。不写出任何文件。
     // 条目名字保留原样（不做清洗），调用方自己决定如何展示。
-    virtual Status list(std::string_view archivePath, std::vector<ArchiveEntry> &out) const = 0;
+    virtual Status list(std::string_view archivePath, std::vector<ArchiveEntry>& out) const = 0;
 
     // 解包到 destRoot 之下。每个条目落点 = resolveWithin(destRoot, entryName)，
     // 返回空串的条目被跳过并在 skipped 里记下（不是失败——
     // 一个恶意条目不该让整个解包失败，用户还得拿到其余文件）。
-    virtual Status extract(std::string_view archivePath, std::string_view destRoot, const ArchiveOptions &options,
-                           std::vector<std::string> &extracted, std::vector<std::string> &skipped) const = 0;
+    virtual Status extract(std::string_view archivePath, std::string_view destRoot, const ArchiveOptions& options,
+                           std::vector<std::string>& extracted, std::vector<std::string>& skipped) const = 0;
 };
 
-}  // namespace relayer::filestore
+}   // namespace relayer::filestore

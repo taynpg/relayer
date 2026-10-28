@@ -1,9 +1,8 @@
 #include "relayer/core/transport/FrameReader.h"
 
+#include <catch2/catch_test_macros.hpp>
 #include <string>
 #include <vector>
-
-#include <catch2/catch_test_macros.hpp>
 
 #include "relayer/core/protocol/Frame.h"
 
@@ -13,10 +12,9 @@ using namespace relayer::protocol;
 // Status 住在 relayer 下（跨模块共用），不在 transport 里
 using relayer::Status;
 
-namespace
-{
+namespace {
 
-std::vector<char> makeWire(FrameType type, const std::string &body, std::int64_t sessionId = 0, std::int64_t index = 0)
+std::vector<char> makeWire(FrameType type, const std::string& body, std::int64_t sessionId = 0, std::int64_t index = 0)
 {
     Frame f;
     f.type = type;
@@ -29,18 +27,17 @@ std::vector<char> makeWire(FrameType type, const std::string &body, std::int64_t
 }
 
 // 把全部缓冲喂进去，把能解的帧都取出来。
-std::vector<Frame> drain(FrameReader &r, Status &st)
+std::vector<Frame> drain(FrameReader& r, Status& st)
 {
     std::vector<Frame> out;
     Frame f;
-    while (r.next(f, st))
-    {
+    while (r.next(f, st)) {
         out.push_back(f);
     }
     return out;
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // 基本
@@ -84,11 +81,10 @@ TEST_CASE("reader handles one byte at a time", "[transport][framing]")
     FrameReader r;
     Status st;
 
-    for (std::size_t i = 0; i + 1 < wire.size(); ++i)
-    {
+    for (std::size_t i = 0; i + 1 < wire.size(); ++i) {
         REQUIRE(r.append(&wire[i], 1).ok());
         Frame f;
-        REQUIRE_FALSE(r.next(f, st));  // 还没收全
+        REQUIRE_FALSE(r.next(f, st));   // 还没收全
         REQUIRE(st.ok());
         // 一个字节都没被当成垃圾丢掉
         REQUIRE(r.garbageBytes() == 0);
@@ -108,8 +104,7 @@ TEST_CASE("reader handles every possible split point", "[transport][framing]")
     // 对每一帧，在每一个位置切开，两段分别喂入。这能抓到"只在某个偏移
     // 上出错"的分支。
     const auto wire = makeWire(FrameType::kAskFileList, "0123456789");
-    for (std::size_t split = 0; split <= wire.size(); ++split)
-    {
+    for (std::size_t split = 0; split <= wire.size(); ++split) {
         FrameReader r;
         Status st;
         INFO("split=" << split);
@@ -163,7 +158,7 @@ TEST_CASE("reader keeps the trailing partial frame", "[transport][framing]")
     std::vector<char> chunk;
     chunk.insert(chunk.end(), a.begin(), a.end());
     chunk.insert(chunk.end(), b.begin(), b.end());
-    chunk.insert(chunk.end(), c.begin(), c.begin() + 10);  // 半个头
+    chunk.insert(chunk.end(), c.begin(), c.begin() + 10);   // 半个头
 
     FrameReader r;
     Status st;
@@ -172,7 +167,7 @@ TEST_CASE("reader keeps the trailing partial frame", "[transport][framing]")
     auto frames = drain(r, st);
     REQUIRE(st.ok());
     REQUIRE(frames.size() == 2);
-    REQUIRE(r.buffered() == 10);  // 剩下的半个头留着
+    REQUIRE(r.buffered() == 10);   // 剩下的半个头留着
 
     // 补上剩余部分
     REQUIRE(r.append(c.data() + 10, c.size() - 10).ok());
@@ -232,11 +227,11 @@ TEST_CASE("reader treats a partial magic as pending, not garbage", "[transport][
     FrameReader r;
     Status st;
 
-    REQUIRE(r.append(wire.data(), 1).ok());  // 只发 'R'
+    REQUIRE(r.append(wire.data(), 1).ok());   // 只发 'R'
     Frame f;
     REQUIRE_FALSE(r.next(f, st));
     REQUIRE(st.ok());
-    REQUIRE(r.buffered() == 1);  // 保留了，没被当垃圾丢掉
+    REQUIRE(r.buffered() == 1);   // 保留了，没被当垃圾丢掉
 
     REQUIRE(r.append(wire.data() + 1, wire.size() - 1).ok());
     REQUIRE(r.next(f, st));
@@ -289,14 +284,14 @@ TEST_CASE("version mismatch without crc fix resyncs instead", "[transport][frami
 
     Frame f;
     REQUIRE_FALSE(r.next(f, st));
-    REQUIRE(st.ok());  // 不是错误，只是这一帧被当垃圾跳过了
+    REQUIRE(st.ok());   // 不是错误，只是这一帧被当垃圾跳过了
     REQUIRE(r.garbageBytes() > 0);
 }
 
 TEST_CASE("reader reports protocol error on body crc mismatch", "[transport][framing][error]")
 {
     auto wire = makeWire(FrameType::kAskId, "abcdef");
-    wire.back() = static_cast<char>(wire.back() ^ 0xFF);  // 破坏 body 尾部
+    wire.back() = static_cast<char>(wire.back() ^ 0xFF);   // 破坏 body 尾部
 
     FrameReader r;
     Status st;
@@ -330,17 +325,16 @@ TEST_CASE("reader enforces the buffer limit", "[transport][framing][error]")
         // 折中：分块逼近，但块大、次数少，总拷贝量约 64MB，跑一次几十毫秒。
         const std::vector<char> chunk(4 * 1024 * 1024, 'Q');
         std::size_t appends = 0;
-        while (r.buffered() + chunk.size() <= kMaxBufferedBytes)
-        {
+        while (r.buffered() + chunk.size() <= kMaxBufferedBytes) {
             REQUIRE(r.append(chunk).ok());
             ++appends;
         }
-        REQUIRE(appends == 16);  // 64MB / 4MB
+        REQUIRE(appends == 16);   // 64MB / 4MB
         REQUIRE(r.buffered() <= kMaxBufferedBytes);
 
         const std::size_t before = r.buffered();
         REQUIRE_FALSE(r.append(chunk).ok());
-        REQUIRE(r.buffered() == before);  // 被拒时不改变已有内容
+        REQUIRE(r.buffered() == before);   // 被拒时不改变已有内容
     }
 }
 
@@ -349,19 +343,17 @@ TEST_CASE("reader resyncs past garbage instead of growing", "[transport][framing
     // 反向验证：持续喂垃圾时缓冲**不应该**无限增长——字节会被当作前导
     // 垃圾逐步丢弃。这条是上一条的补充：上限只是兜底，正常重同步不该走到上限。
     FrameReader r;
-    std::vector<char> garbage(4096, 'Q');  // 'Q' 不是 magic 首字节
+    std::vector<char> garbage(4096, 'Q');   // 'Q' 不是 magic 首字节
 
-    for (int i = 0; i < 8; ++i)
-    {
+    for (int i = 0; i < 8; ++i) {
         REQUIRE(r.append(garbage).ok());
         Status st;
         Frame f;
-        while (r.next(f, st))
-        {
+        while (r.next(f, st)) {
         }
         REQUIRE(st.ok());
         // 重同步会把垃圾丢掉，缓冲不会累积
-        REQUIRE(r.buffered() <= 3);  // 最多残留一个不完整的 magic 前缀
+        REQUIRE(r.buffered() <= 3);   // 最多残留一个不完整的 magic 前缀
     }
     REQUIRE(r.garbageBytes() > 0);
 }
@@ -370,7 +362,7 @@ TEST_CASE("reader rejects null pointer with non-zero length", "[transport][frami
 {
     FrameReader r;
     REQUIRE_FALSE(r.append(nullptr, 8).ok());
-    REQUIRE(r.append(nullptr, 0).ok());  // 长度为 0 允许
+    REQUIRE(r.append(nullptr, 0).ok());   // 长度为 0 允许
 }
 
 // ===========================================================================
@@ -423,7 +415,7 @@ TEST_CASE("reader statistics track activity", "[transport][framing]")
     {
         r.clear();
         REQUIRE(r.buffered() == 0);
-        REQUIRE(r.framesRead() == 1);  // 统计是累计的，用于诊断
+        REQUIRE(r.framesRead() == 1);   // 统计是累计的，用于诊断
     }
 }
 
@@ -435,8 +427,7 @@ TEST_CASE("reader handles a large frame split across chunks", "[transport][frami
 {
     // 200KB，超出 body CRC 阈值，走不带 CRC 的路径。分 5 段喂入。
     std::string body(200 * 1024, '\0');
-    for (std::size_t i = 0; i < body.size(); ++i)
-    {
+    for (std::size_t i = 0; i < body.size(); ++i) {
         body[i] = static_cast<char>(i % 251);
     }
     const auto wire = makeWire(FrameType::kAskFileSamples, body);
@@ -445,8 +436,7 @@ TEST_CASE("reader handles a large frame split across chunks", "[transport][frami
     FrameReader r;
     Status st;
     const std::size_t chunkSize = wire.size() / 5 + 1;
-    for (std::size_t off = 0; off < wire.size(); off += chunkSize)
-    {
+    for (std::size_t off = 0; off < wire.size(); off += chunkSize) {
         const std::size_t n = std::min(chunkSize, wire.size() - off);
         REQUIRE(r.append(wire.data() + off, n).ok());
     }

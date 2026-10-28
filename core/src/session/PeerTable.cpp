@@ -5,11 +5,9 @@
 
 #include "ByteReader.h"
 
-namespace relayer::core::session
-{
+namespace relayer::core::session {
 
-namespace
-{
+namespace {
 
 // 载荷读写工具已抽到 ByteReader.h（与 FileList 的编解码共用一套）。
 using detail::putI64;
@@ -19,12 +17,11 @@ using detail::putU64;
 using detail::putU8;
 using detail::Reader;
 
-}  // namespace
+}   // namespace
 
 std::string_view toString(RegisterResult r) noexcept
 {
-    switch (r)
-    {
+    switch (r) {
     case RegisterResult::kOk:
         return "ok";
     case RegisterResult::kDuplicateId:
@@ -39,27 +36,23 @@ std::string_view toString(RegisterResult r) noexcept
 // PeerTable
 // ---------------------------------------------------------------------------
 
-PeerTable::PeerTable(std::size_t capacity) noexcept
-    : capacity_(capacity)
+PeerTable::PeerTable(std::size_t capacity) noexcept : capacity_(capacity)
 {
 }
 
-RegisterResult PeerTable::add(const PeerInfo &info)
+RegisterResult PeerTable::add(const PeerInfo& info)
 {
     // 空 id 必须在查重之前拦掉：`find("")` 也会返回 "不存在"，于是空 id
     // 会以"成功"的假象插进表里，之后所有按空 id 查找的调用都会命中它。
-    if (!isValidPeerId(info.id))
-    {
+    if (!isValidPeerId(info.id)) {
         return RegisterResult::kDuplicateId;
     }
 
-    if (peers_.find(info.id) != peers_.end())
-    {
+    if (peers_.find(info.id) != peers_.end()) {
         return RegisterResult::kDuplicateId;
     }
 
-    if (peers_.size() >= capacity_)
-    {
+    if (peers_.size() >= capacity_) {
         return RegisterResult::kFull;
     }
 
@@ -70,15 +63,14 @@ RegisterResult PeerTable::add(const PeerInfo &info)
 bool PeerTable::remove(std::string_view id)
 {
     const auto it = peers_.find(id);
-    if (it == peers_.end())
-    {
+    if (it == peers_.end()) {
         return false;
     }
     peers_.erase(it);
     return true;
 }
 
-const PeerInfo *PeerTable::find(std::string_view id) const
+const PeerInfo* PeerTable::find(std::string_view id) const
 {
     const auto it = peers_.find(id);
     return it == peers_.end() ? nullptr : &it->second;
@@ -93,8 +85,7 @@ std::vector<PeerInfo> PeerTable::list() const
 {
     std::vector<PeerInfo> out;
     out.reserve(peers_.size());
-    for (const auto &kv : peers_)
-    {
+    for (const auto& kv : peers_) {
         out.push_back(kv.second);
     }
     return out;
@@ -109,7 +100,7 @@ void PeerTable::clear() noexcept
 // id 分配
 // ---------------------------------------------------------------------------
 
-std::string allocateId(const PeerTable &table, std::uint64_t &nextHint)
+std::string allocateId(const PeerTable& table, std::uint64_t& nextHint)
 {
     // 循环直到找到空位。正常情况下第一次就命中——nextHint 单调递增，
     // 只有"表里恰好有人拿到了更大的号"（不可能，因为号都从这里发）或者
@@ -118,14 +109,12 @@ std::string allocateId(const PeerTable &table, std::uint64_t &nextHint)
     // 循环有一个隐含前提：表不可能被填满到让 while 永不终止。容量上限
     // 1024，而来这里的前提是"确实要新增一条"（调用方已经确认未满），
     // 所以最多试到表满就会退出循环。下面再兜一个断言式返回防止死循环。
-    for (std::size_t guard = 0; guard <= table.capacity(); ++guard)
-    {
+    for (std::size_t guard = 0; guard <= table.capacity(); ++guard) {
         std::string candidate = "client-";
         candidate.append(std::to_string(nextHint));
         ++nextHint;
 
-        if (!table.contains(candidate))
-        {
+        if (!table.contains(candidate)) {
             return candidate;
         }
     }
@@ -139,21 +128,17 @@ bool isValidPeerId(std::string_view id) noexcept
 {
     // 空 id 不合法：路由字段允许为空（表示"发给服务端自己"），
     // 所以一个空的客户端 id 会与"未指定目标"混淆。
-    if (id.empty())
-    {
+    if (id.empty()) {
         return false;
     }
     // 上限 255：路由字段用 u8 长度前缀（PROTOCOL.md §9.1）。
-    if (id.size() > 255)
-    {
+    if (id.size() > 255) {
         return false;
     }
     // 拒绝 NUL：id 会被塞进 string 并比较、打印，内嵌 NUL 会让日志截断，
     // 也让"看起来相同的两个 id"不等。
-    for (const char c : id)
-    {
-        if (c == '\0')
-        {
+    for (const char c : id) {
+        if (c == '\0') {
             return false;
         }
     }
@@ -169,32 +154,29 @@ std::vector<char> encodeAskId()
     return {};
 }
 
-Status encodeAnswerId(std::string_view assignedId, std::vector<char> &out)
+Status encodeAnswerId(std::string_view assignedId, std::vector<char>& out)
 {
     return encodeAnswerId(IdAnswerStatus::kOk, assignedId, out);
 }
 
-Status encodeAnswerId(IdAnswerStatus status, std::string_view assignedId, std::vector<char> &out)
+Status encodeAnswerId(IdAnswerStatus status, std::string_view assignedId, std::vector<char>& out)
 {
     out.clear();
 
-    if (status != IdAnswerStatus::kOk)
-    {
+    if (status != IdAnswerStatus::kOk) {
         // 拒绝时只发状态码，不带 id：带了会让人以为"这个 id 也有效"。
         putU8(out, static_cast<std::uint8_t>(status));
         return Status::Ok();
     }
 
-    if (assignedId.empty())
-    {
+    if (assignedId.empty()) {
         // 空 id 表示"服务端没能给你分配"——用 status=1 表达，
         // 而不是发一个长度为 0 的 id（那会被对端当成"成功但身份空白"）。
         putU8(out, static_cast<std::uint8_t>(IdAnswerStatus::kNotAssigned));
         return Status::Ok();
     }
 
-    if (!isValidPeerId(assignedId))
-    {
+    if (!isValidPeerId(assignedId)) {
         return Status::Fail(ErrorCode::kProtocol, "assigned id is not a valid routing field");
     }
 
@@ -204,11 +186,10 @@ Status encodeAnswerId(IdAnswerStatus status, std::string_view assignedId, std::v
     return Status::Ok();
 }
 
-Status encodeClaimId(std::string_view id, std::vector<char> &out)
+Status encodeClaimId(std::string_view id, std::vector<char>& out)
 {
     out.clear();
-    if (!isValidPeerId(id))
-    {
+    if (!isValidPeerId(id)) {
         return Status::Fail(ErrorCode::kProtocol, "claim id is not a valid routing field");
     }
     putU8(out, static_cast<std::uint8_t>(id.size()));
@@ -216,64 +197,56 @@ Status encodeClaimId(std::string_view id, std::vector<char> &out)
     return Status::Ok();
 }
 
-bool decodeClaimId(const std::vector<char> &body, std::string &id, std::string &err)
+bool decodeClaimId(const std::vector<char>& body, std::string& id, std::string& err)
 {
     id.clear();
 
     Reader r(body);
     const auto len = r.u8();
-    if (!r.ok())
-    {
+    if (!r.ok()) {
         err = "claim_id truncated: missing length byte";
         return false;
     }
-    if (len == 0)
-    {
+    if (len == 0) {
         err = "claim_id carries an empty id";
         return false;
     }
-    if (r.remaining() != len)
-    {
+    if (r.remaining() != len) {
         err = "claim_id length mismatch";
         return false;
     }
     id = r.str(len);
-    if (!r.ok())
-    {
+    if (!r.ok()) {
         err = "claim_id truncated";
         return false;
     }
     return true;
 }
 
-bool decodeAnswerId(const std::vector<char> &body, std::uint8_t &status, std::string &assignedId, std::string &err)
+bool decodeAnswerId(const std::vector<char>& body, std::uint8_t& status, std::string& assignedId, std::string& err)
 {
     status = 0;
     assignedId.clear();
 
     Reader r(body);
     status = r.u8();
-    if (!r.ok())
-    {
+    if (!r.ok()) {
         err = "answer_id truncated: missing status byte";
         return false;
     }
 
-    if (status != 0)
-    {
+    if (status != 0) {
         // 失败时不该带 id。带了说明对端实现有问题——但这不是安全风险，
         // 只是信息多余，所以容忍并把 id 清空（而不是判错断开）。
         return true;
     }
 
     const auto len = r.u8();
-    if (!r.ok())
-    {
+    if (!r.ok()) {
         err = "answer_id truncated: missing id length";
         return false;
     }
-    if (len == 0)
-    {
+    if (len == 0) {
         // status=0 却说 id 为空：矛盾。这是协议错误——对端声称成功
         // 却给不出身份，我们不能把它登记进 peer 表。
         err = "answer_id has status=ok but empty id";
@@ -281,14 +254,12 @@ bool decodeAnswerId(const std::vector<char> &body, std::uint8_t &status, std::st
     }
 
     assignedId = r.str(len);
-    if (!r.ok())
-    {
+    if (!r.ok()) {
         err = "answer_id truncated: id shorter than declared length";
         return false;
     }
 
-    if (r.remaining() != 0)
-    {
+    if (r.remaining() != 0) {
         // 尾部多余字节：说明对端版本比我们新，或者实现错乱。
         // 不当成错误——多余信息可以忽略，而断开会让版本升级变得更痛苦。
         return true;
@@ -297,24 +268,20 @@ bool decodeAnswerId(const std::vector<char> &body, std::uint8_t &status, std::st
     return true;
 }
 
-Status encodeClientList(const std::vector<PeerInfo> &peers, std::vector<char> &out)
+Status encodeClientList(const std::vector<PeerInfo>& peers, std::vector<char>& out)
 {
     out.clear();
 
-    if (peers.size() > 0xFFFFFFFFu)
-    {
+    if (peers.size() > 0xFFFFFFFFu) {
         return Status::Fail(ErrorCode::kProtocol, "client list too large");
     }
 
     putU32(out, static_cast<std::uint32_t>(peers.size()));
-    for (const auto &p : peers)
-    {
-        if (!isValidPeerId(p.id))
-        {
+    for (const auto& p : peers) {
+        if (!isValidPeerId(p.id)) {
             return Status::Fail(ErrorCode::kProtocol, "client list contains an invalid id");
         }
-        if (p.address.size() > 0xFFFFu)
-        {
+        if (p.address.size() > 0xFFFFu) {
             return Status::Fail(ErrorCode::kProtocol, "client list address too long");
         }
 
@@ -326,14 +293,13 @@ Status encodeClientList(const std::vector<PeerInfo> &peers, std::vector<char> &o
     return Status::Ok();
 }
 
-bool decodeClientList(const std::vector<char> &body, std::vector<PeerInfo> &peers, std::string &err)
+bool decodeClientList(const std::vector<char>& body, std::vector<PeerInfo>& peers, std::string& err)
 {
     peers.clear();
 
     Reader r(body);
     const auto count = r.u32();
-    if (!r.ok())
-    {
+    if (!r.ok()) {
         err = "client_list truncated: missing count";
         return false;
     }
@@ -342,38 +308,32 @@ bool decodeClientList(const std::vector<char> &body, std::vector<PeerInfo> &peer
     // 大 count 让我们 reserve 出一块巨大内存然后失败。
     //
     // 每条最短是 1（idLen）+ 1（id，至少 1 字节）+ 2（addrLen）= 4 字节。
-    if (count > r.remaining() / 4)
-    {
+    if (count > r.remaining() / 4) {
         err = "client_list count exceeds remaining bytes";
         return false;
     }
 
     peers.reserve(count);
-    for (std::uint32_t i = 0; i < count; ++i)
-    {
+    for (std::uint32_t i = 0; i < count; ++i) {
         PeerInfo p;
         const auto idLen = r.u8();
-        if (!r.ok())
-        {
+        if (!r.ok()) {
             err = "client_list truncated in id length";
             return false;
         }
         p.id = r.str(idLen);
-        if (!r.ok())
-        {
+        if (!r.ok()) {
             err = "client_list truncated in id";
             return false;
         }
 
         const auto addrLen = r.u16();
-        if (!r.ok())
-        {
+        if (!r.ok()) {
             err = "client_list truncated in address length";
             return false;
         }
         p.address = r.str(addrLen);
-        if (!r.ok())
-        {
+        if (!r.ok()) {
             err = "client_list truncated in address";
             return false;
         }
@@ -381,8 +341,7 @@ bool decodeClientList(const std::vector<char> &body, std::vector<PeerInfo> &peer
         peers.push_back(std::move(p));
     }
 
-    if (r.remaining() != 0)
-    {
+    if (r.remaining() != 0) {
         err = "client_list has trailing bytes";
         return false;
     }
@@ -390,4 +349,4 @@ bool decodeClientList(const std::vector<char> &body, std::vector<PeerInfo> &peer
     return true;
 }
 
-}  // namespace relayer::core::session
+}   // namespace relayer::core::session

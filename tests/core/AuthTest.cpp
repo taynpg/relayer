@@ -1,24 +1,21 @@
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <string>
 #include <vector>
-
-#include <catch2/catch_test_macros.hpp>
 
 #include "relayer/core/auth/Handshake.h"
 #include "relayer/core/protocol/Frame.h"
 
 using namespace relayer::core::auth;
 
-namespace
-{
+namespace {
 
 // 固定输入，让测试可复现。生产路径用 randomSalt/randomNonce，
 // 测试用这两个固定值注入，避免"随机导致偶发失败"。
 Salt fixedSalt(std::uint8_t seed = 0x11)
 {
     Salt s{};
-    for (std::size_t i = 0; i < s.size(); ++i)
-    {
+    for (std::size_t i = 0; i < s.size(); ++i) {
         s[i] = static_cast<std::uint8_t>(seed + i);
     }
     return s;
@@ -27,29 +24,26 @@ Salt fixedSalt(std::uint8_t seed = 0x11)
 Nonce fixedNonce(std::uint8_t seed)
 {
     Nonce n{};
-    for (std::size_t i = 0; i < n.size(); ++i)
-    {
+    for (std::size_t i = 0; i < n.size(); ++i) {
         n[i] = static_cast<std::uint8_t>(seed * 7 + i * 3);
     }
     return n;
 }
 
-constexpr const char *kPassword = "correct horse battery staple";
+constexpr const char* kPassword = "correct horse battery staple";
 
 // 一次完整握手的两端，用于反复构造"已验证"的状态。
-struct Pair
-{
+struct Pair {
     ServerHandshake server;
     ClientHandshake client;
 
     explicit Pair(std::string serverPw = kPassword, std::string clientPw = kPassword)
-        : server(ServerConfig{std::move(serverPw), false, params::kDefaultIterations})
-        , client(std::move(clientPw))
+        : server(ServerConfig{std::move(serverPw), false, params::kDefaultIterations}), client(std::move(clientPw))
     {
     }
 };
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // 协议常量
@@ -104,8 +98,7 @@ TEST_CASE("auth status codes match PROTOCOL.md table", "[auth][protocol]")
 
 TEST_CASE("auth status byte roundtrip", "[auth]")
 {
-    for (std::uint8_t raw = 0; raw <= 4; ++raw)
-    {
+    for (std::uint8_t raw = 0; raw <= 4; ++raw) {
         bool ok = false;
         const auto s = authStatusFromByte(raw, ok);
         REQUIRE(ok);
@@ -114,8 +107,7 @@ TEST_CASE("auth status byte roundtrip", "[auth]")
 
     SECTION("未知值被拒且归为 internal")
     {
-        for (const std::uint8_t raw : {std::uint8_t{5}, std::uint8_t{6}, std::uint8_t{100}, std::uint8_t{255}})
-        {
+        for (const std::uint8_t raw : {std::uint8_t{5}, std::uint8_t{6}, std::uint8_t{100}, std::uint8_t{255}}) {
             bool ok = true;
             const auto s = authStatusFromByte(raw, ok);
             REQUIRE_FALSE(ok);
@@ -437,7 +429,7 @@ TEST_CASE("handshake succeeds with matching password", "[auth][flow]")
     Frame nothing;
     hasOut = true;
     REQUIRE(p.client.handleFrame(result, nothing, hasOut).ok());
-    REQUIRE_FALSE(hasOut);  // 成功后不再产出帧
+    REQUIRE_FALSE(hasOut);   // 成功后不再产出帧
     REQUIRE(p.client.phase() == ClientPhase::kEstablished);
     REQUIRE(p.client.established());
 
@@ -668,7 +660,7 @@ TEST_CASE("client nonce equal to server nonce is rejected", "[auth][failure]")
     REQUIRE(server.startWith(challenge, hasOut, salt, shared).ok());
 
     const SessionKey key = deriveKey(kPassword, salt);
-    const Proof proof = computeClientProof(key, shared, shared);  // 两个 nonce 相同
+    const Proof proof = computeClientProof(key, shared, shared);   // 两个 nonce 相同
     Frame response = makeAuthFrame(FrameType::kAuthResponse, encodeResponse(shared, proof));
 
     Frame out;
@@ -817,7 +809,7 @@ TEST_CASE("server with allowNoAuth skips the handshake", "[auth][noauth]")
     Frame out;
     bool hasOut = true;
     REQUIRE(server.start(out, hasOut).ok());
-    REQUIRE_FALSE(hasOut);  // 不发 Challenge
+    REQUIRE_FALSE(hasOut);   // 不发 Challenge
     REQUIRE(server.established());
     REQUIRE(server.noAuth());
 
@@ -894,10 +886,8 @@ TEST_CASE("CSPRNG fills the buffer", "[auth][random]")
     REQUIRE(a != b);
 
     bool allZero = true;
-    for (const auto v : a)
-    {
-        if (v != 0)
-        {
+    for (const auto v : a) {
+        if (v != 0) {
             allZero = false;
             break;
         }
@@ -919,8 +909,8 @@ TEST_CASE("fillRandom handles edge cases", "[auth][random]")
     std::uint8_t one = 0;
     REQUIRE(fillRandom(&one, 1));
 
-    REQUIRE(fillRandom(nullptr, 0));        // 长度为 0 允许空指针
-    REQUIRE_FALSE(fillRandom(nullptr, 8));  // 长度非 0 但空指针是错误
+    REQUIRE(fillRandom(nullptr, 0));         // 长度为 0 允许空指针
+    REQUIRE_FALSE(fillRandom(nullptr, 8));   // 长度非 0 但空指针是错误
 }
 
 // ===========================================================================
@@ -931,7 +921,7 @@ TEST_CASE("bindSenderIdentity overrides forged from", "[auth][identity]")
 {
     Frame f;
     f.type = FrameType::kFileRequestSend;
-    f.from = "victim-client-id";  // 客户端伪造成别人
+    f.from = "victim-client-id";   // 客户端伪造成别人
 
     bindSenderIdentity(f, "real-client-id");
     REQUIRE(f.from == "real-client-id");
@@ -1049,8 +1039,7 @@ TEST_CASE("full handshake is deterministic when nonces are fixed", "[auth][flow]
 {
     // 客户端 nonceC 由 CSPRNG 生成，无法从外部注入。所以这里改用"手工构造
     // Response"的方式固定全部输入，端到端跑两遍，确认 serverProof 一致。
-    auto run = []() -> Proof
-    {
+    auto run = []() -> Proof {
         ServerHandshake server(ServerConfig{kPassword, false, params::kDefaultIterations});
         const Salt salt = fixedSalt();
         const Nonce ns = fixedNonce(1);

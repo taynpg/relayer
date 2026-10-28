@@ -3,8 +3,7 @@
 #include <QDialog>
 
 QT_BEGIN_NAMESPACE
-namespace Ui
-{
+namespace Ui {
 class LogControl;
 }
 QT_END_NAMESPACE
@@ -21,21 +20,21 @@ class LogControl : public QDialog
     Q_OBJECT
 
 public:
-    explicit LogControl(QWidget *parent = nullptr);
+    explicit LogControl(QWidget* parent = nullptr);
     ~LogControl() override;
 
-    LogControl(const LogControl &) = delete;
-    LogControl &operator=(const LogControl &) = delete;
+    LogControl(const LogControl&) = delete;
+    LogControl& operator=(const LogControl&) = delete;
 
 public slots:
-    void appendLog(const QString &msg);
+    void appendLog(const QString& msg);
 
 signals:
     // 用户在右键菜单里改了接收目录。
-    void receiveDirChanged(const QString &dir);
+    void receiveDirChanged(const QString& dir);
 
 private:
     void initMenu();
 
-    Ui::LogControl *ui_;
+    Ui::LogControl* ui_;
 };

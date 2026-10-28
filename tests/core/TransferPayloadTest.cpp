@@ -1,10 +1,9 @@
 #include "relayer/core/transfer/TransferPayload.h"
 
+#include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <string>
 #include <vector>
-
-#include <catch2/catch_test_macros.hpp>
 
 using namespace relayer::core::transfer;
 using relayer::ErrorCode;
@@ -17,8 +16,7 @@ using relayer::Status;
 // 所以这里除了往返测试，还要逐字节核对固定向量，并覆盖所有"畸形输入"
 // 路径——那些路径是攻击面，也是"老版本遇到新版本"的第一道防线。
 
-namespace
-{
+namespace {
 
 const std::string kSha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const std::string kFp = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
@@ -35,7 +33,7 @@ TransferDesc makeDesc()
     return d;
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // 会话描述
@@ -88,8 +86,7 @@ TEST_CASE("transfer desc has a stable byte layout", "[transfer][payload]")
     want.push_back('a');
     want.push_back('b');
     // u64 小端
-    for (int i = 0; i < 8; ++i)
-    {
+    for (int i = 0; i < 8; ++i) {
         want.push_back(static_cast<char>((d.totalSize >> (8 * i)) & 0xFF));
     }
     // u32 小端 = 1024 = 0x00000400
@@ -98,13 +95,11 @@ TEST_CASE("transfer desc has a stable byte layout", "[transfer][payload]")
     want.push_back(0x00);
     want.push_back(0x00);
     want.push_back(64);
-    for (int i = 0; i < 64; ++i)
-    {
+    for (int i = 0; i < 64; ++i) {
         want.push_back('a');
     }
     want.push_back(64);
-    for (int i = 0; i < 64; ++i)
-    {
+    for (int i = 0; i < 64; ++i) {
         want.push_back('b');
     }
     want.push_back(1);
@@ -135,7 +130,7 @@ TEST_CASE("desc validation rejects bad shapes", "[transfer][payload]")
     }
     SECTION("chunk size misaligned")
     {
-        d.chunkSize = 1536;  // 1.5 KiB，在范围内但没按 1024 对齐
+        d.chunkSize = 1536;   // 1.5 KiB，在范围内但没按 1024 对齐
         REQUIRE_FALSE(validateDesc(d).ok());
     }
     SECTION("sha256 wrong length")
@@ -167,8 +162,8 @@ TEST_CASE("desc validation rejects u32 chunk index overflow", "[transfer][payloa
     // 块数必须能塞进 u32，否则 line 上的 chunkIndex 会绕回，
     // 表现为"第 0 块被反复覆盖"，而总数对得上。
     auto d = makeDesc();
-    d.chunkSize = kMinChunkSize;           // 1 KiB
-    d.totalSize = std::uint64_t{1} << 50;  // 2^50 / 2^10 = 2^40 块
+    d.chunkSize = kMinChunkSize;            // 1 KiB
+    d.totalSize = std::uint64_t{1} << 50;   // 2^50 / 2^10 = 2^40 块
     REQUIRE_FALSE(validateDesc(d).ok());
 
     // 边界内的最大值可以接受。
@@ -186,8 +181,7 @@ TEST_CASE("desc decode rejects truncated and trailing input", "[transfer][payloa
     SECTION("every truncation fails")
     {
         // 逐字节截断：任何一个截断点都不该解出"看起来正常"的描述。
-        for (std::size_t cut = 0; cut < buf.size(); ++cut)
-        {
+        for (std::size_t cut = 0; cut < buf.size(); ++cut) {
             std::vector<char> partial(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(cut));
             TransferDesc out;
             std::string err;
@@ -212,10 +206,8 @@ TEST_CASE("desc hashes are normalized to lower case", "[transfer][payload]")
 {
     // 大小写不统一会让两端日志里的同一个哈希 grep 不到一起。
     auto d = makeDesc();
-    for (auto &c : d.sha256Hex)
-    {
-        if (c >= 'a' && c <= 'f')
-        {
+    for (auto& c : d.sha256Hex) {
+        if (c >= 'a' && c <= 'f') {
             c = static_cast<char>(c - 'a' + 'A');
         }
     }
@@ -226,7 +218,7 @@ TEST_CASE("desc hashes are normalized to lower case", "[transfer][payload]")
     TransferDesc back;
     std::string err;
     REQUIRE(decodeDesc(buf, back, err));
-    REQUIRE(back.sha256Hex == kSha);  // 解出来是小写
+    REQUIRE(back.sha256Hex == kSha);   // 解出来是小写
 }
 
 // ===========================================================================
@@ -236,9 +228,7 @@ TEST_CASE("desc hashes are normalized to lower case", "[transfer][payload]")
 TEST_CASE("transfer answer round trips for all statuses", "[transfer][payload]")
 {
     using S = AnswerStatus;
-    for (auto s :
-         {S::kOk, S::kTargetExists, S::kNoSpace, S::kNotWritable, S::kBadDesc, S::kDuplicateTask, S::kTooLarge})
-    {
+    for (auto s : {S::kOk, S::kTargetExists, S::kNoSpace, S::kNotWritable, S::kBadDesc, S::kDuplicateTask, S::kTooLarge}) {
         TransferAnswer a;
         a.status = s;
         a.resumeOffset = s == S::kOk ? 8192 : 0;
@@ -263,16 +253,14 @@ TEST_CASE("answer rejects unknown status code", "[transfer][payload]")
 {
     // 这是"以后加了新状态，老版本误当成功"的唯一防线。
     std::vector<char> buf;
-    buf.push_back(static_cast<char>(99));  // 未知状态
-    for (int i = 0; i < 8; ++i)
-    {
+    buf.push_back(static_cast<char>(99));   // 未知状态
+    for (int i = 0; i < 8; ++i) {
         buf.push_back(0);
     }
-    for (int i = 0; i < 4; ++i)
-    {
+    for (int i = 0; i < 4; ++i) {
         buf.push_back(0);
     }
-    buf.push_back(0);  // reason 长度 0
+    buf.push_back(0);   // reason 长度 0
 
     TransferAnswer a;
     std::string err;
@@ -340,7 +328,7 @@ TEST_CASE("chunk decode rejects length mismatch", "[transfer][payload]")
     SECTION("payloadLen claims more than present")
     {
         auto bad = buf;
-        bad[4] = 100;  // payloadLen 的低字节改成 100
+        bad[4] = 100;   // payloadLen 的低字节改成 100
         ChunkData c;
         std::string err;
         REQUIRE_FALSE(decodeChunk(bad, c, err));
@@ -394,7 +382,7 @@ TEST_CASE("bitmap bit order is low bit first", "[transfer][payload]")
     REQUIRE(bitmapTest(bm, 31));
     REQUIRE(bitmapTest(bm, 32));
     REQUIRE_FALSE(bitmapTest(bm, 1));
-    REQUIRE_FALSE(bitmapTest(bm, 33));  // 越界返回 false
+    REQUIRE_FALSE(bitmapTest(bm, 33));   // 越界返回 false
 }
 
 TEST_CASE("ack through is the longest contiguous prefix", "[transfer][payload]")
@@ -405,7 +393,7 @@ TEST_CASE("ack through is the longest contiguous prefix", "[transfer][payload]")
     const auto ack = buildAck(received, 6);
 
     REQUIRE(ack.ackThrough == 2);
-    REQUIRE(bitmapTest(ack.bitmap, 3));  // 块 5 = ackThrough + 3
+    REQUIRE(bitmapTest(ack.bitmap, 3));   // 块 5 = ackThrough + 3
     REQUIRE_FALSE(bitmapTest(ack.bitmap, 0));
     REQUIRE_FALSE(bitmapTest(ack.bitmap, 1));
     REQUIRE_FALSE(bitmapTest(ack.bitmap, 2));
@@ -565,8 +553,7 @@ TEST_CASE("complete request round trips", "[transfer][payload]")
 TEST_CASE("complete answer round trips for all statuses", "[transfer][payload]")
 {
     using S = CompleteStatus;
-    for (auto s : {S::kOk, S::kRootMismatch, S::kWriteFailed, S::kShapeMismatch})
-    {
+    for (auto s : {S::kOk, S::kRootMismatch, S::kWriteFailed, S::kShapeMismatch}) {
         std::vector<char> buf;
         // 失败时带本端算出的根，便于对端定位是哪一块错了。
         const std::string root = (s == S::kOk) ? std::string{} : kSha;
@@ -585,8 +572,8 @@ TEST_CASE("complete answer round trips for all statuses", "[transfer][payload]")
 TEST_CASE("complete answer rejects unknown status", "[transfer][payload]")
 {
     std::vector<char> buf;
-    buf.push_back(9);  // 未知
-    buf.push_back(0);  // root 长度 0
+    buf.push_back(9);   // 未知
+    buf.push_back(0);   // root 长度 0
 
     CompleteStatus s;
     std::string root;
@@ -603,12 +590,10 @@ TEST_CASE("complete request rejects non-hex root", "[transfer][payload]")
     // 解码侧也要拒，不能只靠发送方自觉。
     std::vector<char> bad;
     bad.push_back(64);
-    for (int i = 0; i < 64; ++i)
-    {
+    for (int i = 0; i < 64; ++i) {
         bad.push_back('z');
     }
-    for (int i = 0; i < 8; ++i)
-    {
+    for (int i = 0; i < 8; ++i) {
         bad.push_back(0);
     }
 
@@ -643,9 +628,9 @@ TEST_CASE("unknown cancel reason degrades instead of failing", "[transfer][paylo
     // body 格式：u8 reason || u16 msgLen || msg（§9.1 的通用字符串约定，
     // 这里用的是 u16 长度前缀，不是路由字段那种 u8）。
     std::vector<char> buf;
-    buf.push_back(99);  // 未知原因
-    buf.push_back(2);   // msgLen 低字节
-    buf.push_back(0);   // msgLen 高字节
+    buf.push_back(99);   // 未知原因
+    buf.push_back(2);    // msgLen 低字节
+    buf.push_back(0);    // msgLen 高字节
     buf.push_back('h');
     buf.push_back('i');
 
@@ -662,8 +647,7 @@ TEST_CASE("cancel rejects truncation", "[transfer][payload]")
     std::vector<char> buf;
     REQUIRE(encodeCancel(CancelReason::kTimeout, "too slow", buf).ok());
 
-    for (std::size_t cut = 0; cut < buf.size(); ++cut)
-    {
+    for (std::size_t cut = 0; cut < buf.size(); ++cut) {
         std::vector<char> partial(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(cut));
         CancelReason r{};
         std::string msg;

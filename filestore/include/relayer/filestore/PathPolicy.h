@@ -20,18 +20,16 @@
 //
 // 所有路径参数与返回值都是 UTF-8 编码的 std::string，与 IFileStore 一致。
 
-namespace relayer::filestore
-{
+namespace relayer::filestore {
 
 // 路径按哪种规则解释。
 //
 // 默认取当前平台的规则；测试里可以显式指定，用来验证"在 Linux 上处理
 // Windows 风格路径"这类跨平台逻辑。
-enum class PathStyle
-{
-    kNative,  // 当前平台（Windows → kWindows，其它 → kPosix）
-    kPosix,   // 只用 `/`，绝对路径以 `/` 开头
-    kWindows  // `/` 与 `\` 都算分隔符；`C:/`、`C:\`、`\\server\share` 算绝对
+enum class PathStyle {
+    kNative,   // 当前平台（Windows → kWindows，其它 → kPosix）
+    kPosix,    // 只用 `/`，绝对路径以 `/` 开头
+    kWindows   // `/` 与 `\` 都算分隔符；`C:/`、`C:\`、`\\server\share` 算绝对
 };
 
 class PathPolicy
@@ -76,4 +74,4 @@ private:
     PathStyle style_;
 };
 
-}  // namespace relayer::filestore
+}   // namespace relayer::filestore

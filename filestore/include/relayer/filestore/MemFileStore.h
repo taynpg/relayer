@@ -32,12 +32,10 @@
 //   - 路径规则复用 PathPolicy，因此它和 StdFileStore 的路径语义一致——
 //     测试里换实现不会得到不同的拼接结果。
 
-namespace relayer::filestore
-{
+namespace relayer::filestore {
 
 // 一次故障注入。所有字段都是可选的。
-struct FaultInjection
-{
+struct FaultInjection {
     // 命中该前缀的路径触发故障。空串表示"所有路径"。
     std::string pathPrefix;
 
@@ -78,10 +76,10 @@ public:
     [[nodiscard]] FileStat stat(std::string_view path) const override;
     [[nodiscard]] Status probeWritable(std::string_view path) const override;
 
-    std::unique_ptr<IReadStream> openRead(std::string_view path, Status &st) const override;
-    std::unique_ptr<IWriteStream> openWrite(std::string_view path, bool truncate, Status &st) const override;
+    std::unique_ptr<IReadStream> openRead(std::string_view path, Status& st) const override;
+    std::unique_ptr<IWriteStream> openWrite(std::string_view path, bool truncate, Status& st) const override;
 
-    Status list(std::string_view dir, bool recursive, std::vector<DirEntry> &out) const override;
+    Status list(std::string_view dir, bool recursive, std::vector<DirEntry>& out) const override;
     Status mkdirs(std::string_view dir) const override;
 
     Status remove(std::string_view path) const override;
@@ -94,12 +92,12 @@ public:
     // 这些方法不属于 IFileStore，只在测试里用。
 
     // 直接放入一个文件（不经过流，不触发故障注入）
-    void putFile(const std::string &path, const std::string &content);
-    void putDir(const std::string &path);
+    void putFile(const std::string& path, const std::string& content);
+    void putDir(const std::string& path);
 
     // 取回文件内容。不存在时返回空并可查 exists
-    [[nodiscard]] std::string getFile(const std::string &path) const;
-    [[nodiscard]] bool has(const std::string &path) const;
+    [[nodiscard]] std::string getFile(const std::string& path) const;
+    [[nodiscard]] bool has(const std::string& path) const;
 
     // 磁盘容量上限（字节），0 表示不限。
     // 超限时写入返回 kNoSpace，模拟真实磁盘满。
@@ -118,10 +116,9 @@ public:
     void setFlushOnClose(bool value);
 
 private:
-    struct Node
-    {
+    struct Node {
         bool isDir = false;
-        std::string content;  // 仅文件
+        std::string content;   // 仅文件
         std::int64_t mtime = 0;
     };
 
@@ -134,4 +131,4 @@ private:
     friend class MemReadStream;
 };
 
-}  // namespace relayer::filestore
+}   // namespace relayer::filestore

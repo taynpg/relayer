@@ -55,16 +55,14 @@
 // 到上限时 acceptChunk 返回 kBusy，上层应当暂停从连接读数据（背压的
 // 逻辑层落点，物理层仍在 WorkerPool 队列上）。
 
-namespace relayer::core::transfer
-{
+namespace relayer::core::transfer {
 
 // 接收方要写出去的一块数据。
 //
 // data 按值持有：这块数据从网络缓冲区拷出来之后，网络层那块缓冲马上就能
 // 复用/释放。不拷的话写盘任务是异步的，等它跑起来时原缓冲可能已经被
 // 下一次读覆盖——这类 bug 表现为"偶发文件损坏"，几乎无法复现。
-struct ReceivedChunk
-{
+struct ReceivedChunk {
     std::uint32_t chunkIndex = 0;
     std::vector<char> data;
 };
@@ -72,8 +70,7 @@ struct ReceivedChunk
 class TransferReceiver
 {
 public:
-    struct Config
-    {
+    struct Config {
         // "已收到但还没写盘"的块数上限。它同时是内存上限与背压着力点。
         //
         // 按块数而不是字节数：块大小是传输开始时就定好的常量，一个块数
@@ -97,13 +94,13 @@ public:
     };
 
     // 不拥有任何东西；store 与 pool 的生命周期必须覆盖本对象。
-    TransferReceiver(filestore::IFileStore &store, WorkerPool &pool);
-    TransferReceiver(filestore::IFileStore &store, WorkerPool &pool, Config config);
+    TransferReceiver(filestore::IFileStore& store, WorkerPool& pool);
+    TransferReceiver(filestore::IFileStore& store, WorkerPool& pool, Config config);
 
     ~TransferReceiver();
 
-    TransferReceiver(const TransferReceiver &) = delete;
-    TransferReceiver &operator=(const TransferReceiver &) = delete;
+    TransferReceiver(const TransferReceiver&) = delete;
+    TransferReceiver& operator=(const TransferReceiver&) = delete;
 
     // 接受传输描述，在 targetPath 上准备接收。
     //
@@ -120,15 +117,15 @@ public:
     // 这里**不预分配**整个文件：1GB 的传输一上来就 resize 到 1GB，在文件
     // 系统上是瞬间的，但会让"磁盘满"报在一个和实际写入无关的时刻。逐块
     // 写入让 kNoSpace 出现在它真正发生的时候。
-    [[nodiscard]] Status open(const TransferDesc &desc, std::string_view targetPath, std::uint32_t &resumeFrom);
+    [[nodiscard]] Status open(const TransferDesc& desc, std::string_view targetPath, std::uint32_t& resumeFrom);
 
     [[nodiscard]] std::uint32_t totalChunks() const noexcept;
     [[nodiscard]] std::uint32_t chunkSize() const noexcept;
     [[nodiscard]] std::uint64_t totalSize() const noexcept;
 
     // 残片路径（正式输出是 targetPath）。
-    [[nodiscard]] const std::string &partPath() const noexcept;
-    [[nodiscard]] const std::string &targetPath() const noexcept;
+    [[nodiscard]] const std::string& partPath() const noexcept;
+    [[nodiscard]] const std::string& targetPath() const noexcept;
 
     // 判重：这一块是否已经"收到且落盘"。
     //
@@ -149,7 +146,7 @@ public:
     //   kBusy      背压上限到了，调用方应暂停并稍后重试（不要当失败处理，
     //              更不要断开连接）
     //   其他       chunkIndex 越界、描述非法、已取消等真错误
-    [[nodiscard]] Status acceptChunk(std::uint32_t chunkIndex, const void *data, std::size_t len, const PostFn &post);
+    [[nodiscard]] Status acceptChunk(std::uint32_t chunkIndex, const void* data, std::size_t len, const PostFn& post);
 
     // 写盘完成后由投递回调调用。public 的理由同 TransferSender::onChunkReady。
     void onChunkWritten(ReceivedChunk chunk);
@@ -175,11 +172,10 @@ public:
 
     // ---- 收尾 ----
 
-    struct FinalizeResult
-    {
+    struct FinalizeResult {
         CompleteStatus status = CompleteStatus::kOk;
-        std::string actualRootHex;  // 实际算出的根，失败时用来说明差在哪
-        Status error;               // status != kOk 时的底层原因（可为空）
+        std::string actualRootHex;   // 实际算出的根，失败时用来说明差在哪
+        Status error;                // status != kOk 时的底层原因（可为空）
     };
 
     // 校验并落成正式文件。
@@ -222,8 +218,8 @@ private:
     // 拿到锁时那些任务要么已完成、要么还没开始。
     void closeWriteStream() noexcept;
 
-    filestore::IFileStore &store_;
-    WorkerPool &pool_;
+    filestore::IFileStore& store_;
+    WorkerPool& pool_;
     Config config_;
 
     std::string targetPath_;
@@ -241,8 +237,8 @@ private:
     // 全部由 mu_ 保护。
     mutable std::mutex mu_;
 
-    std::vector<bool> written_;   // 已落盘的块
-    std::vector<bool> received_;  // 已受理、还在写的块（判重用）
+    std::vector<bool> written_;    // 已落盘的块
+    std::vector<bool> received_;   // 已受理、还在写的块（判重用）
     Status writeError_;
 
     // 在写但没回来的任务数。它和 written_.size() 是两件事：
@@ -271,4 +267,4 @@ private:
     bool aborted_ = false;
 };
 
-}  // namespace relayer::core::transfer
+}   // namespace relayer::core::transfer

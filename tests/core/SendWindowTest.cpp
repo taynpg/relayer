@@ -1,9 +1,8 @@
 #include "relayer/core/transfer/SendWindow.h"
 
+#include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <vector>
-
-#include <catch2/catch_test_macros.hpp>
 
 using namespace relayer::core::transfer;
 
@@ -17,25 +16,22 @@ using namespace relayer::core::transfer;
 // 前两种靠人眼能发现，后两种只能靠这里。所以本文件的重点全在
 // "乱序 / 丢包 / 重复 ACK" 这三类输入上。
 
-namespace
-{
+namespace {
 
 // 构造一个 ACK：ackThrough = through，其后 overrides 里为 true 的块视为已收到。
-ChunkAck makeAck(std::uint32_t through, const std::vector<std::uint32_t> &receivedAfter)
+ChunkAck makeAck(std::uint32_t through, const std::vector<std::uint32_t>& receivedAfter)
 {
     ChunkAck a;
     a.ackThrough = through;
-    for (auto idx : receivedAfter)
-    {
-        if (idx >= through)
-        {
+    for (auto idx : receivedAfter) {
+        if (idx >= through) {
             bitmapSet(a.bitmap, idx - through);
         }
     }
     return a;
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // 基本推进
@@ -46,7 +42,7 @@ TEST_CASE("empty transfer is immediately done", "[transfer][window]")
     SendWindow w(0, 4);
     REQUIRE(w.done());
     REQUIRE(w.takeNextBatch(10).empty());
-    REQUIRE(w.freeSlots() == 0);  // 没有块要发，也就没有"空位"
+    REQUIRE(w.freeSlots() == 0);   // 没有块要发，也就没有"空位"
 }
 
 TEST_CASE("takes chunks in order up to the window", "[transfer][window]")
@@ -97,12 +93,12 @@ TEST_CASE("takeNextBatch respects maxCount", "[transfer][window]")
 TEST_CASE("ack through stops at the first gap", "[transfer][window]")
 {
     SendWindow w(10, 8);
-    (void)w.takeNextBatch(8);  // 0..7 在飞
+    (void)w.takeNextBatch(8);   // 0..7 在飞
 
     // 收到 0,1，跳过 2，收到 3,4。
     const auto newly = w.applyAck(makeAck(2, {3, 4}));
     REQUIRE(newly == 4);
-    REQUIRE(w.contiguousAcked() == 2);  // 2 还没到
+    REQUIRE(w.contiguousAcked() == 2);   // 2 还没到
     REQUIRE(w.acked() == 4);
 
     // 块 2 仍是 in-flight（还没被判丢）。
@@ -138,7 +134,7 @@ TEST_CASE("ack position uses the ack's own through as base", "[transfer][window]
     (void)w.applyAck(a);
 
     REQUIRE(w.stateOf(4) == ChunkState::kAcked);
-    REQUIRE(w.stateOf(2) != ChunkState::kAcked);  // 2 本身没收到
+    REQUIRE(w.stateOf(2) != ChunkState::kAcked);   // 2 本身没收到
     REQUIRE(w.stateOf(6) != ChunkState::kAcked);
 }
 
@@ -213,7 +209,7 @@ TEST_CASE("retransmit is preferred over new chunks", "[transfer][window]")
     // 这是重传饥饿的防线：新块不会让 ackThrough 前进，空洞会。
     // 顺序反过来会让窗口被"永远推不动的块"占满，表现为卡在 99%。
     SendWindow w(10, 4);
-    (void)w.takeNextBatch(4);  // 0..3 在飞
+    (void)w.takeNextBatch(4);   // 0..3 在飞
 
     // 块 1 超时。
     REQUIRE(w.markRetransmit({1}) == 1);
@@ -231,8 +227,8 @@ TEST_CASE("retransmit is preferred over new chunks", "[transfer][window]")
 TEST_CASE("retransmit does not apply to acked or pending chunks", "[transfer][window]")
 {
     SendWindow w(10, 8);
-    (void)w.takeNextBatch(4);          // 0..3 在飞
-    (void)w.applyAck(makeAck(2, {}));  // 0,1 已确认
+    (void)w.takeNextBatch(4);           // 0..3 在飞
+    (void)w.applyAck(makeAck(2, {}));   // 0,1 已确认
 
     // 已确认的块不该被判丢：那说明 ACK 自相矛盾，回退会让已经落盘的
     // 数据重传一遍。
@@ -253,7 +249,7 @@ TEST_CASE("retransmitted counts only chunks taken for retransmit", "[transfer][w
     // 只补 2 次。若它把新块也算进来，丢包场景看起来就像"整份重传"，
     // 而那正是要防的退化——内容仍然对，只有这个数字能看出来。
     SendWindow w(10, 8);
-    (void)w.takeNextBatch(8);  // 0..7 首轮发出，窗口满
+    (void)w.takeNextBatch(8);   // 0..7 首轮发出，窗口满
     REQUIRE(w.retransmitted() == 0);
 
     // 标记不是重传：只是把状态改成"该重传了"。
@@ -294,20 +290,20 @@ TEST_CASE("released chunks become pending again", "[transfer][window]")
 TEST_CASE("release ignores chunks that are not in flight", "[transfer][window]")
 {
     SendWindow w(4, 4);
-    (void)w.takeNextBatch(2);  // 0,1
+    (void)w.takeNextBatch(2);   // 0,1
     (void)w.applyAck(makeAck(1, {}));
 
     // 块 0 已确认，释放它不该让它回到 pending。
     w.release({0, 99});
     REQUIRE(w.stateOf(0) == ChunkState::kAcked);
-    REQUIRE(w.pending() == 2);  // 2,3
+    REQUIRE(w.pending() == 2);   // 2,3
 }
 
 TEST_CASE("outstanding reports only in-flight chunks", "[transfer][window]")
 {
     SendWindow w(10, 8);
-    (void)w.takeNextBatch(3);          // 0,1,2 在飞
-    (void)w.applyAck(makeAck(1, {}));  // 0 确认
+    (void)w.takeNextBatch(3);           // 0,1,2 在飞
+    (void)w.applyAck(makeAck(1, {}));   // 0 确认
 
     const auto o = w.outstanding();
     REQUIRE(o == std::vector<std::uint32_t>{1, 2});
@@ -330,7 +326,7 @@ TEST_CASE("window of one forces strict lockstep", "[transfer][window]")
 {
     SendWindow w(3, 1);
     REQUIRE(w.takeNextBatch(1) == std::vector<std::uint32_t>{0});
-    REQUIRE(w.takeNextBatch(1).empty());  // 必须等 ACK
+    REQUIRE(w.takeNextBatch(1).empty());   // 必须等 ACK
 
     (void)w.applyAck(makeAck(1, {}));
     REQUIRE(w.takeNextBatch(1) == std::vector<std::uint32_t>{1});
@@ -365,7 +361,7 @@ TEST_CASE("freeSlots is bounded by remaining chunks", "[transfer][window]")
     // 少了这个上界，一块 1MB 的文件配 4MB 窗口就会一直报 1/2/3，
     // 调用方据此空转——表现为"传输完成了但调度器还在跑"。
     SendWindow w(2, 16);
-    REQUIRE(w.freeSlots() == 2);  // 只剩 2 块，窗口再大也只有 2
+    REQUIRE(w.freeSlots() == 2);   // 只剩 2 块，窗口再大也只有 2
 
     (void)w.takeNextBatch(2);
     REQUIRE(w.freeSlots() == 0);
@@ -391,10 +387,9 @@ TEST_CASE("full transfer with a lost chunk completes", "[transfer][window]")
 
     bool droppedOnce = false;
     int rounds = 0;
-    const int kMaxRounds = 1000;  // 防死循环：真挂住时给个明确失败而不是卡住
+    const int kMaxRounds = 1000;   // 防死循环：真挂住时给个明确失败而不是卡住
 
-    while (!w.done() && rounds < kMaxRounds)
-    {
+    while (!w.done() && rounds < kMaxRounds) {
         ++rounds;
 
         // 1. 发送方尽量填满窗口，把块交给网络。
@@ -402,10 +397,8 @@ TEST_CASE("full transfer with a lost chunk completes", "[transfer][window]")
 
         // 2. 网络：块 7 的第一次传输丢失，之后的重传正常到达。
         std::vector<std::uint32_t> lost;
-        for (auto idx : batch)
-        {
-            if (idx == 7 && !firstAttempt[7] && !droppedOnce)
-            {
+        for (auto idx : batch) {
+            if (idx == 7 && !firstAttempt[7] && !droppedOnce) {
                 firstAttempt[7] = true;
                 droppedOnce = true;
                 lost.push_back(idx);
@@ -416,8 +409,7 @@ TEST_CASE("full transfer with a lost chunk completes", "[transfer][window]")
 
         // 3. 丢掉的块立刻判丢（真实实现里由重传定时器驱动，这里直接触发
         //    以保持模拟可复现）。判丢后它会回到重传队列，优先被再次取走。
-        if (!lost.empty())
-        {
+        if (!lost.empty()) {
             REQUIRE(w.markRetransmit(lost) == lost.size());
         }
 
@@ -426,13 +418,12 @@ TEST_CASE("full transfer with a lost chunk completes", "[transfer][window]")
     }
 
     REQUIRE(rounds < kMaxRounds);
-    REQUIRE(droppedOnce);  // 模拟确实制造了一次丢包，否则这条测试没验证到东西
+    REQUIRE(droppedOnce);   // 模拟确实制造了一次丢包，否则这条测试没验证到东西
     REQUIRE(w.done());
     REQUIRE(w.acked() == kTotal);
 
     // 最终内容必须齐全。
-    for (std::uint32_t i = 0; i < kTotal; ++i)
-    {
+    for (std::uint32_t i = 0; i < kTotal; ++i) {
         INFO("chunk " << i);
         REQUIRE(received[i]);
     }
@@ -444,7 +435,7 @@ TEST_CASE("pending chunks after a gap are still taken", "[transfer][window]")
     // 非 kPending 的块上停住，那个空洞就会挡住后面所有块——窗口明明还有
     // 空位，却发不出东西。
     SendWindow w(8, 8);
-    (void)w.takeNextBatch(8);  // 0..7 全部在飞
+    (void)w.takeNextBatch(8);   // 0..7 全部在飞
 
     // 只有块 0 和 2 到了，块 1 还没。于是 3..7 仍在飞。
     (void)w.applyAck(makeAck(1, {2}));
@@ -472,19 +463,16 @@ TEST_CASE("out of order arrival converges without retransmit", "[transfer][windo
     // 第 1 轮发 0..7，但只让偶数块"到达"。
     auto b1 = w.takeNextBatch(8);
     REQUIRE(b1.size() == 8);
-    for (auto idx : b1)
-    {
-        if (idx % 2 == 0)
-        {
+    for (auto idx : b1) {
+        if (idx % 2 == 0) {
             received[idx] = true;
         }
     }
     (void)w.applyAck(buildAck(received, kTotal));
-    REQUIRE(w.contiguousAcked() == 1);  // 只有块 0
+    REQUIRE(w.contiguousAcked() == 1);   // 只有块 0
 
     // 奇数块迟到。
-    for (std::uint32_t i = 1; i < 8; i += 2)
-    {
+    for (std::uint32_t i = 1; i < 8; i += 2) {
         received[i] = true;
     }
     (void)w.applyAck(buildAck(received, kTotal));
@@ -493,8 +481,7 @@ TEST_CASE("out of order arrival converges without retransmit", "[transfer][windo
     // 后 8 块正常走完。
     auto b2 = w.takeNextBatch(8);
     REQUIRE(b2 == std::vector<std::uint32_t>{8, 9, 10, 11, 12, 13, 14, 15});
-    for (auto idx : b2)
-    {
+    for (auto idx : b2) {
         received[idx] = true;
     }
     (void)w.applyAck(buildAck(received, kTotal));

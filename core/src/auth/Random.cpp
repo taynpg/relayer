@@ -33,17 +33,14 @@
 #endif
 // clang-format on
 
-namespace relayer::core::auth
-{
+namespace relayer::core::auth {
 
-bool fillRandom(void *buf, std::size_t len) noexcept
+bool fillRandom(void* buf, std::size_t len) noexcept
 {
-    if (len == 0)
-    {
+    if (len == 0) {
         return true;
     }
-    if (buf == nullptr)
-    {
+    if (buf == nullptr) {
         return false;
     }
 
@@ -52,50 +49,42 @@ bool fillRandom(void *buf, std::size_t len) noexcept
     // 它保证成功时一定填满 len 字节，返回值只有 STATUS_SUCCESS 一个成功码。
     const NTSTATUS st =
         ::BCryptGenRandom(nullptr, static_cast<PUCHAR>(buf), static_cast<ULONG>(len), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-    return st == 0;  // STATUS_SUCCESS
+    return st == 0;   // STATUS_SUCCESS
 #elif defined(__APPLE__)
     ::arc4random_buf(buf, len);
     return true;
 #else
-    auto *p = static_cast<std::uint8_t *>(buf);
+    auto* p = static_cast<std::uint8_t*>(buf);
     std::size_t filled = 0;
 
     // getrandom 可能被信号打断，也可能在内核熵池尚未初始化时返回部分数据，
     // 所以必须循环直到填满。
-    while (filled < len)
-    {
+    while (filled < len) {
         const ssize_t n = ::getrandom(p + filled, len - filled, 0);
-        if (n > 0)
-        {
+        if (n > 0) {
             filled += static_cast<std::size_t>(n);
             continue;
         }
-        if (n < 0 && errno == EINTR)
-        {
+        if (n < 0 && errno == EINTR) {
             continue;
         }
-        break;  // ENOSYS 或其它错误：退到 /dev/urandom
+        break;   // ENOSYS 或其它错误：退到 /dev/urandom
     }
-    if (filled == len)
-    {
+    if (filled == len) {
         return true;
     }
 
     const int fd = ::open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-    {
+    if (fd < 0) {
         return false;
     }
-    while (filled < len)
-    {
+    while (filled < len) {
         const ssize_t n = ::read(fd, p + filled, len - filled);
-        if (n > 0)
-        {
+        if (n > 0) {
             filled += static_cast<std::size_t>(n);
             continue;
         }
-        if (n < 0 && errno == EINTR)
-        {
+        if (n < 0 && errno == EINTR) {
             continue;
         }
         ::close(fd);
@@ -106,14 +95,14 @@ bool fillRandom(void *buf, std::size_t len) noexcept
 #endif
 }
 
-bool randomSalt(Salt &out) noexcept
+bool randomSalt(Salt& out) noexcept
 {
     return fillRandom(out.data(), out.size());
 }
 
-bool randomNonce(Nonce &out) noexcept
+bool randomNonce(Nonce& out) noexcept
 {
     return fillRandom(out.data(), out.size());
 }
 
-}  // namespace relayer::core::auth
+}   // namespace relayer::core::auth

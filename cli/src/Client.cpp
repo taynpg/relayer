@@ -1,12 +1,11 @@
 #include "relayer/cli/Client.h"
 
 #include <algorithm>
+#include <asio/post.hpp>
+#include <asio/steady_timer.hpp>
 #include <chrono>
 #include <filesystem>
 #include <utility>
-
-#include <asio/post.hpp>
-#include <asio/steady_timer.hpp>
 
 #include "relayer/core/session/FileList.h"
 #include "relayer/core/session/PeerTable.h"
@@ -27,11 +26,9 @@
 // 这不是"暂时偷懒"，而是本类被设计成必须单线程 run 的：pump 定时器、
 // 帧回调、结束回调都在同一个 strand 语义下顺序执行。
 
-namespace relayer::cli
-{
+namespace relayer::cli {
 
-namespace
-{
+namespace {
 
 using protocol::Frame;
 using protocol::FrameType;
@@ -46,32 +43,26 @@ constexpr auto kProgressInterval = std::chrono::milliseconds(100);
 // 10ms 对它够用：重传判定是秒级，ACK 是 20ms 级。
 constexpr auto kPumpInterval = std::chrono::milliseconds(10);
 
-std::string fileNameOf(const std::string &path)
+std::string fileNameOf(const std::string& path)
 {
     filestore::PathPolicy policy;
     return policy.fileName(path);
 }
 
-}  // namespace
+}   // namespace
 
-struct Client::Impl
-{
-    Impl(asio::io_context &ctxIn, ClientConfig cfg, std::function<void(const ProgressReport &)> prog,
-         std::function<void(const Outcome &)> done)
-        : ctx(ctxIn)
-        , config(std::move(cfg))
-        , onProgress(std::move(prog))
-        , onDone(std::move(done))
-        , pumpTimer(ctxIn)
-        , watchdog(ctxIn)
-        , progressTimer(ctxIn)
+struct Client::Impl {
+    Impl(asio::io_context& ctxIn, ClientConfig cfg, std::function<void(const ProgressReport&)> prog,
+         std::function<void(const Outcome&)> done)
+        : ctx(ctxIn), config(std::move(cfg)), onProgress(std::move(prog)), onDone(std::move(done)), pumpTimer(ctxIn),
+          watchdog(ctxIn), progressTimer(ctxIn)
     {
     }
 
-    asio::io_context &ctx;
+    asio::io_context& ctx;
     ClientConfig config;
-    std::function<void(const ProgressReport &)> onProgress;
-    std::function<void(const Outcome &)> onDone;
+    std::function<void(const ProgressReport&)> onProgress;
+    std::function<void(const Outcome&)> onDone;
 
     filestore::StdFileStore store;
     core::transfer::WorkerPool pool{2};
@@ -93,11 +84,11 @@ struct Client::Impl
     std::string sendSourcePath;
     std::string sendRemoteName;
     std::string sendToPeerId;
-    std::function<void(const Outcome &)> onSendDone;
+    std::function<void(const Outcome&)> onSendDone;
     bool sendActive = false;
 
     asio::steady_timer pumpTimer;
-    asio::steady_timer watchdog;  // 空闲 / 总时长
+    asio::steady_timer watchdog;   // 空闲 / 总时长
     asio::steady_timer progressTimer;
     // 会话内列举的应答超时。对端离线时服务端**静默丢帧**（§11.3 没有"投递
     // 失败"这一类），不设这个定时器，远端浏览面板会永远停在"读取中"。
@@ -113,7 +104,7 @@ struct Client::Impl
     // 常驻会话上的列举（GUI 用，见 Client::browseOnSession）。与 sendActive
     // 同一套思路：会话不结束，只把这一次的结论回调给上层。
     bool browseActive = false;
-    std::function<void(const Outcome &)> onBrowseDone;
+    std::function<void(const Outcome&)> onBrowseDone;
 
     // 会话内的一次"取回请求"（PROTOCOL.md §11.9）。只等到 kAnswerFilePull
     // 为止——真正的文件由常驻接收会话收下，走的是普通接收路径。
@@ -121,7 +112,7 @@ struct Client::Impl
     // 这一次是"取目录"还是"取文件"。只影响失败文案：同一个 kNotFound，
     // 对文件请求是"不存在或它是目录"，对目录请求是"不存在或它不是目录"。
     bool pullIsArchive = false;
-    std::function<void(const Outcome &)> onPullDone;
+    std::function<void(const Outcome&)> onPullDone;
     asio::steady_timer pullTimer{ctx};
     std::string targetPath;
 
@@ -174,8 +165,7 @@ struct Client::Impl
     // 走这里，否则会出现"先因为超时报了错，两秒后又因为对端回帧报了成功"。
     void finish(bool ok, std::string summary, Status status = Status{}, bool connectionLost = false)
     {
-        if (finished)
-        {
+        if (finished) {
             return;
         }
         finished = true;
@@ -195,22 +185,19 @@ struct Client::Impl
         onBrowseDone = nullptr;
         browseTimer.cancel();
 
-        if (!ok)
-        {
+        if (!ok) {
             // 失败时**不**调 session->close()：先让调用方看到结论，关闭
             // 交给析构。反过来（先关再报）会让 main 拿到结论时连接已经
             // 没了，日志里看不出是哪一步断的。
         }
 
-        if (onDone)
-        {
+        if (onDone) {
             Outcome o;
             o.ok = ok;
             o.summary = std::move(summary);
             o.status = std::move(status);
             o.connectionLost = connectionLost;
-            if (peer)
-            {
+            if (peer) {
                 // 只在这里读一次：finish 之后 peer 会被上层释放，之后再取
                 // 就是悬空访问。
                 const auto s = peer->stats();
@@ -221,15 +208,11 @@ struct Client::Impl
                 o.stats.acksSent = s.acksSent;
                 o.stats.acksReceived = s.acksReceived;
             }
-            if (action == Action::kList)
-            {
-                for (const auto &p : peers)
-                {
+            if (action == Action::kList) {
+                for (const auto& p : peers) {
                     o.peerList.push_back(PeerEntry{p.id, p.address});
                 }
-            }
-            else if (action == Action::kBrowse || browseDone)
-            {
+            } else if (action == Action::kBrowse || browseDone) {
                 o.remoteEntries = remoteEntries;
                 o.listStatus = listStatus;
             }
@@ -243,68 +226,54 @@ struct Client::Impl
 
     void startPump()
     {
-        if (finished)
-        {
+        if (finished) {
             return;
         }
         pumpTimer.expires_after(kPumpInterval);
-        pumpTimer.async_wait(
-            [this](std::error_code ec)
-            {
-                if (ec || finished)
-                {
-                    return;
-                }
-                if (sendPeer)
-                {
-                    sendPeer->pump();
-                }
-                if (peer)
-                {
-                    peer->pump();
-                }
-                // 空闲判定放在这里而不是单独一个定时器：pump 本来就在
-                // 固定节拍上跑，再起一个只会多一条要 cancel 的生命周期。
-                checkIdle();
-                startPump();
-            });
+        pumpTimer.async_wait([this](std::error_code ec) {
+            if (ec || finished) {
+                return;
+            }
+            if (sendPeer) {
+                sendPeer->pump();
+            }
+            if (peer) {
+                peer->pump();
+            }
+            // 空闲判定放在这里而不是单独一个定时器：pump 本来就在
+            // 固定节拍上跑，再起一个只会多一条要 cancel 的生命周期。
+            checkIdle();
+            startPump();
+        });
     }
 
     void startProgressTimer()
     {
-        if (finished)
-        {
+        if (finished) {
             return;
         }
         progressTimer.expires_after(kProgressInterval);
-        progressTimer.async_wait(
-            [this](std::error_code ec)
-            {
-                if (ec || finished)
-                {
-                    return;
-                }
-                reportProgress();
-                startProgressTimer();
-            });
+        progressTimer.async_wait([this](std::error_code ec) {
+            if (ec || finished) {
+                return;
+            }
+            reportProgress();
+            startProgressTimer();
+        });
     }
 
     void armHardTimeout()
     {
-        if (config.hardTimeout.count() <= 0 || finished)
-        {
+        if (config.hardTimeout.count() <= 0 || finished) {
             return;
         }
         watchdog.expires_after(config.hardTimeout);
-        watchdog.async_wait(
-            [this](std::error_code ec)
-            {
-                if (ec || finished)
-                {
-                    return;
-                }
-                finish(false, "超时：操作总时长超过上限", Status::Fail(ErrorCode::kTimeout, "hard timeout"));
-            });
+        watchdog.async_wait([this](std::error_code ec) {
+            if (ec || finished) {
+                return;
+            }
+            finish(false, "超时：操作总时长超过上限", Status::Fail(ErrorCode::kTimeout, "hard timeout"));
+        });
     }
 
     // 空闲判定：多久没有任何**看得见的进展**。
@@ -322,20 +291,17 @@ struct Client::Impl
     // 本地还在干活，就说明不是对端的问题。
     void checkIdle()
     {
-        if (finished || !authenticated)
-        {
+        if (finished || !authenticated) {
             return;
         }
 
         // 看门狗盯"当前在动的那件事"：有会话内发送时看发送，否则看接收。
         // 两者同时在跑时只看发送——接收那边的沉默由它自己的收尾/空闲
         // 判定负责，而批次场景下用户关心的是发送是否卡住。
-        auto *active = (sendActive && sendPeer) ? sendPeer.get() : peer.get();
-        if (active)
-        {
+        auto* active = (sendActive && sendPeer) ? sendPeer.get() : peer.get();
+        if (active) {
             const auto p = active->progress();
-            if (p.bytesDone != lastActivityBytes)
-            {
+            if (p.bytesDone != lastActivityBytes) {
                 lastActivityBytes = p.bytesDone;
                 lastActivity = std::chrono::steady_clock::now();
                 return;
@@ -358,16 +324,14 @@ struct Client::Impl
             //
             // 真正的兜底是 hardTimeout（如果调用方给了）——那是另一个语义：
             // 不管有没有进展，总共只许花这么久。
-            if (!active->started())
-            {
+            if (!active->started()) {
                 lastActivity = std::chrono::steady_clock::now();
                 return;
             }
         }
 
         const auto idle = std::chrono::steady_clock::now() - lastActivity;
-        if (idle < config.idleTimeout)
-        {
+        if (idle < config.idleTimeout) {
             return;
         }
 
@@ -376,8 +340,7 @@ struct Client::Impl
         // 说清楚，测试失败时人才不会往错的方向查。
         finish(false,
                "对端长时间无响应（" +
-                   std::to_string(std::chrono::duration_cast<std::chrono::seconds>(config.idleTimeout).count()) +
-                   " 秒无进展）",
+                   std::to_string(std::chrono::duration_cast<std::chrono::seconds>(config.idleTimeout).count()) + " 秒无进展）",
                Status::Fail(ErrorCode::kTimeout, "peer idle"),
                // 发送方视角的"对端失联"就是连接级失败：可能是对端进程死了，
                // 也可能是中继链路断了。批次执行者凭它决定"剩余项不再发"。
@@ -391,17 +354,15 @@ struct Client::Impl
 
     void reportProgress()
     {
-        auto *active = (sendActive && sendPeer) ? sendPeer.get() : peer.get();
-        if (!onProgress || !active)
-        {
+        auto* active = (sendActive && sendPeer) ? sendPeer.get() : peer.get();
+        if (!onProgress || !active) {
             return;
         }
         const auto p = active->progress();
 
         const auto now = std::chrono::steady_clock::now();
         const auto dt = std::chrono::duration<double>(now - lastReportAt).count();
-        if (dt > 0.0 && p.bytesDone >= lastBytes)
-        {
+        if (dt > 0.0 && p.bytesDone >= lastBytes) {
             lastSpeed = static_cast<double>(p.bytesDone - lastBytes) / dt;
         }
         lastBytes = p.bytesDone;
@@ -435,8 +396,7 @@ struct Client::Impl
 
         core::session::SessionHandler h;
 
-        h.onAuthenticated = [this](core::session::Session &self, std::string id)
-        {
+        h.onAuthenticated = [this](core::session::Session& self, std::string id) {
             const std::string previous = assignedId;
             assignedId = std::move(id);
             authenticated = true;
@@ -450,11 +410,9 @@ struct Client::Impl
             //
             // claimSent 防重入：声明成功后 assignPeerId 会再回调一次
             // onAuthenticated（新身份），不设防就会无限声明。
-            if (!config.requestedId.empty() && !claimSent)
-            {
+            if (!config.requestedId.empty() && !claimSent) {
                 claimSent = true;
-                if (const auto st = self.claimPeerId(config.requestedId); !st.ok())
-                {
+                if (const auto st = self.claimPeerId(config.requestedId); !st.ok()) {
                     finish(false, "声明标识失败：" + config.requestedId, st, true);
                     return;
                 }
@@ -487,20 +445,17 @@ struct Client::Impl
             // e2e 的 head -1 就会拿到它（"接收端 id 不是我要的那个"），
             // GUI 也会闪一下错误的身份。所以只认"等于声明的那个"。
             const bool identityFinal = config.requestedId.empty() || assignedId == config.requestedId;
-            if (!assignedId.empty() && assignedId != previous && identityFinal)
-            {
+            if (!assignedId.empty() && assignedId != previous && identityFinal) {
                 std::printf("ASSIGNED_ID=%s\n", assignedId.c_str());
                 std::fflush(stdout);
-                if (config.onIdAssigned)
-                {
+                if (config.onIdAssigned) {
                     config.onIdAssigned(assignedId);
                 }
 
                 // askListOnStart 放在"真实 id 到手"这一刻而不是 startReceiving：
                 // 首次 onAuthenticated 回调时身份还是空的，此刻问列表，服务端
                 // 返回的名单里未必有自己（id 都还没发），GUI 的自标红就会失效。
-                if (action == Action::kReceive && config.askListOnStart)
-                {
+                if (action == Action::kReceive && config.askListOnStart) {
                     touch();
                     requestPeerList();
                 }
@@ -514,23 +469,17 @@ struct Client::Impl
             // 必须等身份**最终确定**（identityFinal）再发：声明了标识时，
             // 第一次回调的身份还是空的，那时发出去 to 会是空串（被当成
             // "发给服务端"），请求直接进黑洞。
-            if (action == Action::kReceive && identityFinal && !config.selfSendPath.empty() && !selfSendStarted)
-            {
+            if (action == Action::kReceive && identityFinal && !config.selfSendPath.empty() && !selfSendStarted) {
                 selfSendStarted = true;
-                const bool started =
-                    startSendOnSession(config.selfSendPath, std::string(), assignedId,
-                                       [this](const Outcome &o)
-                                       {
-                                           // 成功不做额外动作：接收侧收完会自己 finish（退出码
-                                           // 由它决定）。失败要提前结束，否则进程挂在"等文件"
-                                           // 上直到硬超时，看不出是自检发送出了问题。
-                                           if (!o.ok)
-                                           {
-                                               finish(false, "自检发送失败：" + o.summary, o.status, o.connectionLost);
-                                           }
-                                       });
-                if (!started)
-                {
+                const bool started = startSendOnSession(config.selfSendPath, std::string(), assignedId, [this](const Outcome& o) {
+                    // 成功不做额外动作：接收侧收完会自己 finish（退出码
+                    // 由它决定）。失败要提前结束，否则进程挂在"等文件"
+                    // 上直到硬超时，看不出是自检发送出了问题。
+                    if (!o.ok) {
+                        finish(false, "自检发送失败：" + o.summary, o.status, o.connectionLost);
+                    }
+                });
+                if (!started) {
                     finish(false, "自检发送未能启动（接收会话不可用）",
                            Status::Fail(ErrorCode::kUnknown, "self-send unavailable"), false);
                 }
@@ -538,82 +487,65 @@ struct Client::Impl
 
             // 远端取回（PROTOCOL.md §11.9）：在接收会话上请对端把文件发过来。
             // 走 recv 模式是因为回程的文件需要这个常驻会话收下。
-            if (action == Action::kReceive && identityFinal && !config.pullFrom.empty() && !pullStarted)
-            {
+            if (action == Action::kReceive && identityFinal && !config.pullFrom.empty() && !pullStarted) {
                 pullStarted = true;
                 const bool started =
-                    startPullOnSession(config.pullFrom, config.pullPath, config.pullAsArchive,
-                                       [this](const Outcome &o)
-                                       {
-                                           std::printf("PULL %s\n", o.ok ? "accepted" : "failed");
-                                           std::fflush(stdout);
-                                           if (!o.ok)
-                                           {
-                                               // 拒绝/超时：不会再等文件了，直接结束。
-                                               // 成功则继续等回程的文件（接收路径负责收尾）。
-                                               finish(false, "取回失败：" + o.summary, o.status, false);
-                                           }
-                                       });
-                if (!started)
-                {
-                    finish(false, "取回请求未能发起（会话不可用或正忙）",
-                           Status::Fail(ErrorCode::kUnknown, "pull unavailable"), false);
+                    startPullOnSession(config.pullFrom, config.pullPath, config.pullAsArchive, [this](const Outcome& o) {
+                        std::printf("PULL %s\n", o.ok ? "accepted" : "failed");
+                        std::fflush(stdout);
+                        if (!o.ok) {
+                            // 拒绝/超时：不会再等文件了，直接结束。
+                            // 成功则继续等回程的文件（接收路径负责收尾）。
+                            finish(false, "取回失败：" + o.summary, o.status, false);
+                        }
+                    });
+                if (!started) {
+                    finish(false, "取回请求未能发起（会话不可用或正忙）", Status::Fail(ErrorCode::kUnknown, "pull unavailable"),
+                           false);
                 }
             }
 
             // 自检列举：在接收会话上向自己要一份目录（GUI 远端浏览的同一条
             // 路径——请求搭在 kReceive 会话上，而不是新开连接）。自投让请求
             // 与应答都绕回本连接，所以一个进程就把服务端应答侧也验了。
-            if (action == Action::kReceive && identityFinal && config.selfBrowse && !selfBrowseStarted)
-            {
+            if (action == Action::kReceive && identityFinal && config.selfBrowse && !selfBrowseStarted) {
                 selfBrowseStarted = true;
-                const bool started = startBrowseOnSession(assignedId, std::string(),
-                                                          [this](const Outcome &o)
-                                                          {
-                                                              // 列完就结束：这是自检，不是长期接收。
-                                                              finish(o.ok, o.summary, o.status, false);
-                                                          });
-                if (!started)
-                {
+                const bool started = startBrowseOnSession(assignedId, std::string(), [this](const Outcome& o) {
+                    // 列完就结束：这是自检，不是长期接收。
+                    finish(o.ok, o.summary, o.status, false);
+                });
+                if (!started) {
                     finish(false, "自检列举未能启动（接收会话不可用或正忙）",
                            Status::Fail(ErrorCode::kUnknown, "self-browse unavailable"), false);
                 }
             }
         };
 
-        h.onFrame = [this](core::session::Session &, const Frame &f)
-        {
+        h.onFrame = [this](core::session::Session&, const Frame& f) {
             touch();
             dispatch(f);
         };
 
-        h.onClosed = [this](std::string, Status st)
-        {
-            if (finished)
-            {
+        h.onClosed = [this](std::string, Status st) {
+            if (finished) {
                 return;
             }
             // 未认证状态收到业务帧，几乎总是"客户端按认证模式连了一个
             // 无认证中继"：服务端跳过握手直接发 answer_id，被客户端按
             // 协议拒绝。这个场景足够常见（服务端 --allow-no-auth 部署），
             // 给一条可照做的提示，而不是让用户去猜协议细节。
-            if (!config.serverAllowNoAuth && st.message.find("non-auth frame") != std::string::npos)
-            {
+            if (!config.serverAllowNoAuth && st.message.find("non-auth frame") != std::string::npos) {
                 st.message += "（中继可能以 --allow-no-auth 启动，客户端请加 --no-auth 重试）";
             }
             // 声明标识被拒：这不是"网络断了"，措辞必须让用户知道该改什么。
             // 两种原因的处置完全不同——被占用是要么换名字、要么关掉占用的
             // 那台；不合法是名字本身不能用。
-            if (st.code == ErrorCode::kIdTaken)
-            {
-                finish(false, "标识「" + config.requestedId + "」已被占用，该标识同时只能有一条连接", std::move(st),
-                       true);
+            if (st.code == ErrorCode::kIdTaken) {
+                finish(false, "标识「" + config.requestedId + "」已被占用，该标识同时只能有一条连接", std::move(st), true);
                 return;
             }
-            if (st.code == ErrorCode::kIdInvalid)
-            {
-                finish(false, "标识「" + config.requestedId + "」不合法（不能为空/超长/含非法字符）", std::move(st),
-                       true);
+            if (st.code == ErrorCode::kIdInvalid) {
+                finish(false, "标识「" + config.requestedId + "」不合法（不能为空/超长/含非法字符）", std::move(st), true);
                 return;
             }
             finish(false, "与中继的连接断开", std::move(st), true);
@@ -645,14 +577,12 @@ struct Client::Impl
         //
         // 这份工作只需要做一次。用 peer/请求已发起作为判据，而不是"第几次
         // 回调"——回调次数是 Session 的实现细节，不该被上层依赖。
-        if (startedOnce)
-        {
+        if (startedOnce) {
             return;
         }
         startedOnce = true;
 
-        switch (action)
-        {
+        switch (action) {
         case Action::kList:
             requestPeerList();
             return;
@@ -693,23 +623,19 @@ struct Client::Impl
         f.type = FrameType::kAskFileList;
         f.to = browsePeerId;
         f.body = core::session::encodeAskFileList(browseRelPath);
-        if (!session->send(f).ok())
-        {
+        if (!session->send(f).ok()) {
             finish(false, "远端列举请求发送失败", Status::Fail(ErrorCode::kProtocol, "send failed"));
             return;
         }
 
         // 同 GUI 路径：对端离线时服务端静默丢帧，不设超时就会一直等。
         browseTimer.expires_after(std::chrono::seconds(10));
-        browseTimer.async_wait(
-            [this](const std::error_code &ec)
-            {
-                if (ec || action != Action::kBrowse)
-                {
-                    return;
-                }
-                finish(false, "对端没有响应（可能已离线）", Status::Fail(ErrorCode::kTimeout, "browse answer timeout"));
-            });
+        browseTimer.async_wait([this](const std::error_code& ec) {
+            if (ec || action != Action::kBrowse) {
+                return;
+            }
+            finish(false, "对端没有响应（可能已离线）", Status::Fail(ErrorCode::kTimeout, "browse answer timeout"));
+        });
     }
 
     // 对端来问目录：按共享根解析、列一层、回一条。**只服务这一个根**。
@@ -717,7 +643,7 @@ struct Client::Impl
     // 目录列举是同步做的：一次 readdir 在该规模下是毫秒级，而引入工作线程
     // 会把"谁保证 store 生命周期"的问题带进来。真遇到网络盘这类慢列举，
     // 再按传输路径那样丢进 WorkerPool。
-    void serveFileList(const Frame &req)
+    void serveFileList(const Frame& req)
     {
         Frame answer;
         answer.type = FrameType::kAnswerFileList;
@@ -729,58 +655,39 @@ struct Client::Impl
 
         std::string rel;
         std::string err;
-        if (!core::session::decodeAskFileList(req.body, rel, err))
-        {
+        if (!core::session::decodeAskFileList(req.body, rel, err)) {
             status = core::session::FileListStatus::kRejected;
-        }
-        else if (config.shareRoot.empty())
-        {
+        } else if (config.shareRoot.empty()) {
             // 没开共享：明确拒绝。静默不回会让对方等满应答超时，
             // 看起来像网络问题。
             status = core::session::FileListStatus::kRejected;
-        }
-        else
-        {
+        } else {
             const std::string target = rel.empty() ? config.shareRoot : store.resolveWithin(config.shareRoot, rel);
-            if (target.empty())
-            {
-                status = core::session::FileListStatus::kRejected;  // 绝对路径 / 越界
-            }
-            else
-            {
+            if (target.empty()) {
+                status = core::session::FileListStatus::kRejected;   // 绝对路径 / 越界
+            } else {
                 const auto st = store.stat(target);
-                if (!st.exists || !st.isDir)
-                {
+                if (!st.exists || !st.isDir) {
                     status = core::session::FileListStatus::kNotFound;
-                }
-                else
-                {
+                } else {
                     std::vector<filestore::DirEntry> raw;
-                    if (!store.list(target, false, raw).ok())
-                    {
+                    if (!store.list(target, false, raw).ok()) {
                         status = core::session::FileListStatus::kNotFound;
-                    }
-                    else
-                    {
+                    } else {
                         // 目录在前、同类型按名字排：列表是给人看的，顺序稳定
                         // 比"文件系统返回什么算什么"重要（也方便测试断言）。
-                        std::sort(raw.begin(), raw.end(),
-                                  [](const filestore::DirEntry &a, const filestore::DirEntry &b)
-                                  {
-                                      if (a.isDir != b.isDir)
-                                      {
-                                          return a.isDir;
-                                      }
-                                      return a.name < b.name;
-                                  });
-                        if (raw.size() > core::session::kMaxListEntries)
-                        {
+                        std::sort(raw.begin(), raw.end(), [](const filestore::DirEntry& a, const filestore::DirEntry& b) {
+                            if (a.isDir != b.isDir) {
+                                return a.isDir;
+                            }
+                            return a.name < b.name;
+                        });
+                        if (raw.size() > core::session::kMaxListEntries) {
                             raw.resize(core::session::kMaxListEntries);
                             status = core::session::FileListStatus::kTruncated;
                         }
                         out.reserve(raw.size());
-                        for (const auto &e : raw)
-                        {
+                        for (const auto& e : raw) {
                             core::session::RemoteEntry r;
                             r.name = e.name;
                             r.isDir = e.isDir;
@@ -793,9 +700,8 @@ struct Client::Impl
             }
         }
 
-        if (const auto st = core::session::encodeAnswerFileList(status, out, answer.body); !st.ok())
-        {
-            return;  // 编码失败只可能是内部 bug，没必要再回一个坏帧
+        if (const auto st = core::session::encodeAnswerFileList(status, out, answer.body); !st.ok()) {
+            return;   // 编码失败只可能是内部 bug，没必要再回一个坏帧
         }
         (void)session->send(answer);
     }
@@ -804,8 +710,7 @@ struct Client::Impl
     {
         // 在现有连接上问列表，不新建连接（见 Client::refreshPeers 的注释）。
         // touch 刷新空闲基线：等响应的往返不该被看门狗当成"对端无响应"。
-        if (finished || action != Action::kReceive || !authenticated || !session)
-        {
+        if (finished || action != Action::kReceive || !authenticated || !session) {
             return;
         }
         touch();
@@ -819,8 +724,7 @@ struct Client::Impl
     core::transfer::TransferPeer::Config peerConfig() const
     {
         core::transfer::TransferPeer::Config c;
-        if (config.chunkSize > 0)
-        {
+        if (config.chunkSize > 0) {
             c.chunkSize = config.chunkSize;
         }
         // 空闲超时接进传输层：让 TransferPeer 自己也会因为"等不到应答"
@@ -834,8 +738,8 @@ struct Client::Impl
         // 用 60s 的 idleTimeout 意味着"发错 id 要干等一分钟才报错"。
         // AnswerSend 在对端在线时是毫秒级（收到请求即回），10s 已经很宽裕；
         // 传输开始后的超时仍由 finalizeTimeout/重传逻辑负责，不受影响。
-        c.answerTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::min(config.idleTimeout, std::chrono::seconds(10)));
+        c.answerTimeout =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::min(config.idleTimeout, std::chrono::seconds(10)));
 
         // 覆盖策略透传。默认 false（拒绝覆盖）是 core 层的设计；CLI 的
         // --overwrite 与 GUI 的接收开关在这里汇入。
@@ -845,8 +749,7 @@ struct Client::Impl
 
     void startSending()
     {
-        if (toPeerId.empty())
-        {
+        if (toPeerId.empty()) {
             finish(false, "内部错误：发送时缺少目标对端", Status::Fail(ErrorCode::kUnknown, "empty toPeerId"));
             return;
         }
@@ -857,17 +760,15 @@ struct Client::Impl
         // 两边都从同一个种子起算，撞车的概率与"进程启动在同一毫秒"相当，
         // 而时间戳在日志里能直接看出"哪一次"。
         const auto sid =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
-                .count();
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 
-        peer = core::transfer::TransferPeer::createSender(
-            ctx, session, store, pool, peerPathSource, peerPathRemoteName, toPeerId, sid, std::move(cfg),
-            [this](const core::transfer::TransferResult &r) { onTransferDone(r); });
+        peer = core::transfer::TransferPeer::createSender(ctx, session, store, pool, peerPathSource, peerPathRemoteName, toPeerId,
+                                                          sid, std::move(cfg),
+                                                          [this](const core::transfer::TransferResult& r) { onTransferDone(r); });
 
         // createSender 内部可能已经同步失败（源文件打不开），此时 onDone
         // 已经在构造函数里被调用过，peer 处于 finished 状态。
-        if (peer && peer->finished())
-        {
+        if (peer && peer->finished()) {
             return;
         }
 
@@ -884,9 +785,9 @@ struct Client::Impl
         // 所以接收方的 sessionId 必须与发送方一致。命令行工具没法协商，
         // 于是接收方采用 **0 表示通配**——见下面对 dispatch 的处理。
         auto cfg = peerConfig();
-        peer = core::transfer::TransferPeer::createReceiver(ctx, session, store, pool, targetPath, 0, std::move(cfg),
-                                                            [this](const core::transfer::TransferResult &r)
-                                                            { onTransferDone(r); });
+        peer =
+            core::transfer::TransferPeer::createReceiver(ctx, session, store, pool, targetPath, 0, std::move(cfg),
+                                                         [this](const core::transfer::TransferResult& r) { onTransferDone(r); });
 
         touch();
     }
@@ -916,11 +817,9 @@ struct Client::Impl
     //
     // 回调在**收到 kAnswerFilePull 时就触发**，不等文件传完：上层要区分
     // "对方不给我"（立刻可知）和"给了但传得慢"（随后由接收路径报告）。
-    bool startPullOnSession(std::string peerId, std::string relPath, bool archive,
-                            std::function<void(const Outcome &)> done)
+    bool startPullOnSession(std::string peerId, std::string relPath, bool archive, std::function<void(const Outcome&)> done)
     {
-        if (!canSendOnSession() || pullActive)
-        {
+        if (!canSendOnSession() || pullActive) {
             return false;
         }
         pullActive = true;
@@ -934,8 +833,7 @@ struct Client::Impl
         f.body = core::session::encodeAskFileList(relPath);
 
         touch();
-        if (const auto st = session->send(f); !st.ok())
-        {
+        if (const auto st = session->send(f); !st.ok()) {
             finishPull(false, "取回请求发送失败", st);
             return false;
         }
@@ -946,23 +844,18 @@ struct Client::Impl
         // 才发的（§11.10.2）。同一个 10 秒对"打开文件"够用，对"压缩一个
         // 目录"不够——用 10 秒会让正常的目录取回被误判成对端离线。
         pullTimer.expires_after(archive ? std::chrono::seconds(120) : std::chrono::seconds(10));
-        pullTimer.async_wait(
-            [this](const std::error_code &ec)
-            {
-                if (ec || !pullActive)
-                {
-                    return;
-                }
-                finishPull(false, "对端没有响应（可能已离线）",
-                           Status::Fail(ErrorCode::kTimeout, "pull answer timeout"));
-            });
+        pullTimer.async_wait([this](const std::error_code& ec) {
+            if (ec || !pullActive) {
+                return;
+            }
+            finishPull(false, "对端没有响应（可能已离线）", Status::Fail(ErrorCode::kTimeout, "pull answer timeout"));
+        });
         return true;
     }
 
     void finishPull(bool ok, std::string summary, Status status = Status{})
     {
-        if (!pullActive)
-        {
+        if (!pullActive) {
             return;
         }
         pullActive = false;
@@ -974,8 +867,7 @@ struct Client::Impl
         o.ok = ok;
         o.summary = std::move(summary);
         o.status = std::move(status);
-        if (done)
-        {
+        if (done) {
             done(o);
         }
     }
@@ -989,18 +881,15 @@ struct Client::Impl
     // 路径——store.list 的 recursive 模式不返回层级信息。
     //
     // 返回 false 表示超限（文件数或字节数），由调用方转成 status=2。
-    bool collectItems(const std::string &absDir, const std::string &relPrefix,
-                      std::vector<filestore::ArchiveItem> &items, std::uint64_t &bytes) const
+    bool collectItems(const std::string& absDir, const std::string& relPrefix, std::vector<filestore::ArchiveItem>& items,
+                      std::uint64_t& bytes) const
     {
         std::vector<filestore::DirEntry> entries;
-        if (!store.list(absDir, false, entries).ok())
-        {
-            return true;  // 某一层读不了就跳过它，不因此让整次打包失败
+        if (!store.list(absDir, false, entries).ok()) {
+            return true;   // 某一层读不了就跳过它，不因此让整次打包失败
         }
-        for (const auto &e : entries)
-        {
-            if (e.isDir)
-            {
+        for (const auto& e : entries) {
+            if (e.isDir) {
                 // 空目录也要进包：只收文件会让"解出来少了几个空目录"，
                 // 而空目录有时是有意义的（占位、目录结构约定）。
                 const std::string rel = relPrefix.empty() ? e.name : relPrefix + "/" + e.name;
@@ -1009,15 +898,13 @@ struct Client::Impl
                 dirItem.entryName = rel + "/";
                 items.push_back(std::move(dirItem));
 
-                if (!collectItems(absDir + "/" + e.name, rel, items, bytes))
-                {
+                if (!collectItems(absDir + "/" + e.name, rel, items, bytes)) {
                     return false;
                 }
                 continue;
             }
             bytes += e.size;
-            if (items.size() >= kMaxPackFiles || bytes > kMaxPackBytes)
-            {
+            if (items.size() >= kMaxPackFiles || bytes > kMaxPackBytes) {
                 return false;
             }
             filestore::ArchiveItem item;
@@ -1031,24 +918,21 @@ struct Client::Impl
     // 把目录打包到系统临时目录，返回包路径（失败返回空串）。
     //
     // **不能放进共享根**：那会让对端在列举里看到这个临时包，也污染用户目录。
-    std::string packDirectory(const std::string &absDir, const std::string &dirName, std::string &err)
+    std::string packDirectory(const std::string& absDir, const std::string& dirName, std::string& err)
     {
         std::vector<filestore::ArchiveItem> items;
         std::uint64_t bytes = 0;
-        if (!collectItems(absDir, std::string(), items, bytes))
-        {
+        if (!collectItems(absDir, std::string(), items, bytes)) {
             err = "目录过大（超过 " + std::to_string(kMaxPackFiles) + " 个文件或 256 MiB），请分批取回";
             return std::string();
         }
-        if (items.empty())
-        {
+        if (items.empty()) {
             err = "目录是空的";
             return std::string();
         }
 
         const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        const auto path =
-            std::filesystem::temp_directory_path() / ("relayer-pack-" + std::to_string(stamp) + ".tar.xz");
+        const auto path = std::filesystem::temp_directory_path() / ("relayer-pack-" + std::to_string(stamp) + ".tar.xz");
 
         filestore::TarXzArchiver archiver(store);
         filestore::ArchiveOptions options;
@@ -1057,10 +941,9 @@ struct Client::Impl
         options.compressionLevel = 1;
         std::vector<std::string> skipped;
         const auto st = archiver.create(path.string(), items, options, skipped);
-        if (!st.ok())
-        {
+        if (!st.ok()) {
             std::error_code ec;
-            std::filesystem::remove(path, ec);  // 半成品不能留下
+            std::filesystem::remove(path, ec);   // 半成品不能留下
             err = "打包失败：" + st.message;
             return std::string();
         }
@@ -1069,7 +952,7 @@ struct Client::Impl
     }
 
     // 对端来要文件（B 侧）：校验共享根 → 回 status → 用普通"推"流程发送。
-    void servePullRequest(const Frame &req)
+    void servePullRequest(const Frame& req)
     {
         Frame answer;
         answer.type = FrameType::kAnswerFilePull;
@@ -1081,39 +964,26 @@ struct Client::Impl
         auto status = core::session::FilePullStatus::kRejected;
         std::string target;
 
-        if (!core::session::decodeAskFileList(req.body, rel, err))
-        {
+        if (!core::session::decodeAskFileList(req.body, rel, err)) {
             status = core::session::FilePullStatus::kRejected;
-        }
-        else if (config.shareRoot.empty())
-        {
+        } else if (config.shareRoot.empty()) {
             // 没开共享：明确拒绝。静默不回会让对方等满超时，看起来像网络问题。
             status = core::session::FilePullStatus::kRejected;
-        }
-        else if (!canStartSendOnSession())
-        {
+        } else if (!canStartSendOnSession()) {
             // 自己正在发别的：明确拒绝而不是排进队列。排队会让请求方看到
             // 一个不动的进度条，而它并不知道前面还有别人在传。
             status = core::session::FilePullStatus::kRejected;
-        }
-        else
-        {
+        } else {
             const std::string resolved = rel.empty() ? config.shareRoot : store.resolveWithin(config.shareRoot, rel);
-            if (resolved.empty())
-            {
-                status = core::session::FilePullStatus::kRejected;  // 绝对路径 / 越界
-            }
-            else
-            {
+            if (resolved.empty()) {
+                status = core::session::FilePullStatus::kRejected;   // 绝对路径 / 越界
+            } else {
                 const auto st = store.stat(resolved);
-                if (!st.exists || st.isDir)
-                {
+                if (!st.exists || st.isDir) {
                     // 目录不支持：打包归档还没实现，递归取回语义也不清楚
                     // （PROTOCOL.md §11.9.5）。
                     status = core::session::FilePullStatus::kNotFound;
-                }
-                else
-                {
+                } else {
                     status = core::session::FilePullStatus::kAccepted;
                     target = resolved;
                 }
@@ -1121,16 +991,14 @@ struct Client::Impl
         }
 
         answer.body = core::session::encodeAnswerFilePull(status);
-        if (const auto st = session->send(answer); !st.ok())
-        {
+        if (const auto st = session->send(answer); !st.ok()) {
             return;
         }
 
-        if (status == core::session::FilePullStatus::kAccepted)
-        {
+        if (status == core::session::FilePullStatus::kAccepted) {
             // 先回 status 再发文件：应答里那个 0 是"我接受"，文件随后才到。
             // 顺序反了的话，请求方会先看到一个陌生的 kFileRequestSend。
-            (void)startSendOnSession(target, std::string(), req.from, [](const Outcome &) {});  // 结论由接收方自己报
+            (void)startSendOnSession(target, std::string(), req.from, [](const Outcome&) {});   // 结论由接收方自己报
         }
     }
 
@@ -1139,7 +1007,7 @@ struct Client::Impl
     // 应答放在打包之后是刻意的（§11.10.2）：打包会失败（磁盘满、权限、
     // 文件在压缩中被删）。先回 0 再失败，请求方只能看到"对方答应了但没来
     // 东西"，直到会话空闲超时——所有失败里最难查的一种。
-    void serveArchivePullRequest(const Frame &req)
+    void serveArchivePullRequest(const Frame& req)
     {
         Frame answer;
         answer.type = FrameType::kAnswerFilePull;
@@ -1150,52 +1018,37 @@ struct Client::Impl
         auto status = core::session::FilePullStatus::kRejected;
         std::string packPath;
 
-        if (!core::session::decodeAskFileList(req.body, rel, err))
-        {
+        if (!core::session::decodeAskFileList(req.body, rel, err)) {
             status = core::session::FilePullStatus::kRejected;
-        }
-        else if (config.shareRoot.empty() || rel.empty())
-        {
+        } else if (config.shareRoot.empty() || rel.empty()) {
             // 空路径 = 整个共享根。不打包它：多半是点错了，而且一个根目录
             // 打包出来对方也不知道该解到哪。
             status = core::session::FilePullStatus::kRejected;
-        }
-        else if (!canStartSendOnSession())
-        {
+        } else if (!canStartSendOnSession()) {
             status = core::session::FilePullStatus::kRejected;
-        }
-        else
-        {
+        } else {
             const std::string resolved = store.resolveWithin(config.shareRoot, rel);
-            if (resolved.empty())
-            {
-                status = core::session::FilePullStatus::kRejected;  // 绝对路径 / 越界
-            }
-            else
-            {
+            if (resolved.empty()) {
+                status = core::session::FilePullStatus::kRejected;   // 绝对路径 / 越界
+            } else {
                 const auto st = store.stat(resolved);
-                if (!st.exists || !st.isDir)
-                {
-                    status = core::session::FilePullStatus::kNotFound;  // 文件请走 §11.9
-                }
-                else
-                {
+                if (!st.exists || !st.isDir) {
+                    status = core::session::FilePullStatus::kNotFound;   // 文件请走 §11.9
+                } else {
                     std::string packErr;
                     packPath = packDirectory(resolved, rel, packErr);
-                    status = packPath.empty() ? core::session::FilePullStatus::kRejected
-                                              : core::session::FilePullStatus::kAccepted;
+                    status =
+                        packPath.empty() ? core::session::FilePullStatus::kRejected : core::session::FilePullStatus::kAccepted;
                 }
             }
         }
 
         answer.body = core::session::encodeAnswerFilePull(status);
-        if (const auto st = session->send(answer); !st.ok())
-        {
+        if (const auto st = session->send(answer); !st.ok()) {
             return;
         }
 
-        if (status != core::session::FilePullStatus::kAccepted)
-        {
+        if (status != core::session::FilePullStatus::kAccepted) {
             return;
         }
 
@@ -1204,16 +1057,13 @@ struct Client::Impl
         const std::string dirName = (slash == std::string::npos) ? rel : rel.substr(slash + 1);
         const std::string packName = dirName + ".tar.xz";
 
-        const bool started = startSendOnSession(packPath, packName, req.from,
-                                                [packPath](const Outcome &)
-                                                {
-                                                    // 传完（成功、失败、取消）都删：留着的临时包
-                                                    // 只会越积越多，而它已经没用了。
-                                                    std::error_code ec;
-                                                    std::filesystem::remove(packPath, ec);
-                                                });
-        if (!started)
-        {
+        const bool started = startSendOnSession(packPath, packName, req.from, [packPath](const Outcome&) {
+            // 传完（成功、失败、取消）都删：留着的临时包
+            // 只会越积越多，而它已经没用了。
+            std::error_code ec;
+            std::filesystem::remove(packPath, ec);
+        });
+        if (!started) {
             // 兜底：post 与发送之间的竞态（比如会话刚好断了）。
             std::error_code ec;
             std::filesystem::remove(packPath, ec);
@@ -1223,10 +1073,9 @@ struct Client::Impl
     // 常驻会话上问一次远端目录。会话继续活着（id 不变、接收不中断），
     // 这与 Client::browsePeer 的一次性连接是两条路：后者给 CLI 用，前者
     // 给 GUI——GUI 一旦新开连接就会顶掉常驻接收会话、把自己的 id 换掉。
-    bool startBrowseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done)
+    bool startBrowseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome&)> done)
     {
-        if (!canSendOnSession() || browseActive)
-        {
+        if (!canSendOnSession() || browseActive) {
             return false;
         }
         browseActive = true;
@@ -1240,8 +1089,7 @@ struct Client::Impl
         f.body = core::session::encodeAskFileList(browseRelPath);
 
         touch();
-        if (const auto st = session->send(f); !st.ok())
-        {
+        if (const auto st = session->send(f); !st.ok()) {
             finishBrowse(false, "远端列举请求发送失败", st);
             return false;
         }
@@ -1249,24 +1097,19 @@ struct Client::Impl
         // 应答超时：与"对端没应答"同一时限语义，但独立计时——会话本身
         // 还活着，不能靠会话级看门狗（那会连接收一起判死）。
         browseTimer.expires_after(std::chrono::seconds(10));
-        browseTimer.async_wait(
-            [this](const std::error_code &ec)
-            {
-                if (ec || !browseActive)
-                {
-                    return;
-                }
-                finishBrowse(false, "对端没有响应（可能已离线）",
-                             Status::Fail(ErrorCode::kTimeout, "browse answer timeout"));
-            });
+        browseTimer.async_wait([this](const std::error_code& ec) {
+            if (ec || !browseActive) {
+                return;
+            }
+            finishBrowse(false, "对端没有响应（可能已离线）", Status::Fail(ErrorCode::kTimeout, "browse answer timeout"));
+        });
         return true;
     }
 
     // 一次会话内列举的结论。与 finishSend 对称：只回调这一次，不动 busy。
     void finishBrowse(bool ok, std::string summary, Status status = Status{})
     {
-        if (!browseActive)
-        {
+        if (!browseActive) {
             return;
         }
         browseActive = false;
@@ -1281,17 +1124,15 @@ struct Client::Impl
         o.status = std::move(status);
         o.remoteEntries = remoteEntries;
         o.listStatus = listStatus;
-        if (done)
-        {
+        if (done) {
             done(o);
         }
     }
 
     bool startSendOnSession(std::string source, std::string remoteName, std::string targetPeerId,
-                            std::function<void(const Outcome &)> done)
+                            std::function<void(const Outcome&)> done)
     {
-        if (!canSendOnSession() || sendActive)
-        {
+        if (!canSendOnSession() || sendActive) {
             return false;
         }
         sendActive = true;
@@ -1302,12 +1143,11 @@ struct Client::Impl
 
         auto cfg = peerConfig();
         const auto sid =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
-                .count();
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 
         auto created = core::transfer::TransferPeer::createSender(
             ctx, session, store, pool, sendSourcePath, sendRemoteName, sendToPeerId, sid, std::move(cfg),
-            [this](const core::transfer::TransferResult &r) { onSendResult(r); });
+            [this](const core::transfer::TransferResult& r) { onSendResult(r); });
         sendPeer = std::move(created);
 
         // 源文件打不开时 createSender 会同步回调 onSendResult（sendActive
@@ -1319,8 +1159,7 @@ struct Client::Impl
     // 一次"会话内发送"的结论。**不是**整条会话的结论：会话继续活着。
     void finishSend(bool ok, std::string summary, Status status = Status{}, bool connectionLost = false)
     {
-        if (!sendActive)
-        {
+        if (!sendActive) {
             return;
         }
         sendActive = false;
@@ -1330,8 +1169,7 @@ struct Client::Impl
         o.summary = std::move(summary);
         o.status = std::move(status);
         o.connectionLost = connectionLost;
-        if (sendPeer)
-        {
+        if (sendPeer) {
             const auto s = sendPeer->stats();
             o.stats.chunksSent = s.chunksSent;
             o.stats.chunksReceived = s.chunksReceived;
@@ -1345,24 +1183,19 @@ struct Client::Impl
         onSendDone = nullptr;
         // 不在 TransferPeer 的完成回调栈上释放它（use-after-free 老坑），
         // 交给下一轮事件循环。
-        asio::post(ctx,
-                   [this]
-                   {
-                       if (!sendActive)
-                       {
-                           sendPeer.reset();
-                       }
-                   });
-        if (cb)
-        {
+        asio::post(ctx, [this] {
+            if (!sendActive) {
+                sendPeer.reset();
+            }
+        });
+        if (cb) {
             cb(o);
         }
     }
 
-    void onSendResult(const core::transfer::TransferResult &r)
+    void onSendResult(const core::transfer::TransferResult& r)
     {
-        switch (r.outcome)
-        {
+        switch (r.outcome) {
         case core::transfer::TransferOutcome::kCompleted:
             finishSend(true, "发送完成");
             return;
@@ -1391,8 +1224,7 @@ struct Client::Impl
 
     void cancelSendNow()
     {
-        if (!sendActive || !sendPeer || sendPeer->finished())
-        {
+        if (!sendActive || !sendPeer || sendPeer->finished()) {
             return;
         }
         // cancel 会同步走 onSendResult → finishSend（kLocalCancelled），
@@ -1407,32 +1239,26 @@ struct Client::Impl
     // （顶掉的后果是发送方发块没人收，等满 answerTimeout 才报错）。
     void rebuildReceiver()
     {
-        if (finished)
-        {
+        if (finished) {
             return;
         }
-        if (peer && !peer->finished())
-        {
+        if (peer && !peer->finished()) {
             return;
         }
         startReceiving();
     }
 
-    void onTransferDone(const core::transfer::TransferResult &r)
+    void onTransferDone(const core::transfer::TransferResult& r)
     {
-        if (finished)
-        {
+        if (finished) {
             return;
         }
 
-        switch (r.outcome)
-        {
-        case core::transfer::TransferOutcome::kCompleted:
-        {
+        switch (r.outcome) {
+        case core::transfer::TransferOutcome::kCompleted: {
             // 最终进度报一次满的。否则最后一行停在"99%"，用户会怀疑
             // 是不是没走完——虽然 onDone 已经说了成功。
-            if (onProgress && peer)
-            {
+            if (onProgress && peer) {
                 const auto p = peer->progress();
                 ProgressReport rep;
                 rep.bytesDone = p.bytesTotal == 0 ? p.bytesDone : p.bytesTotal;
@@ -1441,10 +1267,8 @@ struct Client::Impl
                 onProgress(rep);
             }
 
-            if (action == Action::kReceive)
-            {
-                if (config.keepReceiving)
-                {
+            if (action == Action::kReceive) {
+                if (config.keepReceiving) {
                     // 常驻接收：**不 finish**。报完成回调后原地重建
                     // receiver，继续在同一条连接上等下一个请求——服务端
                     // 分配的 id 因此保持不变（见 ClientConfig::keepReceiving
@@ -1454,16 +1278,13 @@ struct Client::Impl
                     // 自动解包（--unpack / 目录取回）：解成功就报目录，
                     // 失败则照常报包——两种情况用户都能看到明确的落点。
                     std::string reported = r.targetPath;
-                    if (config.unpackArchives)
-                    {
+                    if (config.unpackArchives) {
                         const auto dir = unpackArchive(r.targetPath);
-                        if (!dir.empty())
-                        {
+                        if (!dir.empty()) {
                             reported = dir;
                         }
                     }
-                    if (config.onFileReceived)
-                    {
+                    if (config.onFileReceived) {
                         config.onFileReceived(reported);
                     }
                     asio::post(ctx, [this] { rebuildReceiver(); });
@@ -1471,33 +1292,27 @@ struct Client::Impl
                 }
                 {
                     std::string reported = r.targetPath;
-                    if (config.unpackArchives)
-                    {
+                    if (config.unpackArchives) {
                         const auto dir = unpackArchive(r.targetPath);
-                        if (!dir.empty())
-                        {
+                        if (!dir.empty()) {
                             reported = dir;
                         }
                     }
                     finish(true, "接收完成：" + reported);
                 }
                 return;
-            }
-            else
-            {
+            } else {
                 finish(true, "发送完成");
             }
             return;
         }
 
         case core::transfer::TransferOutcome::kPeerCancelled:
-            if (action == Action::kReceive && config.keepReceiving)
-            {
+            if (action == Action::kReceive && config.keepReceiving) {
                 // 对端中途取消：连接还活着，同 kFailed 的理由原地重建
                 // （见下面 kFailed 分支的注释），否则一次取消就会让本端
                 // 换 id，发送方下次就找不到我们了。
-                if (config.onReceiveFailed)
-                {
+                if (config.onReceiveFailed) {
                     config.onReceiveFailed("对端取消了传输：" + r.status.message);
                 }
                 asio::post(ctx, [this] { rebuildReceiver(); });
@@ -1519,8 +1334,7 @@ struct Client::Impl
 
         case core::transfer::TransferOutcome::kFailed:
         default:
-            if (action == Action::kReceive && config.keepReceiving)
-            {
+            if (action == Action::kReceive && config.keepReceiving) {
                 // 常驻接收下的**局部失败**：这一次没收到，但到中继的连接
                 // 还活着（目标已存在、写盘失败、根校验不过、对端中途取消）。
                 // 此时不能 finish——finish 意味着断开重连，服务端会分配
@@ -1531,8 +1345,7 @@ struct Client::Impl
                 // 连接已死（kPeerGone）和本端主动取消（kLocalCancelled，
                 // GUI 抢占/关窗走的 abort）不在这里——前者重建也没用，
                 // 后者重建会顶掉用户的取消意图，两者都走 finish。
-                if (config.onReceiveFailed)
-                {
+                if (config.onReceiveFailed) {
                     config.onReceiveFailed("传输失败：" + r.status.message);
                 }
                 asio::post(ctx, [this] { rebuildReceiver(); });
@@ -1547,13 +1360,12 @@ struct Client::Impl
     // 帧分派
     // ---------------------------------------------------------------------
 
-    void dispatch(const Frame &f)
+    void dispatch(const Frame& f)
     {
         // 对端的目录列举请求：**任何操作模式下都要应答**——"我正在收文件"
         // 不妨碍回答一次列举。放在最前面，避免被 send/recv peer 的认领
         // 逻辑漏掉（它们只认自己 sessionId 的帧）。
-        if (f.type == FrameType::kAskFileList)
-        {
+        if (f.type == FrameType::kAskFileList) {
             serveFileList(f);
             return;
         }
@@ -1561,30 +1373,25 @@ struct Client::Impl
         // 对端要文件：与列举一样，**任何操作模式下都要应答**——"我正在收
         // 文件"不妨碍把共享目录里的东西给对方，前提是当前没有发送在跑
         // （servePullRequest 里判）。
-        if (f.type == FrameType::kAskFilePull)
-        {
+        if (f.type == FrameType::kAskFilePull) {
             servePullRequest(f);
             return;
         }
 
         // 目录取回：打包 + 推包，应答同样是 kAnswerFilePull。
-        if (f.type == FrameType::kAskArchivePull)
-        {
+        if (f.type == FrameType::kAskArchivePull) {
             serveArchivePullRequest(f);
             return;
         }
 
-        if (f.type == FrameType::kAnswerFilePull && pullActive)
-        {
+        if (f.type == FrameType::kAnswerFilePull && pullActive) {
             core::session::FilePullStatus status = core::session::FilePullStatus::kRejected;
             std::string err;
-            if (!core::session::decodeAnswerFilePull(f.body, status, err))
-            {
+            if (!core::session::decodeAnswerFilePull(f.body, status, err)) {
                 finishPull(false, "取回应答解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
                 return;
             }
-            switch (status)
-            {
+            switch (status) {
             case core::session::FilePullStatus::kAccepted:
                 // 只是"对方接受了"。文件随后由常驻接收会话收下，那一步的
                 // 结论走正常接收路径（finish / onFileReceived），不在这里报。
@@ -1602,34 +1409,30 @@ struct Client::Impl
             }
         }
 
-        if (f.type == FrameType::kAnswerFileList && (action == Action::kBrowse || browseActive))
-        {
+        if (f.type == FrameType::kAnswerFileList && (action == Action::kBrowse || browseActive)) {
             core::session::FileListStatus status = core::session::FileListStatus::kOk;
             std::vector<core::session::RemoteEntry> entries;
             std::string err;
-            if (!core::session::decodeAnswerFileList(f.body, status, entries, err))
-            {
+            if (!core::session::decodeAnswerFileList(f.body, status, entries, err)) {
                 finish(false, "远端列表解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
                 return;
             }
             listStatus = status;
             remoteEntries = std::move(entries);
 
-            if (action != Action::kBrowse)
-            {
+            if (action != Action::kBrowse) {
                 // 常驻会话上的列举：只回调这一次，会话继续。
-                const bool ok = (status == core::session::FileListStatus::kOk ||
-                                 status == core::session::FileListStatus::kTruncated);
-                const std::string summary = ok ? ("远端列表 " + std::to_string(remoteEntries.size()) + " 项")
-                                               : (status == core::session::FileListStatus::kNotFound
-                                                      ? "对端没有这个目录"
-                                                      : "对端拒绝列举（未开启共享，或路径越界）");
+                const bool ok =
+                    (status == core::session::FileListStatus::kOk || status == core::session::FileListStatus::kTruncated);
+                const std::string summary =
+                    ok ? ("远端列表 " + std::to_string(remoteEntries.size()) + " 项")
+                       : (status == core::session::FileListStatus::kNotFound ? "对端没有这个目录"
+                                                                             : "对端拒绝列举（未开启共享，或路径越界）");
                 finishBrowse(ok, summary, ok ? Status{} : Status::Fail(ErrorCode::kNotFound, "remote list failed"));
                 return;
             }
 
-            switch (status)
-            {
+            switch (status) {
             case core::session::FileListStatus::kOk:
                 finish(true, "远端列表 " + std::to_string(remoteEntries.size()) + " 项");
                 return;
@@ -1653,42 +1456,35 @@ struct Client::Impl
         // 能接住这个请求（rebuildReceiver 有"不顶掉活着的 receiver"的
         // 防护，两路触发不会打架）。
         if (action == Action::kReceive && config.keepReceiving && f.type == FrameType::kFileRequestSend &&
-            (!peer || peer->finished()))
-        {
+            (!peer || peer->finished())) {
             rebuildReceiver();
         }
 
         // 发送 peer 先认：它只认自己 sessionId 的应答/ACK 帧，接收 peer
         // 空闲时虽然 sessionId=0，但只对 kFileRequestSend 认领（见
         // TransferPeer::onFrame），两者不会互相吞帧。
-        if (sendActive && sendPeer && sendPeer->onFrame(f))
-        {
+        if (sendActive && sendPeer && sendPeer->onFrame(f)) {
             return;
         }
 
         // 再给接收 peer。它认不认是它的事（sessionId 不符会返回 false）。
-        if (peer && peer->onFrame(f))
-        {
+        if (peer && peer->onFrame(f)) {
             return;
         }
 
-        if (f.type == FrameType::kAnswerClientList)
-        {
+        if (f.type == FrameType::kAnswerClientList) {
             std::string err;
             std::vector<core::session::PeerInfo> list;
-            if (!core::session::decodeClientList(f.body, list, err))
-            {
+            if (!core::session::decodeClientList(f.body, list, err)) {
                 finish(false, "在线列表解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
                 return;
             }
             peers = std::move(list);
 
-            if (action == Action::kList)
-            {
+            if (action == Action::kList) {
                 // list 操作的契约输出：拼文本、结束。临时连接到此为止。
                 std::string text = "在线对端 " + std::to_string(peers.size()) + " 个：";
-                for (const auto &p : peers)
-                {
+                for (const auto& p : peers) {
                     text += "\n  " + p.id + "  " + p.address;
                 }
                 finish(true, std::move(text));
@@ -1697,12 +1493,10 @@ struct Client::Impl
 
             // 常驻接收会话上的刷新（refreshPeers）：报结构化列表就走，
             // **不结束操作**——这条连接还要继续收文件，id 也要保持稳定。
-            if (config.onPeerList)
-            {
+            if (config.onPeerList) {
                 std::vector<PeerEntry> entries;
                 entries.reserve(peers.size());
-                for (const auto &p : peers)
-                {
+                for (const auto& p : peers) {
                     entries.push_back(PeerEntry{p.id, p.address});
                 }
                 config.onPeerList(entries);
@@ -1717,8 +1511,7 @@ struct Client::Impl
 
     void abortNow()
     {
-        if (finished)
-        {
+        if (finished) {
             return;
         }
         finished = true;
@@ -1734,12 +1527,10 @@ struct Client::Impl
         browseActive = false;
         onBrowseDone = nullptr;
         browseTimer.cancel();
-        if (session)
-        {
+        if (session) {
             session->close();
         }
-        if (onDone)
-        {
+        if (onDone) {
             Outcome o;
             o.ok = false;
             o.summary = "中止";
@@ -1753,16 +1544,15 @@ struct Client::Impl
 // 门面
 // ---------------------------------------------------------------------------
 
-Client::Client(asio::io_context &ctx, ClientConfig config, std::function<void(const ProgressReport &)> onProgress,
-               std::function<void(const Outcome &)> onDone)
+Client::Client(asio::io_context& ctx, ClientConfig config, std::function<void(const ProgressReport&)> onProgress,
+               std::function<void(const Outcome&)> onDone)
     : impl_(std::make_unique<Impl>(ctx, std::move(config), std::move(onProgress), std::move(onDone)))
 {
 }
 
 Client::~Client()
 {
-    if (impl_ && impl_->session)
-    {
+    if (impl_ && impl_->session) {
         impl_->session->close();
     }
 }
@@ -1806,40 +1596,34 @@ void Client::refreshPeers()
 }
 
 bool Client::sendOnSession(std::string sourcePath, std::string remoteName, std::string toPeerId,
-                           std::function<void(const Outcome &)> done)
+                           std::function<void(const Outcome&)> done)
 {
-    return impl_->startSendOnSession(std::move(sourcePath), std::move(remoteName), std::move(toPeerId),
-                                     std::move(done));
+    return impl_->startSendOnSession(std::move(sourcePath), std::move(remoteName), std::move(toPeerId), std::move(done));
 }
 
-bool Client::browseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome &)> done)
+bool Client::browseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome&)> done)
 {
     return impl_->startBrowseOnSession(std::move(peerId), std::move(relPath), std::move(done));
 }
 
-bool Client::createArchive(const std::vector<std::string> &sources, const std::string &archivePath, std::string &err)
+bool Client::createArchive(const std::vector<std::string>& sources, const std::string& archivePath, std::string& err)
 {
     std::vector<filestore::ArchiveItem> items;
-    for (const auto &src : sources)
-    {
+    for (const auto& src : sources) {
         std::error_code ec;
         const std::filesystem::path p(src);
-        if (!std::filesystem::exists(p, ec))
-        {
+        if (!std::filesystem::exists(p, ec)) {
             err = "路径不存在：" + src;
             return false;
         }
         // 相对**父目录**：包内有顶层目录，解压时配 unpackArchive(path, false)。
         const auto base = p.parent_path();
-        if (std::filesystem::is_directory(p, ec))
-        {
+        if (std::filesystem::is_directory(p, ec)) {
             std::error_code iterEc;
             for (auto it = std::filesystem::recursive_directory_iterator(
                      p, std::filesystem::directory_options::skip_permission_denied, iterEc);
-                 it != std::filesystem::recursive_directory_iterator(); it.increment(iterEc))
-            {
-                if (iterEc)
-                {
+                 it != std::filesystem::recursive_directory_iterator(); it.increment(iterEc)) {
+                if (iterEc) {
                     break;
                 }
                 // lexically_relative 是**纯字符串计算**，不访问文件系统：
@@ -1847,8 +1631,7 @@ bool Client::createArchive(const std::vector<std::string> &sources, const std::s
                 // 一旦它失败，整个循环就把所有条目都 continue 掉了——表现
                 // 成"没有可压缩的内容"，而目录明明是好的。
                 const auto rel = it->path().lexically_relative(base);
-                if (rel.empty())
-                {
+                if (rel.empty()) {
                     continue;
                 }
                 filestore::ArchiveItem item;
@@ -1856,15 +1639,12 @@ bool Client::createArchive(const std::vector<std::string> &sources, const std::s
                 item.entryName = rel.generic_string() + (it->is_directory() ? "/" : "");
                 items.push_back(std::move(item));
             }
-        }
-        else
-        {
+        } else {
             items.push_back(filestore::ArchiveItem{src, p.filename().string()});
         }
     }
 
-    if (items.empty())
-    {
+    if (items.empty()) {
         err = "没有可压缩的内容";
         return false;
     }
@@ -1876,21 +1656,19 @@ bool Client::createArchive(const std::vector<std::string> &sources, const std::s
     options.compressionLevel = 1;
     std::vector<std::string> skipped;
     const auto st = archiver.create(archivePath, items, options, skipped);
-    if (!st.ok())
-    {
+    if (!st.ok()) {
         err = st.message;
         return false;
     }
     return true;
 }
 
-std::string Client::unpackArchive(const std::string &archivePath, bool intoSubdir)
+std::string Client::unpackArchive(const std::string& archivePath, bool intoSubdir)
 {
     static const std::string kSuffix = ".tar.xz";
     if (archivePath.size() <= kSuffix.size() ||
-        archivePath.compare(archivePath.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0)
-    {
-        return std::string();  // 不是我们的包，什么都不做
+        archivePath.compare(archivePath.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0) {
+        return std::string();   // 不是我们的包，什么都不做
     }
 
     const std::filesystem::path pack(archivePath);
@@ -1905,19 +1683,17 @@ std::string Client::unpackArchive(const std::string &archivePath, bool intoSubdi
     filestore::ArchiveOptions options;
     std::vector<std::string> extracted;
     std::vector<std::string> skipped;
-    if (!archiver.extract(archivePath, dest.string(), options, extracted, skipped).ok())
-    {
+    if (!archiver.extract(archivePath, dest.string(), options, extracted, skipped).ok()) {
         // 失败保留包：用户还能自己解，总比"包被删了又没解开"好。
         return std::string();
     }
 
     std::error_code ec;
-    std::filesystem::remove(archivePath, ec);  // 包已经用完，留着只会越积越多
+    std::filesystem::remove(archivePath, ec);   // 包已经用完，留着只会越积越多
     return dest.string();
 }
 
-bool Client::pullOnSession(std::string peerId, std::string relPath, bool archive,
-                           std::function<void(const Outcome &)> done)
+bool Client::pullOnSession(std::string peerId, std::string relPath, bool archive, std::function<void(const Outcome&)> done)
 {
     return impl_->startPullOnSession(std::move(peerId), std::move(relPath), archive, std::move(done));
 }
@@ -1927,9 +1703,8 @@ bool Client::setReceiveDirOnSession(std::string targetPath)
     // 判据与 canSendOnSession 一致：会话在、已认证、当前动作就是接收。
     // 不看 pullActive/sendActive——改落点本身不发帧，与在飞的操作不冲突；
     // 反而正是"取回请求已经在路上"时才需要它（见 GUI 的行级下载）。
-    Impl *p = impl_.get();
-    if (p == nullptr || p->finished || !p->authenticated || !p->session || p->action != Action::kReceive)
-    {
+    Impl* p = impl_.get();
+    if (p == nullptr || p->finished || !p->authenticated || !p->session || p->action != Action::kReceive) {
         return false;
     }
     p->targetPath = std::move(targetPath);
@@ -1946,9 +1721,9 @@ void Client::abort()
     impl_->abortNow();
 }
 
-const std::string &Client::assignedId() const noexcept
+const std::string& Client::assignedId() const noexcept
 {
     return impl_->assignedId;
 }
 
-}  // namespace relayer::cli
+}   // namespace relayer::cli

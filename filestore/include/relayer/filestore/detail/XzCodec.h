@@ -21,8 +21,7 @@
 // 所有方法都可能在任意时刻返回失败（压缩器内部错误、输入损坏），
 // 因此都返回 Status，不抛异常。
 
-namespace relayer::filestore
-{
+namespace relayer::filestore {
 
 class XzEncoder
 {
@@ -34,16 +33,16 @@ public:
     explicit XzEncoder(int level = 6);
     ~XzEncoder();
 
-    XzEncoder(const XzEncoder &) = delete;
-    XzEncoder &operator=(const XzEncoder &) = delete;
+    XzEncoder(const XzEncoder&) = delete;
+    XzEncoder& operator=(const XzEncoder&) = delete;
 
     // 喂入原始数据。内部可能还留有未输出的压缩数据，
     // 用 read() 取走。
-    Status write(const void *data, std::size_t len);
+    Status write(const void* data, std::size_t len);
 
     // 取出已压缩的字节。返回写入 out 的字节数（0 表示暂时没有）。
     // 必须循环调用直到 drained() 为 true。
-    std::size_t read(void *out, std::size_t outLen, Status &st);
+    std::size_t read(void* out, std::size_t outLen, Status& st);
 
     // 通知压缩器"输入结束"，之后 read() 会吐出剩余的尾巴。
     Status finish();
@@ -55,7 +54,7 @@ public:
 
 private:
     struct Impl;
-    Impl *impl_;
+    Impl* impl_;
 };
 
 class XzDecoder
@@ -64,11 +63,11 @@ public:
     XzDecoder();
     ~XzDecoder();
 
-    XzDecoder(const XzDecoder &) = delete;
-    XzDecoder &operator=(const XzDecoder &) = delete;
+    XzDecoder(const XzDecoder&) = delete;
+    XzDecoder& operator=(const XzDecoder&) = delete;
 
     // 喂入压缩数据
-    Status write(const void *data, std::size_t len);
+    Status write(const void* data, std::size_t len);
 
     // 取出解压后的字节。
     //
@@ -82,7 +81,7 @@ public:
     // 时断时续。只有调过 finish()（声明"不会再喂数据了"）之后仍然解不到结束
     // 标记，才算截断。这个判断发生在 read() 里，所以调用方必须把 read 循环
     // 一直跑到 n == 0 为止，中途 break 会错过截断错误。
-    std::size_t read(void *out, std::size_t outLen, Status &st);
+    std::size_t read(void* out, std::size_t outLen, Status& st);
 
     // 通知解压器"输入结束"。若流不完整，之后调用 read() 会返回失败。
     Status finish();
@@ -92,7 +91,7 @@ public:
 
 private:
     struct Impl;
-    Impl *impl_;
+    Impl* impl_;
 };
 
-}  // namespace relayer::filestore
+}   // namespace relayer::filestore

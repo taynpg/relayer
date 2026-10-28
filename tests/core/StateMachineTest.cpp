@@ -1,16 +1,14 @@
 #include "relayer/core/transfer/StateMachine.h"
 
+#include <catch2/catch_test_macros.hpp>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <catch2/catch_test_macros.hpp>
-
 using namespace relayer::core::transfer;
 
-namespace
-{
+namespace {
 
 // 全部状态的显式列表。用列表而不是"从 0 遍历到 kStateCount"，
 // 是因为枚举没有保证连续，而漏掉一个状态会让"全覆盖"测试静默失去意义。
@@ -27,8 +25,7 @@ const Event kAllEvents[] = {
 //
 // 刻意**不**从 kTransitions 生成：如果从同一份数据生成，测试就退化成
 // "表和自己相等"，永远不可能失败。手抄一遍，让文档与代码的差异变成红测试。
-struct DocRow
-{
+struct DocRow {
     State from;
     Event event;
     State to;
@@ -47,7 +44,7 @@ const DocRow kDocumented[] = {
     {State::kInterrupted, Event::kAbort, State::kDone},
 };
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // 表的结构
@@ -58,8 +55,7 @@ TEST_CASE("transition table has no duplicate (from, event) pairs", "[sm][table]"
     // 重复项意味着"同一个组合有两个目标状态"，findTransition 返回哪个取决于
     // 表的顺序——这种不确定性在状态机里是不可接受的。
     std::set<std::pair<int, int>> seen;
-    for (const auto &t : kTransitions)
-    {
+    for (const auto& t : kTransitions) {
         const auto key = std::make_pair(static_cast<int>(t.from), static_cast<int>(t.event));
         REQUIRE(seen.insert(key).second);
     }
@@ -68,18 +64,14 @@ TEST_CASE("transition table has no duplicate (from, event) pairs", "[sm][table]"
 
 TEST_CASE("every transition points at a known state", "[sm][table]")
 {
-    for (const auto &t : kTransitions)
-    {
+    for (const auto& t : kTransitions) {
         bool fromOk = false;
         bool toOk = false;
-        for (const auto s : kAllStates)
-        {
-            if (s == t.from)
-            {
+        for (const auto s : kAllStates) {
+            if (s == t.from) {
                 fromOk = true;
             }
-            if (s == t.to)
-            {
+            if (s == t.to) {
                 toOk = true;
             }
         }
@@ -100,8 +92,7 @@ TEST_CASE("count constants match the enumerators", "[sm][table]")
 
 TEST_CASE("done has no outgoing transitions", "[sm][table]")
 {
-    for (const auto e : kAllEvents)
-    {
+    for (const auto e : kAllEvents) {
         REQUIRE_FALSE(isLegalTransition(State::kDone, e));
     }
 }
@@ -114,9 +105,8 @@ TEST_CASE("table matches PROTOCOL.md table exactly", "[sm][doc]")
 {
     SECTION("文档里每一行都在表里，且目标状态一致")
     {
-        for (const auto &row : kDocumented)
-        {
-            const Transition *t = findTransition(row.from, row.event);
+        for (const auto& row : kDocumented) {
+            const Transition* t = findTransition(row.from, row.event);
             INFO(toString(row.from) << " --" << toString(row.event) << "-->");
             REQUIRE(t != nullptr);
             REQUIRE(t->to == row.to);
@@ -127,13 +117,10 @@ TEST_CASE("table matches PROTOCOL.md table exactly", "[sm][doc]")
     {
         REQUIRE(kTransitionCount == sizeof(kDocumented) / sizeof(kDocumented[0]));
 
-        for (const auto &t : kTransitions)
-        {
+        for (const auto& t : kTransitions) {
             bool documented = false;
-            for (const auto &row : kDocumented)
-            {
-                if (row.from == t.from && row.event == t.event && row.to == t.to)
-                {
+            for (const auto& row : kDocumented) {
+                if (row.from == t.from && row.event == t.event && row.to == t.to) {
                     documented = true;
                     break;
                 }
@@ -160,10 +147,8 @@ TEST_CASE("every (state, event) combination behaves per the table", "[sm][exhaus
     std::size_t checked = 0;
     std::size_t legal = 0;
 
-    for (const auto from : kAllStates)
-    {
-        for (const auto event : kAllEvents)
-        {
+    for (const auto from : kAllStates) {
+        for (const auto event : kAllEvents) {
             ++checked;
 
             const bool expectedLegal = isLegalTransition(from, event);
@@ -174,18 +159,15 @@ TEST_CASE("every (state, event) combination behaves per the table", "[sm][exhaus
 
             INFO("from=" << toString(from) << " event=" << toString(event));
 
-            if (expectedLegal)
-            {
+            if (expectedLegal) {
                 ++legal;
                 REQUIRE(st.ok());
                 // 状态必须真的变了
                 REQUIRE(sm.state() != from);
-                const Transition *t = findTransition(from, event);
+                const Transition* t = findTransition(from, event);
                 REQUIRE(t != nullptr);
                 REQUIRE(sm.state() == t->to);
-            }
-            else
-            {
+            } else {
                 REQUIRE_FALSE(st.ok());
                 REQUIRE(st.code == relayer::ErrorCode::kProtocol);
                 // 非法转移后状态必须保持不变
@@ -207,12 +189,9 @@ TEST_CASE("illegal combinations are exactly the complement", "[sm][exhaustive]")
 {
     // 独立再算一遍：合法组合数 + 非法组合数 = 全部组合数。
     std::size_t illegal = 0;
-    for (const auto from : kAllStates)
-    {
-        for (const auto event : kAllEvents)
-        {
-            if (!isLegalTransition(from, event))
-            {
+    for (const auto from : kAllStates) {
+        for (const auto event : kAllEvents) {
+            if (!isLegalTransition(from, event)) {
                 ++illegal;
             }
         }
@@ -302,8 +281,7 @@ TEST_CASE("abort from interrupted ends the transfer", "[sm][flow]")
 
 TEST_CASE("terminal state rejects every event", "[sm][terminal]")
 {
-    for (const auto e : kAllEvents)
-    {
+    for (const auto e : kAllEvents) {
         StateMachine sm(State::kDone);
         const auto st = sm.fire(e);
         INFO("event=" << toString(e));
@@ -335,8 +313,7 @@ TEST_CASE("illegal fire leaves state untouched", "[sm][terminal]")
 TEST_CASE("repeated illegal events are all rejected", "[sm][terminal]")
 {
     StateMachine sm(State::kIdle);
-    for (int i = 0; i < 5; ++i)
-    {
+    for (int i = 0; i < 5; ++i) {
         REQUIRE_FALSE(sm.fire(Event::kAbort).ok());
     }
     REQUIRE(sm.state() == State::kIdle);
@@ -354,10 +331,8 @@ TEST_CASE("fire is noexcept and does not throw on illegal input", "[sm][terminal
 
 TEST_CASE("canFire agrees with fire for the whole matrix", "[sm][exhaustive]")
 {
-    for (const auto from : kAllStates)
-    {
-        for (const auto event : kAllEvents)
-        {
+    for (const auto from : kAllStates) {
+        for (const auto event : kAllEvents) {
             StateMachine sm(from);
             const bool predicted = sm.canFire(event);
             const bool actual = sm.fire(event).ok();
@@ -370,8 +345,7 @@ TEST_CASE("canFire agrees with fire for the whole matrix", "[sm][exhaustive]")
 TEST_CASE("canFire does not change state", "[sm][table]")
 {
     StateMachine sm(State::kTransferring);
-    for (const auto e : kAllEvents)
-    {
+    for (const auto e : kAllEvents) {
         // 故意丢弃返回值：这里要验证的正是"调用它不会改变状态"。
         (void)sm.canFire(e);
         REQUIRE(sm.state() == State::kTransferring);
@@ -392,8 +366,7 @@ TEST_CASE("reset returns to Idle by default", "[sm][reset]")
 
 TEST_CASE("reset can jump to any state", "[sm][reset]")
 {
-    for (const auto s : kAllStates)
-    {
+    for (const auto s : kAllStates) {
         StateMachine sm;
         sm.reset(s);
         REQUIRE(sm.state() == s);
@@ -430,28 +403,22 @@ TEST_CASE("names are unique", "[sm][names]")
 {
     // 重名会让文档比对脚本误判，也让日志无法区分
     std::set<std::string> stateNames;
-    for (const auto s : kAllStates)
-    {
+    for (const auto s : kAllStates) {
         REQUIRE(stateNames.insert(std::string(toString(s))).second);
     }
 
     std::set<std::string> eventNames;
-    for (const auto e : kAllEvents)
-    {
+    for (const auto e : kAllEvents) {
         REQUIRE(eventNames.insert(std::string(toString(e))).second);
     }
 }
 
 TEST_CASE("only Done is terminal", "[sm][names]")
 {
-    for (const auto s : kAllStates)
-    {
-        if (s == State::kDone)
-        {
+    for (const auto s : kAllStates) {
+        if (s == State::kDone) {
             REQUIRE(isTerminal(s));
-        }
-        else
-        {
+        } else {
             REQUIRE_FALSE(isTerminal(s));
         }
     }

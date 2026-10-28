@@ -1,57 +1,46 @@
 #include "relayer/core/transfer/TransferPeer.h"
 
 #include <algorithm>
+#include <asio/post.hpp>
 #include <utility>
 #include <vector>
 
-#include <asio/post.hpp>
-
 #include "relayer/core/transfer/MerkleTree.h"
 
-namespace relayer::core::transfer
-{
+namespace relayer::core::transfer {
 
-namespace
-{
+namespace {
 
 using protocol::Frame;
 using protocol::FrameType;
 
 constexpr auto kAckInterval = std::chrono::milliseconds(20);
 
-}  // namespace
+}   // namespace
 
 // ---------------------------------------------------------------------------
 // 构造
 // ---------------------------------------------------------------------------
 
-TransferPeer::TransferPeer(asio::io_context &ctx, std::shared_ptr<session::Session> session,
-                           filestore::IFileStore &store, WorkerPool &pool, Role role, std::int64_t sessionId,
-                           Config config, std::function<void(const TransferResult &)> onDone)
-    : ctx_(ctx)
-    , session_(std::move(session))
-    , store_(store)
-    , pool_(pool)
-    , role_(role)
-    , sessionId_(sessionId)
-    , config_(std::move(config))
-    , onDone_(std::move(onDone))
+TransferPeer::TransferPeer(asio::io_context& ctx, std::shared_ptr<session::Session> session, filestore::IFileStore& store,
+                           WorkerPool& pool, Role role, std::int64_t sessionId, Config config,
+                           std::function<void(const TransferResult&)> onDone)
+    : ctx_(ctx), session_(std::move(session)), store_(store), pool_(pool), role_(role), sessionId_(sessionId),
+      config_(std::move(config)), onDone_(std::move(onDone))
 {
 }
 
 TransferPeer::~TransferPeer() = default;
 
-std::shared_ptr<TransferPeer> TransferPeer::createSender(asio::io_context &ctx,
-                                                         std::shared_ptr<session::Session> session,
-                                                         filestore::IFileStore &store, WorkerPool &pool,
-                                                         std::string sourcePath, std::string remoteName,
-                                                         std::string toPeerId, std::int64_t sessionId, Config config,
-                                                         std::function<void(const TransferResult &)> onDone)
+std::shared_ptr<TransferPeer> TransferPeer::createSender(asio::io_context& ctx, std::shared_ptr<session::Session> session,
+                                                         filestore::IFileStore& store, WorkerPool& pool, std::string sourcePath,
+                                                         std::string remoteName, std::string toPeerId, std::int64_t sessionId,
+                                                         Config config, std::function<void(const TransferResult&)> onDone)
 {
     // make_shared 不能用：构造函数是私有的，拿不到 make_shared 的访问权
     // （它需要公开构造）。这里显式 new 后用 shared_ptr 接管，效果一致。
-    std::shared_ptr<TransferPeer> peer(new TransferPeer(ctx, std::move(session), store, pool, Role::kSender, sessionId,
-                                                        std::move(config), std::move(onDone)));
+    std::shared_ptr<TransferPeer> peer(
+        new TransferPeer(ctx, std::move(session), store, pool, Role::kSender, sessionId, std::move(config), std::move(onDone)));
     peer->sourcePath_ = std::move(sourcePath);
     peer->remoteName_ = std::move(remoteName);
     peer->toPeerId_ = std::move(toPeerId);
@@ -61,8 +50,7 @@ std::shared_ptr<TransferPeer> TransferPeer::createSender(asio::io_context &ctx,
     // open 失败（文件不存在、块大小非法）是本地问题，不该发请求出去再等
     // 对端拒绝——那要多一个往返才能知道"其实是我的源文件没了"。
     const auto st = peer->sender_->open(peer->sourcePath_, peer->config_.chunkSize);
-    if (!st.ok())
-    {
+    if (!st.ok()) {
         peer->finish(TransferOutcome::kFailed, st);
         return peer;
     }
@@ -71,13 +59,13 @@ std::shared_ptr<TransferPeer> TransferPeer::createSender(asio::io_context &ctx,
     return peer;
 }
 
-std::shared_ptr<TransferPeer>
-TransferPeer::createReceiver(asio::io_context &ctx, std::shared_ptr<session::Session> session,
-                             filestore::IFileStore &store, WorkerPool &pool, std::string targetPath,
-                             std::int64_t sessionId, Config config, std::function<void(const TransferResult &)> onDone)
+std::shared_ptr<TransferPeer> TransferPeer::createReceiver(asio::io_context& ctx, std::shared_ptr<session::Session> session,
+                                                           filestore::IFileStore& store, WorkerPool& pool, std::string targetPath,
+                                                           std::int64_t sessionId, Config config,
+                                                           std::function<void(const TransferResult&)> onDone)
 {
-    std::shared_ptr<TransferPeer> peer(new TransferPeer(ctx, std::move(session), store, pool, Role::kReceiver,
-                                                        sessionId, std::move(config), std::move(onDone)));
+    std::shared_ptr<TransferPeer> peer(
+        new TransferPeer(ctx, std::move(session), store, pool, Role::kReceiver, sessionId, std::move(config), std::move(onDone)));
     peer->targetPath_ = std::move(targetPath);
     peer->receiver_ = std::make_unique<TransferReceiver>(store, pool, peer->config_.receiver);
 
@@ -91,8 +79,7 @@ TransferPeer::createReceiver(asio::io_context &ctx, std::shared_ptr<session::Ses
 
 void TransferPeer::startSending()
 {
-    if (digestStarted_ || finished_)
-    {
+    if (digestStarted_ || finished_) {
         return;
     }
     // 防止异步摘要还没回来时被重复调用一次（比如上层连着两次 pump）。
@@ -106,28 +93,23 @@ void TransferPeer::startSending()
     //
     // 代价是"发请求"这个动作被推迟到摘要算完，期间对端什么都不收到。
     // 这在语义上是对的——请求体里的 sha256 本来就得等摘要出来才能填。
-    const auto st = sender_->computeDigest(
-        [self = shared_from_this()](TransferSender::DigestResult digest)
-        {
-            // 回调在 WorkerPool 线程上。所有状态归 strand 管，必须投回去。
-            asio::post(self->ctx_, [self, digest = std::move(digest)] { self->onDigestReady(std::move(digest)); });
-        });
+    const auto st = sender_->computeDigest([self = shared_from_this()](TransferSender::DigestResult digest) {
+        // 回调在 WorkerPool 线程上。所有状态归 strand 管，必须投回去。
+        asio::post(self->ctx_, [self, digest = std::move(digest)] { self->onDigestReady(std::move(digest)); });
+    });
 
-    if (!st.ok())
-    {
+    if (!st.ok()) {
         finish(TransferOutcome::kFailed, st);
     }
 }
 
 void TransferPeer::onDigestReady(TransferSender::DigestResult digest)
 {
-    if (finished_)
-    {
+    if (finished_) {
         return;
     }
 
-    if (!digest.status.ok())
-    {
+    if (!digest.status.ok()) {
         finish(TransferOutcome::kFailed, digest.status);
         return;
     }
@@ -143,11 +125,10 @@ void TransferPeer::onDigestReady(TransferSender::DigestResult digest)
     desc.chunkSize = sender_->chunkSize();
     desc.sha256Hex = digest.sha256Hex;
     desc.fingerprintHex = store_.quickFingerprint(sourcePath_);
-    desc.root = desc.displayName;  // 接收方以它为准决定落点名
+    desc.root = desc.displayName;   // 接收方以它为准决定落点名
 
     std::vector<char> body;
-    if (auto enc = encodeDesc(desc, body); !enc.ok())
-    {
+    if (auto enc = encodeDesc(desc, body); !enc.ok()) {
         finish(TransferOutcome::kFailed, enc);
         return;
     }
@@ -174,12 +155,11 @@ void TransferPeer::onDigestReady(TransferSender::DigestResult digest)
     sendFrame(std::move(f));
 }
 
-void TransferPeer::handleAnswerSend(const Frame &frame)
+void TransferPeer::handleAnswerSend(const Frame& frame)
 {
     TransferAnswer answer;
     std::string err;
-    if (!decodeAnswer(frame.body, answer, err))
-    {
+    if (!decodeAnswer(frame.body, answer, err)) {
         ++stats_.protocolErrors;
         finish(TransferOutcome::kFailed, Status::Fail(ErrorCode::kProtocol, "bad answer frame: " + err));
         return;
@@ -187,21 +167,17 @@ void TransferPeer::handleAnswerSend(const Frame &frame)
 
     // 对端拒绝（目标已存在、磁盘满、描述非法……）。把它的原因原样带上去，
     // 比本地编一句"传输失败"有用得多。
-    if (answer.status != AnswerStatus::kOk)
-    {
+    if (answer.status != AnswerStatus::kOk) {
         finish(TransferOutcome::kFailed,
-               Status::Fail(ErrorCode::kProtocol,
-                            "peer refused: " + std::string(toString(answer.status)) + " " + answer.reason));
+               Status::Fail(ErrorCode::kProtocol, "peer refused: " + std::string(toString(answer.status)) + " " + answer.reason));
         return;
     }
 
     // 续传点：对端说"前 N 块我有了"。发送方据此把这 N 块标成已确认——
     // 它们是**对端已经落盘**的，不该再发一遍。
-    if (answer.resumeOffset > 0)
-    {
+    if (answer.resumeOffset > 0) {
         const auto chunkSize = sender_->chunkSize();
-        if (chunkSize == 0 || answer.resumeOffset % chunkSize != 0)
-        {
+        if (chunkSize == 0 || answer.resumeOffset % chunkSize != 0) {
             ++stats_.protocolErrors;
             finish(TransferOutcome::kFailed, Status::Fail(ErrorCode::kProtocol, "resumeOffset is not chunk aligned"));
             return;
@@ -221,8 +197,7 @@ void TransferPeer::handleAnswerSend(const Frame &frame)
     // 续传点等于总长：对端**整份都有了**，没有块要发。直接进收尾，
     // 让它跑一遍校验把残片转正——不这么做的话，sendReadyChunks 什么都不发，
     // 而 done() 为真时没人再来调 sendCompleteRequest，两端就一起干等。
-    if (sender_->done())
-    {
+    if (sender_->done()) {
         sendCompleteRequest();
         return;
     }
@@ -230,12 +205,11 @@ void TransferPeer::handleAnswerSend(const Frame &frame)
     sendReadyChunks();
 }
 
-void TransferPeer::handleChunkAck(const Frame &frame)
+void TransferPeer::handleChunkAck(const Frame& frame)
 {
     ChunkAck ack;
     std::string err;
-    if (!decodeAck(frame.body, ack, err))
-    {
+    if (!decodeAck(frame.body, ack, err)) {
         ++stats_.protocolErrors;
         finish(TransferOutcome::kFailed, Status::Fail(ErrorCode::kProtocol, "bad ack frame: " + err));
         return;
@@ -244,8 +218,7 @@ void TransferPeer::handleChunkAck(const Frame &frame)
     ++stats_.acksReceived;
     sender_->applyAck(ack);
 
-    if (sender_->done())
-    {
+    if (sender_->done()) {
         sendCompleteRequest();
         return;
     }
@@ -255,20 +228,18 @@ void TransferPeer::handleChunkAck(const Frame &frame)
     sendReadyChunks();
 }
 
-void TransferPeer::handleAnswerComplete(const Frame &frame)
+void TransferPeer::handleAnswerComplete(const Frame& frame)
 {
     CompleteStatus status = CompleteStatus::kWriteFailed;
     std::string rootHex;
     std::string err;
-    if (!decodeCompleteAnswer(frame.body, status, rootHex, err))
-    {
+    if (!decodeCompleteAnswer(frame.body, status, rootHex, err)) {
         ++stats_.protocolErrors;
         finish(TransferOutcome::kFailed, Status::Fail(ErrorCode::kProtocol, "bad complete answer: " + err));
         return;
     }
 
-    if (status == CompleteStatus::kOk)
-    {
+    if (status == CompleteStatus::kOk) {
         finish(TransferOutcome::kCompleted, Status::Ok());
         return;
     }
@@ -276,8 +247,7 @@ void TransferPeer::handleAnswerComplete(const Frame &frame)
     // 校验失败。kRootMismatch 说明数据传坏了，kShapeMismatch 说明两端对
     // 块结构的理解不一致——后者更严重，因为它意味着协议层面出了问题。
     Status st = Status::Fail(ErrorCode::kProtocol, "peer verify failed: " + std::string(toString(status)));
-    if (!err.empty() && status == CompleteStatus::kWriteFailed)
-    {
+    if (!err.empty() && status == CompleteStatus::kWriteFailed) {
         // 写盘失败是对端的本地问题，不该归成协议错误。
         st = Status::Fail(ErrorCode::kIoError, "peer write failed: " + err);
     }
@@ -286,8 +256,7 @@ void TransferPeer::handleAnswerComplete(const Frame &frame)
 
 void TransferPeer::sendReadyChunks()
 {
-    if (finished_)
-    {
+    if (finished_) {
         return;
     }
 
@@ -300,11 +269,9 @@ void TransferPeer::sendReadyChunks()
 
     (void)sender_->pump(post);
 
-    for (auto &chunk : sender_->takeReadyChunks())
-    {
+    for (auto& chunk : sender_->takeReadyChunks()) {
         std::vector<char> body;
-        if (auto st = encodeChunk(chunk.chunkIndex, chunk.data.data(), chunk.data.size(), body); !st.ok())
-        {
+        if (auto st = encodeChunk(chunk.chunkIndex, chunk.data.data(), chunk.data.size(), body); !st.ok()) {
             finish(TransferOutcome::kFailed, st);
             return;
         }
@@ -323,8 +290,7 @@ void TransferPeer::sendReadyChunks()
 
     // 读盘出错要立刻终止。继续发只会让接收方收到一堆空洞然后校验失败，
     // 而失败原因被掩盖成"哈希不对"。
-    if (auto re = sender_->readError(); !re.ok())
-    {
+    if (auto re = sender_->readError(); !re.ok()) {
         finish(TransferOutcome::kFailed, re);
         return;
     }
@@ -336,8 +302,7 @@ void TransferPeer::sendReadyChunks()
 
 void TransferPeer::checkRetransmit()
 {
-    if (finished_ || !sender_)
-    {
+    if (finished_ || !sender_) {
         return;
     }
 
@@ -348,21 +313,17 @@ void TransferPeer::checkRetransmit()
     // 只扫 outstanding()（在飞的那部分）：pending / needRetransmit 没发过，
     // 谈不上超时。
     std::vector<std::uint32_t> timedOut;
-    for (auto idx : sender_->outstandingChunks())
-    {
+    for (auto idx : sender_->outstandingChunks()) {
         const auto it = chunkSentAt_.find(idx);
-        if (it == chunkSentAt_.end())
-        {
+        if (it == chunkSentAt_.end()) {
             continue;
         }
-        if (now - it->second >= config_.retransmitTimeout)
-        {
+        if (now - it->second >= config_.retransmitTimeout) {
             timedOut.push_back(idx);
         }
     }
 
-    if (timedOut.empty())
-    {
+    if (timedOut.empty()) {
         return;
     }
 
@@ -372,8 +333,7 @@ void TransferPeer::checkRetransmit()
 
 void TransferPeer::sendCompleteRequest()
 {
-    if (finished_ || completeRequested_)
-    {
+    if (finished_ || completeRequested_) {
         return;
     }
     completeRequested_ = true;
@@ -382,8 +342,7 @@ void TransferPeer::sendCompleteRequest()
     // 根在这里才算：前面 computeDigest 已经算过一遍，但要再读一次文件
     // 太浪费。改为在 startSending 时存下来——见 merkleRootHex_。
     std::vector<char> body;
-    if (auto st = encodeCompleteRequest(merkleRootHex_, sender_->totalSize(), body); !st.ok())
-    {
+    if (auto st = encodeCompleteRequest(merkleRootHex_, sender_->totalSize(), body); !st.ok()) {
         finish(TransferOutcome::kFailed, st);
         return;
     }
@@ -400,7 +359,7 @@ void TransferPeer::sendCompleteRequest()
 // 接收方
 // ---------------------------------------------------------------------------
 
-void TransferPeer::handleRequestSend(const Frame &frame)
+void TransferPeer::handleRequestSend(const Frame& frame)
 {
     // 记下发送方是谁。接收方之后发出的每一帧（应答、ACK、收尾应答）都要
     // 填 to，否则中继会把它们当成"发给服务端自己"的本地帧吃掉——
@@ -420,8 +379,7 @@ void TransferPeer::handleRequestSend(const Frame &frame)
     // 后续每一帧都缺收件人。而单机直连不需要 to 也能跑通，所以症状
     // 只会在跨中继时以超时的形式出现——正是这个缺陷藏了很久的原因。
     toPeerId_ = frame.from;
-    if (toPeerId_.empty() && session_)
-    {
+    if (toPeerId_.empty() && session_) {
         // 服务端会话上 assignedId() 是"我给对端分配的 id"，也就是发送方
         // 的身份，正是这里要的。
         //
@@ -429,16 +387,14 @@ void TransferPeer::handleRequestSend(const Frame &frame)
         // 方通常不是客户端会话；真到了这一步（接收方跑在客户端会话、
         // 且对端没填 from），留空比猜错好：留空会让失败落在发送方的超时
         // 判定上，猜错会把帧投给一个无关的对端。
-        if (session_->role() == session::Role::kServer)
-        {
+        if (session_->role() == session::Role::kServer) {
             toPeerId_ = session_->assignedId();
         }
     }
 
     TransferDesc desc;
     std::string err;
-    if (!decodeDesc(frame.body, desc, err))
-    {
+    if (!decodeDesc(frame.body, desc, err)) {
         sendAnswerSend(AnswerStatus::kBadDesc, 0, err);
         ++stats_.protocolErrors;
         return;
@@ -456,19 +412,16 @@ void TransferPeer::handleRequestSend(const Frame &frame)
     const auto targetStat = store_.stat(targetPath_);
     const bool treatAsDir = targetStat.exists && targetStat.isDir;
 
-    if (!desc.root.empty())
-    {
+    if (!desc.root.empty()) {
         // 无论最终用不用，都要先验一遍 root：即使落到用户指定的文件名，
         // 一个含 `..` 的 root 也说明对端的行为不可信，该在握手期就拒掉。
         const auto resolved = store_.resolveWithin(store_.normalize(targetPath_), desc.root);
-        if (resolved.empty())
-        {
+        if (resolved.empty()) {
             sendAnswerSend(AnswerStatus::kBadDesc, 0, "path escapes the target directory");
             ++stats_.protocolErrors;
             return;
         }
-        if (treatAsDir)
-        {
+        if (treatAsDir) {
             target = resolved;
 
             // desc.root 允许带目录段（"sub/name.txt"）——这是"发送方指定
@@ -479,10 +432,8 @@ void TransferPeer::handleRequestSend(const Frame &frame)
             // 只在目录形态下建：用户指定完整文件路径时不代表他同意凭空
             // 多出一串目录，那种 ENOENT 应当如实报错。
             const auto sep = target.find_last_of("/\\");
-            if (sep != std::string::npos)
-            {
-                if (const auto mk = store_.mkdirs(target.substr(0, sep)); !mk.ok())
-                {
+            if (sep != std::string::npos) {
+                if (const auto mk = store_.mkdirs(target.substr(0, sep)); !mk.ok()) {
                     sendAnswerSend(AnswerStatus::kNotWritable, 0, mk.message);
                     ++stats_.protocolErrors;
                     finish(TransferOutcome::kFailed, mk, target);
@@ -495,8 +446,7 @@ void TransferPeer::handleRequestSend(const Frame &frame)
     std::uint32_t resumeFrom = 0;
     auto openSt = receiver_->open(desc, target, resumeFrom);
 
-    if (openSt.code == ErrorCode::kAlreadyExists && config_.overwriteExisting)
-    {
+    if (openSt.code == ErrorCode::kAlreadyExists && config_.overwriteExisting) {
         // 覆盖策略（调用方显式开启，见 Config::overwriteExisting）：
         // 删掉已存在的目标后重开一次。receiver 尚未 open 成功（opened_
         // 只在 open 全部通过后才置位），重复调用 open 是安全的——它会
@@ -505,26 +455,22 @@ void TransferPeer::handleRequestSend(const Frame &frame)
         // 删除失败不静默：文件被另一个程序占用（Windows 共享冲突）是
         // 常见情况，必须把 kNotWritable 报给发送方，而不是让它对着一个
         // 删不掉的目标干等超时。
-        if (const auto rm = store_.remove(target); !rm.ok())
-        {
-            sendAnswerSend(AnswerStatus::kNotWritable, 0,
-                           "overwrite requested but target cannot be removed: " + rm.message);
+        if (const auto rm = store_.remove(target); !rm.ok()) {
+            sendAnswerSend(AnswerStatus::kNotWritable, 0, "overwrite requested but target cannot be removed: " + rm.message);
             finish(TransferOutcome::kFailed, rm, target);
             return;
         }
         openSt = receiver_->open(desc, target, resumeFrom);
     }
 
-    if (openSt.code == ErrorCode::kAlreadyExists)
-    {
+    if (openSt.code == ErrorCode::kAlreadyExists) {
         // 目标已存在且（调用方未要求）覆盖。这不是错误，是"本端已经有了"。
         sendAnswerSend(AnswerStatus::kTargetExists, 0, "target already exists");
         finish(TransferOutcome::kFailed, openSt, target);
         return;
     }
 
-    if (!openSt.ok())
-    {
+    if (!openSt.ok()) {
         sendAnswerSend(openSt.code == ErrorCode::kNoSpace ? AnswerStatus::kNoSpace : AnswerStatus::kNotWritable, 0,
                        openSt.message);
         finish(TransferOutcome::kFailed, openSt, target);
@@ -537,17 +483,15 @@ void TransferPeer::handleRequestSend(const Frame &frame)
     sendAnswerSend(AnswerStatus::kOk, resumeFrom * desc.chunkSize, {});
 }
 
-void TransferPeer::handleChunkData(const Frame &frame)
+void TransferPeer::handleChunkData(const Frame& frame)
 {
-    if (!started_ || finished_)
-    {
+    if (!started_ || finished_) {
         return;
     }
 
     ChunkData chunk;
     std::string err;
-    if (!decodeChunk(frame.body, chunk, err))
-    {
+    if (!decodeChunk(frame.body, chunk, err)) {
         ++stats_.protocolErrors;
         finish(TransferOutcome::kFailed, Status::Fail(ErrorCode::kProtocol, "bad chunk frame: " + err));
         return;
@@ -566,34 +510,28 @@ void TransferPeer::handleChunkData(const Frame &frame)
     // 捕 weak_from_this 而不是 shared_from_this：这个回调会被 receiver_
     // 存住，而 receiver_ 是本对象的成员——强引用会绕成自我持有的环，
     // 传输结束后谁都释放不掉。
-    const PostFn post = [&ctx = ctx_, weak = weak_from_this()](std::function<void()> fn)
-    {
-        asio::post(ctx,
-                   [weak, fn = std::move(fn)]()
-                   {
-                       fn();
+    const PostFn post = [&ctx = ctx_, weak = weak_from_this()](std::function<void()> fn) {
+        asio::post(ctx, [weak, fn = std::move(fn)]() {
+            fn();
 
-                       const auto self = weak.lock();
-                       if (!self || self->finished_ || !self->receiver_)
-                       {
-                           return;
-                       }
+            const auto self = weak.lock();
+            if (!self || self->finished_ || !self->receiver_) {
+                return;
+            }
 
-                       // 落盘这件事本身改变了"能确认到哪"，必须让 ACK 重发。
-                       self->ackPending_ = true;
-                       if (self->receiver_->allChunksReceived())
-                       {
-                           // 收齐了就不等 pump 的 20ms 节流，立刻回一次，
-                           // 否则对端要多等一个周期才进收尾。
-                           self->sendAck();
-                       }
-                   });
+            // 落盘这件事本身改变了"能确认到哪"，必须让 ACK 重发。
+            self->ackPending_ = true;
+            if (self->receiver_->allChunksReceived()) {
+                // 收齐了就不等 pump 的 20ms 节流，立刻回一次，
+                // 否则对端要多等一个周期才进收尾。
+                self->sendAck();
+            }
+        });
     };
 
     const auto st = receiver_->acceptChunk(chunk.chunkIndex, chunk.payload, chunk.payloadLen, post);
 
-    if (st.code == ErrorCode::kAlreadyExists)
-    {
+    if (st.code == ErrorCode::kAlreadyExists) {
         // 重传的重复块。正常路径：说明我们上一轮的 ACK 丢了。
         // 回应仍然是"再 ACK 一次"，由下面的 ackPending_ 保证。
         ++stats_.duplicateChunks;
@@ -601,8 +539,7 @@ void TransferPeer::handleChunkData(const Frame &frame)
         return;
     }
 
-    if (st.code == ErrorCode::kBusy)
-    {
+    if (st.code == ErrorCode::kBusy) {
         // 背压。此刻**不能**回 ACK 说收到了——这一块没被受理。让它停在
         // 对端的窗口里，等我们消化完它自然会重传。
         //
@@ -611,8 +548,7 @@ void TransferPeer::handleChunkData(const Frame &frame)
         return;
     }
 
-    if (!st.ok())
-    {
+    if (!st.ok()) {
         ++stats_.protocolErrors;
         finish(TransferOutcome::kFailed, st);
         return;
@@ -621,20 +557,18 @@ void TransferPeer::handleChunkData(const Frame &frame)
     ++stats_.chunksReceived;
     ackPending_ = true;
 
-    if (receiver_->allChunksReceived())
-    {
+    if (receiver_->allChunksReceived()) {
         // 收齐了，立刻回一个完整的 ACK，让对端尽快进收尾。
         sendAck();
     }
 }
 
-void TransferPeer::handleCompleteRequest(const Frame &frame)
+void TransferPeer::handleCompleteRequest(const Frame& frame)
 {
     std::string rootHex;
     std::uint64_t finalSize = 0;
     std::string err;
-    if (!decodeCompleteRequest(frame.body, rootHex, finalSize, err))
-    {
+    if (!decodeCompleteRequest(frame.body, rootHex, finalSize, err)) {
         ++stats_.protocolErrors;
         finish(TransferOutcome::kFailed, Status::Fail(ErrorCode::kProtocol, "bad complete request: " + err));
         return;
@@ -649,8 +583,7 @@ void TransferPeer::handleCompleteRequest(const Frame &frame)
     //
     // 直接返回不发应答：对端有重传/超时机制，等写完会随下一次 ACK 触发
     // 它重发 complete 请求。这不优雅，但比在原地阻塞事件循环好得多。
-    if (receiver_->hasPendingWrites())
-    {
+    if (receiver_->hasPendingWrites()) {
         completeDeferred_ = true;
         deferredComplete_ = frame;
         return;
@@ -659,11 +592,9 @@ void TransferPeer::handleCompleteRequest(const Frame &frame)
 
     // 总长不符说明两端对文件形状的理解不一致，重传也没用——直接报
     // kShapeMismatch，让上层丢弃残片重来。
-    if (finalSize != receiver_->totalSize())
-    {
+    if (finalSize != receiver_->totalSize()) {
         std::vector<char> body;
-        if (encodeCompleteAnswer(CompleteStatus::kShapeMismatch, rootHex, body).ok())
-        {
+        if (encodeCompleteAnswer(CompleteStatus::kShapeMismatch, rootHex, body).ok()) {
             Frame f;
             f.type = FrameType::kFileAnswerComplete;
             f.sessionId = sessionId_;
@@ -677,8 +608,7 @@ void TransferPeer::handleCompleteRequest(const Frame &frame)
     const auto res = receiver_->finalize(rootHex);
 
     std::vector<char> body;
-    if (auto st = encodeCompleteAnswer(res.status, res.actualRootHex, body); !st.ok())
-    {
+    if (auto st = encodeCompleteAnswer(res.status, res.actualRootHex, body); !st.ok()) {
         finish(TransferOutcome::kFailed, st);
         return;
     }
@@ -689,27 +619,22 @@ void TransferPeer::handleCompleteRequest(const Frame &frame)
     f.body = std::move(body);
     sendFrame(std::move(f));
 
-    if (res.status == CompleteStatus::kOk)
-    {
+    if (res.status == CompleteStatus::kOk) {
         finish(TransferOutcome::kCompleted, Status::Ok(), receiver_->targetPath());
-    }
-    else
-    {
+    } else {
         finish(TransferOutcome::kFailed, res.error, receiver_->partPath());
     }
 }
 
 void TransferPeer::sendAck()
 {
-    if (!receiver_ || finished_)
-    {
+    if (!receiver_ || finished_) {
         return;
     }
 
     const auto ack = receiver_->buildCurrentAck();
     std::vector<char> body;
-    if (auto st = encodeAck(ack, body); !st.ok())
-    {
+    if (auto st = encodeAck(ack, body); !st.ok()) {
         finish(TransferOutcome::kFailed, st);
         return;
     }
@@ -733,8 +658,7 @@ void TransferPeer::sendAnswerSend(AnswerStatus status, std::uint32_t resumeFrom,
     answer.reason = std::string(reason);
 
     std::vector<char> body;
-    if (auto st = encodeAnswer(answer, body); !st.ok())
-    {
+    if (auto st = encodeAnswer(answer, body); !st.ok()) {
         finish(TransferOutcome::kFailed, st);
         return;
     }
@@ -751,10 +675,9 @@ void TransferPeer::sendAnswerSend(AnswerStatus status, std::uint32_t resumeFrom,
 // 共用
 // ---------------------------------------------------------------------------
 
-bool TransferPeer::onFrame(const Frame &frame)
+bool TransferPeer::onFrame(const Frame& frame)
 {
-    if (finished_)
-    {
+    if (finished_) {
         return false;
     }
 
@@ -772,46 +695,39 @@ bool TransferPeer::onFrame(const Frame &frame)
     const bool sessionMismatch = frame.sessionId != sessionId_;
     const bool canAdopt = role_ == Role::kReceiver && sessionId_ == 0 && frame.type == FrameType::kFileRequestSend;
 
-    if (sessionMismatch && !canAdopt)
-    {
+    if (sessionMismatch && !canAdopt) {
         return false;
     }
 
-    switch (frame.type)
-    {
+    switch (frame.type) {
     case FrameType::kFileAnswerSend:
-        if (role_ == Role::kSender)
-        {
+        if (role_ == Role::kSender) {
             handleAnswerSend(frame);
             return true;
         }
         break;
 
     case FrameType::kChunkRequestData:
-        if (role_ == Role::kReceiver)
-        {
+        if (role_ == Role::kReceiver) {
             handleChunkData(frame);
             return true;
         }
         break;
 
     case FrameType::kChunkRequestAck:
-        if (role_ == Role::kSender)
-        {
+        if (role_ == Role::kSender) {
             handleChunkAck(frame);
             return true;
         }
         break;
 
     case FrameType::kFileRequestSend:
-        if (role_ == Role::kReceiver)
-        {
+        if (role_ == Role::kReceiver) {
             // 认下发送方选的 sessionId。必须在 handleRequestSend 之前：
             // 它的应答帧（kFileAnswerSend）要带上这个值，而应答是紧接着
             // 发出去的——晚一步就会回一个 sessionId=0 的应答，发送方按
             // 自己的号过滤，直接把它丢掉，传输停在"等应答"上。
-            if (sessionId_ == 0)
-            {
+            if (sessionId_ == 0) {
                 sessionId_ = frame.sessionId;
             }
             handleRequestSend(frame);
@@ -820,30 +736,26 @@ bool TransferPeer::onFrame(const Frame &frame)
         break;
 
     case FrameType::kFileRequestComplete:
-        if (role_ == Role::kReceiver)
-        {
+        if (role_ == Role::kReceiver) {
             handleCompleteRequest(frame);
             return true;
         }
         break;
 
     case FrameType::kFileAnswerComplete:
-        if (role_ == Role::kSender)
-        {
+        if (role_ == Role::kSender) {
             handleAnswerComplete(frame);
             return true;
         }
         break;
 
     case FrameType::kFileRequestCancel:
-    case FrameType::kFileAnswerCancel:
-    {
+    case FrameType::kFileAnswerCancel: {
         CancelReason reason = CancelReason::kUserCancelled;
         std::string msg;
         std::string err;
         (void)decodeCancel(frame.body, reason, msg, err);
-        if (msg.empty())
-        {
+        if (msg.empty()) {
             msg = std::string(toString(reason));
         }
         finish(TransferOutcome::kPeerCancelled, Status::Fail(ErrorCode::kCancelled, msg));
@@ -859,27 +771,22 @@ bool TransferPeer::onFrame(const Frame &frame)
 
 void TransferPeer::pump()
 {
-    if (finished_)
-    {
+    if (finished_) {
         return;
     }
 
-    if (role_ == Role::kSender)
-    {
+    if (role_ == Role::kSender) {
         // 只有对端**答应了**才发块。
         //
         // 应答里才带续传点（resumeOffset）——不等它就发，会把对端已有的块
         // 重发一遍。而且对端在应答之前还没 open，块数据到了也会被丢弃，
         // 之后就永远补不回来了（它不在对端的 received_ 里）。
-        if (!started_)
-        {
+        if (!started_) {
             // 等应答也要有上限。此时一块都没发过，重传超时完全看不到这条
             // 传输，对端若不理（进程没起、帧丢了、sessionId 不对），
             // 就会永远停在这里。
-            if (requestSent_ && std::chrono::steady_clock::now() - requestSentAt_ >= config_.answerTimeout)
-            {
-                finish(TransferOutcome::kPeerGone,
-                       Status::Fail(ErrorCode::kTimeout, "peer did not answer the send request"));
+            if (requestSent_ && std::chrono::steady_clock::now() - requestSentAt_ >= config_.answerTimeout) {
+                finish(TransferOutcome::kPeerGone, Status::Fail(ErrorCode::kTimeout, "peer did not answer the send request"));
             }
             return;
         }
@@ -889,17 +796,14 @@ void TransferPeer::pump()
         // 收尾阶段没有块在飞，重传超时管不到这里。对端不回应答（被杀、
         // 卡在算根、或者干脆不认这个 sessionId）时必须自己有个出口，
         // 否则这条传输永远停在"等一个不会来的应答"上。
-        if (completeRequested_ && std::chrono::steady_clock::now() - completeRequestedAt_ >= config_.finalizeTimeout)
-        {
-            finish(TransferOutcome::kPeerGone,
-                   Status::Fail(ErrorCode::kTimeout, "peer did not answer the complete request"));
+        if (completeRequested_ && std::chrono::steady_clock::now() - completeRequestedAt_ >= config_.finalizeTimeout) {
+            finish(TransferOutcome::kPeerGone, Status::Fail(ErrorCode::kTimeout, "peer did not answer the complete request"));
         }
         return;
     }
 
     // 压着的收尾请求：等写盘清空后再处理。
-    if (completeDeferred_ && receiver_ && !receiver_->hasPendingWrites())
-    {
+    if (completeDeferred_ && receiver_ && !receiver_->hasPendingWrites()) {
         completeDeferred_ = false;
         handleCompleteRequest(deferredComplete_);
         return;
@@ -910,22 +814,19 @@ void TransferPeer::pump()
     // 每收一块就回一次 ACK 会在 4 MiB 块下变成"每个块多一个往返"，
     // 而 ACK 的信息量极小。攒 kAckInterval 能把多个块的确认合并成一个
     // 位图，代价是最多延迟 20ms 让对端腾窗口。
-    if (ackPending_ && std::chrono::steady_clock::now() - lastAckSent_ >= kAckInterval)
-    {
+    if (ackPending_ && std::chrono::steady_clock::now() - lastAckSent_ >= kAckInterval) {
         sendAck();
     }
 }
 
 void TransferPeer::cancel(std::string_view reason)
 {
-    if (finished_)
-    {
+    if (finished_) {
         return;
     }
 
     std::vector<char> body;
-    if (encodeCancel(CancelReason::kUserCancelled, reason, body).ok())
-    {
+    if (encodeCancel(CancelReason::kUserCancelled, reason, body).ok()) {
         Frame f;
         f.type = FrameType::kFileRequestCancel;
         f.sessionId = sessionId_;
@@ -933,12 +834,10 @@ void TransferPeer::cancel(std::string_view reason)
         sendFrame(std::move(f));
     }
 
-    if (sender_)
-    {
+    if (sender_) {
         sender_->cancelAll();
     }
-    if (receiver_)
-    {
+    if (receiver_) {
         receiver_->abort();
     }
 
@@ -949,27 +848,23 @@ TransferProgress TransferPeer::progress() const
 {
     TransferProgress p;
 
-    if (sender_)
-    {
+    if (sender_) {
         p.chunksTotal = sender_->totalChunks();
         p.chunksDone = sender_->ackedChunks();
         p.bytesTotal = sender_->totalSize();
         p.bytesDone = static_cast<std::uint64_t>(p.chunksDone) * sender_->chunkSize();
-        if (p.bytesDone > p.bytesTotal)
-        {
+        if (p.bytesDone > p.bytesTotal) {
             p.bytesDone = p.bytesTotal;
         }
         return p;
     }
 
-    if (receiver_)
-    {
+    if (receiver_) {
         p.chunksTotal = receiver_->totalChunks();
         p.chunksDone = receiver_->writtenChunks();
         p.bytesTotal = receiver_->totalSize();
         p.bytesDone = static_cast<std::uint64_t>(p.chunksDone) * receiver_->chunkSize();
-        if (p.bytesDone > p.bytesTotal)
-        {
+        if (p.bytesDone > p.bytesTotal) {
             p.bytesDone = p.bytesTotal;
         }
     }
@@ -979,8 +874,7 @@ TransferProgress TransferPeer::progress() const
 
 void TransferPeer::sendFrame(protocol::Frame frame)
 {
-    if (finished_)
-    {
+    if (finished_) {
         return;
     }
 
@@ -1008,8 +902,7 @@ void TransferPeer::sendFrame(protocol::Frame frame)
     //
     // 只补空值，不覆盖调用点已经填好的：发送方构造时填的 to 更精确
     // （比如将来支持"一帧投给多个目标"时），不该被这里改掉。
-    if (frame.to.empty() && !toPeerId_.empty())
-    {
+    if (frame.to.empty() && !toPeerId_.empty()) {
         frame.to = toPeerId_;
     }
 
@@ -1019,22 +912,19 @@ void TransferPeer::sendFrame(protocol::Frame frame)
     //
     // 服务端用 send() 发 to=<对端 id> 的帧是合法的：checkOutbound 只约束
     // from（必须是空或服务端自己的 id），to 想填谁都可以。
-    if (const auto st = session_->send(frame); !st.ok())
-    {
+    if (const auto st = session_->send(frame); !st.ok()) {
         finish(TransferOutcome::kFailed, st);
     }
 }
 
 void TransferPeer::finish(TransferOutcome outcome, Status status, std::string targetPath)
 {
-    if (finished_)
-    {
+    if (finished_) {
         return;
     }
     finished_ = true;
 
-    if (onDone_)
-    {
+    if (onDone_) {
         TransferResult result;
         result.outcome = outcome;
         result.status = std::move(status);
@@ -1043,4 +933,4 @@ void TransferPeer::finish(TransferOutcome outcome, Status status, std::string ta
     }
 }
 
-}  // namespace relayer::core::transfer
+}   // namespace relayer::core::transfer

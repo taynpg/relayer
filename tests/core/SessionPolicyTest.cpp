@@ -1,8 +1,7 @@
 #include "relayer/core/session/SessionPolicy.h"
 
-#include <string>
-
 #include <catch2/catch_test_macros.hpp>
+#include <string>
 
 #include "relayer/core/auth/Handshake.h"
 
@@ -13,10 +12,9 @@ using namespace relayer::protocol;
 // 而追求**把每个分支的后果钉住**：每条 REQUIRE 都能回答"如果这里改错了，
 // 会发生什么坏事"。
 
-namespace
-{
+namespace {
 
-Frame makeFrame(FrameType type, const std::string &from = {}, const std::string &to = {})
+Frame makeFrame(FrameType type, const std::string& from = {}, const std::string& to = {})
 {
     Frame f;
     f.type = type;
@@ -32,7 +30,7 @@ RouteConfig serverConfig()
     return c;
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // 入站：未认证连接
@@ -41,9 +39,7 @@ RouteConfig serverConfig()
 TEST_CASE("unauthenticated peer may only send auth frames", "[session][inbound]")
 {
     // 认证段的四个帧必须放行，否则握手根本没法进行。
-    for (const auto t :
-         {FrameType::kAuthChallenge, FrameType::kAuthResponse, FrameType::kAuthResult, FrameType::kAuthAbort})
-    {
+    for (const auto t : {FrameType::kAuthChallenge, FrameType::kAuthResponse, FrameType::kAuthResult, FrameType::kAuthAbort}) {
         const auto d = checkInbound(Role::kServer, false, makeFrame(t));
         REQUIRE(d.action == InboundAction::kAccept);
         REQUIRE(d.accepted());
@@ -74,29 +70,20 @@ TEST_CASE("every non-auth frame type is rejected before auth", "[session][inboun
     //
     // 只测一两个的话，"某个类型被误放进 isAllowedBeforeAuth"这类 bug
     // 完全测不出来，而那正好是"不提供口令就能枚举文件列表"的入口。
-    for (std::uint16_t raw = 0; raw <= 700; ++raw)
-    {
+    for (std::uint16_t raw = 0; raw <= 700; ++raw) {
         const auto t = static_cast<FrameType>(raw);
-        if (!isKnownType(raw))
-        {
+        if (!isKnownType(raw)) {
             continue;
         }
         const auto d = checkInbound(Role::kServer, false, makeFrame(t));
 
-        if (isAuthType(t) && t != FrameType::kAskHeart && t != FrameType::kAnswerHeart)
-        {
+        if (isAuthType(t) && t != FrameType::kAskHeart && t != FrameType::kAnswerHeart) {
             REQUIRE(d.action == InboundAction::kAccept);
-        }
-        else if (t == FrameType::kAskHeart)
-        {
+        } else if (t == FrameType::kAskHeart) {
             REQUIRE(d.action == InboundAction::kAnswerHeart);
-        }
-        else if (t == FrameType::kAnswerHeart)
-        {
+        } else if (t == FrameType::kAnswerHeart) {
             REQUIRE(d.action == InboundAction::kIgnore);
-        }
-        else
-        {
+        } else {
             REQUIRE(d.action == InboundAction::kReject);
         }
     }
@@ -114,10 +101,8 @@ TEST_CASE("heartbeat is answered regardless of auth state", "[session][inbound][
     //   - TCP 断了          → 心跳超时，transport 判失联
     //   - TCP 通但握手卡住   → 心跳正常，但认证超时
     // 如果未认证时不答心跳，第二种会表现成第一种，排查方向完全错了。
-    for (const bool established : {false, true})
-    {
-        for (const auto role : {Role::kServer, Role::kClient})
-        {
+    for (const bool established : {false, true}) {
+        for (const auto role : {Role::kServer, Role::kClient}) {
             const auto d = checkInbound(role, established, makeFrame(FrameType::kAskHeart));
             REQUIRE(d.action == InboundAction::kAnswerHeart);
             REQUIRE(d.accepted());
@@ -129,8 +114,7 @@ TEST_CASE("heartbeat answer is ignored, never rejected", "[session][inbound][hea
 {
     // 应答本身不需要业务处理——transport 层的 HeartbeatPolicy 已经因为
     // "收到字节"而清掉了未应答标记。但它也绝不能走到"未认证就拒"分支。
-    for (const bool established : {false, true})
-    {
+    for (const bool established : {false, true}) {
         const auto d = checkInbound(Role::kServer, established, makeFrame(FrameType::kAnswerHeart));
         REQUIRE(d.action == InboundAction::kIgnore);
         // kIgnore 不算 accepted（上层不该把它交给业务），但也不该断开。
@@ -144,8 +128,7 @@ TEST_CASE("heartbeat answer is ignored, never rejected", "[session][inbound][hea
 
 TEST_CASE("established connection accepts business frames", "[session][inbound]")
 {
-    for (const auto t : {FrameType::kAskId, FrameType::kFileRequestSend, FrameType::kChunkRequestData})
-    {
+    for (const auto t : {FrameType::kAskId, FrameType::kFileRequestSend, FrameType::kChunkRequestData}) {
         const auto d = checkInbound(Role::kServer, true, makeFrame(t));
         REQUIRE(d.action == InboundAction::kAccept);
         REQUIRE(d.accepted());
@@ -255,16 +238,15 @@ TEST_CASE("empty to means the server itself", "[session][route]")
 {
     // 客户端在拿到自己的 id 之前根本不知道服务端叫什么（kAskId 就是用来
     // 问这个的），所以这些帧必须允许 to 为空。
-    const auto plan =
-        planRoute(Role::kServer, true, serverConfig(), "client-7", makeFrame(FrameType::kAskId, "client-7"));
+    const auto plan = planRoute(Role::kServer, true, serverConfig(), "client-7", makeFrame(FrameType::kAskId, "client-7"));
     REQUIRE(plan.action == RouteAction::kAcceptLocal);
     REQUIRE(plan.to.empty());
 }
 
 TEST_CASE("explicit server id also routes locally", "[session][route]")
 {
-    const auto plan = planRoute(Role::kServer, true, serverConfig(), "client-7",
-                                makeFrame(FrameType::kAskHome, "client-7", "relayd"));
+    const auto plan =
+        planRoute(Role::kServer, true, serverConfig(), "client-7", makeFrame(FrameType::kAskHome, "client-7", "relayd"));
     REQUIRE(plan.action == RouteAction::kAcceptLocal);
 }
 
@@ -296,8 +278,8 @@ TEST_CASE("forwarding never preserves a claimed third-party identity", "[session
 {
     // 这是 v1 的伪造漏洞的最小复现：bob 把自己写成 alice，服务端若原样
     // 转发，client-9 就会相信文件来自 alice。
-    const auto plan = planRoute(Role::kServer, true, serverConfig(), "bob",
-                                makeFrame(FrameType::kFileRequestSend, "alice", "client-9"));
+    const auto plan =
+        planRoute(Role::kServer, true, serverConfig(), "bob", makeFrame(FrameType::kFileRequestSend, "alice", "client-9"));
     REQUIRE(plan.action == RouteAction::kForward);
     // 目标照原样，但 from 必须是 bob——不是 alice。
     REQUIRE(plan.to == "client-9");
@@ -325,16 +307,15 @@ TEST_CASE("forwarding before auth cannot bind any identity", "[session][route][i
 {
     // 未认证时 identityToBind 返回空，plan.from 也就为空。
     // 调用方据此知道"不该调用 bindSenderIdentity"，而应该直接拒绝转发。
-    const auto plan = planRoute(Role::kServer, false, serverConfig(), "bob",
-                                makeFrame(FrameType::kFileRequestSend, "alice", "client-9"));
+    const auto plan =
+        planRoute(Role::kServer, false, serverConfig(), "bob", makeFrame(FrameType::kFileRequestSend, "alice", "client-9"));
     REQUIRE(plan.from.empty());
 }
 
 TEST_CASE("client route plan is always local", "[session][route]")
 {
     // 客户端上没有转发概念。
-    const auto plan =
-        planRoute(Role::kClient, true, serverConfig(), "", makeFrame(FrameType::kAskFileList, "", "relayd"));
+    const auto plan = planRoute(Role::kClient, true, serverConfig(), "", makeFrame(FrameType::kAskFileList, "", "relayd"));
     REQUIRE(plan.action == RouteAction::kAcceptLocal);
 }
 

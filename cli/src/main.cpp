@@ -1,3 +1,4 @@
+#include <asio/io_context.hpp>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -5,8 +6,6 @@
 #include <string>
 #include <string_view>
 #include <thread>
-
-#include <asio/io_context.hpp>
 
 #include "relayer/cli/Client.h"
 #include "relayer/common/Console.h"
@@ -28,8 +27,7 @@
 //      区分"对端死了导致超时"与"真的失败了"。混在一起时，一个失败的
 //      测试无法自证是预期路径还是 bug。
 
-namespace
-{
+namespace {
 
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 1;
@@ -82,11 +80,10 @@ void printUsage()
 // 但**只**用于显示，判断逻辑一律用原始计数。
 std::string humanBytes(std::uint64_t n)
 {
-    const char *units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
+    const char* units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
     double v = static_cast<double>(n);
     int i = 0;
-    while (v >= 1024.0 && i < 4)
-    {
+    while (v >= 1024.0 && i < 4) {
         v /= 1024.0;
         ++i;
     }
@@ -97,15 +94,13 @@ std::string humanBytes(std::uint64_t n)
 
 std::string humanSpeed(double bps)
 {
-    if (bps <= 0.0)
-    {
+    if (bps <= 0.0) {
         return "-";
     }
     return humanBytes(static_cast<std::uint64_t>(bps)) + "/s";
 }
 
-struct Args
-{
+struct Args {
     std::string command;
     std::string file;
     std::string to;
@@ -133,53 +128,45 @@ struct Args
     bool stats = false;
 };
 
-struct ParseResult
-{
+struct ParseResult {
     bool ok = false;
     bool showHelp = false;
     std::string error;
     Args args;
 };
 
-bool parseU64(const std::string &s, std::uint64_t &out)
+bool parseU64(const std::string& s, std::uint64_t& out)
 {
-    try
-    {
+    try {
         std::size_t pos = 0;
         const auto v = std::stoull(s, &pos);
-        if (pos != s.size())
-        {
+        if (pos != s.size()) {
             return false;
         }
         out = v;
         return true;
-    }
-    catch (const std::exception &)
-    {
+    } catch (const std::exception&) {
         return false;
     }
 }
 
-ParseResult parseArgs(int argc, char **argv)
+ParseResult parseArgs(int argc, char** argv)
 {
     ParseResult r;
 
-    if (argc < 2)
-    {
+    if (argc < 2) {
         r.error = "缺少子命令";
         return r;
     }
 
     r.args.command = argv[1];
-    if (r.args.command == "-h" || r.args.command == "--help")
-    {
+    if (r.args.command == "-h" || r.args.command == "--help") {
         r.showHelp = true;
         r.ok = true;
         return r;
     }
-    if (r.args.command != "send" && r.args.command != "recv" && r.args.command != "list" &&
-        r.args.command != "ls" && r.args.command != "pack" && r.args.command != "unpack")
-    {
+    if (r.args.command != "send" && r.args.command != "recv" && r.args.command != "list" && r.args.command != "ls" &&
+        r.args.command != "pack" && r.args.command != "unpack") {
         r.error = "未知子命令: " + r.args.command;
         return r;
     }
@@ -188,10 +175,8 @@ ParseResult parseArgs(int argc, char **argv)
     // 写法：让位置参数出现在选项之后（`send --to x file`）需要判断"这个
     // 裸词是值还是位置参数"，而 --to 的值也是裸词，二者无法可靠区分。
     int i = 2;
-    if (r.args.command == "send")
-    {
-        if (i >= argc || argv[i][0] == '-')
-        {
+    if (r.args.command == "send") {
+        if (i >= argc || argv[i][0] == '-') {
             r.error = "send 需要指定要发送的文件";
             return r;
         }
@@ -200,24 +185,19 @@ ParseResult parseArgs(int argc, char **argv)
 
     // pack / unpack 是**纯本地**操作，不连中继。所以在这里就解析完并返回，
     // 跳过后面所有的网络参数校验（认证方式、--to、--to-dir 等都不适用）。
-    if (r.args.command == "pack" || r.args.command == "unpack")
-    {
-        for (; i < argc && argv[i][0] != '-'; ++i)
-        {
+    if (r.args.command == "pack" || r.args.command == "unpack") {
+        for (; i < argc && argv[i][0] != '-'; ++i) {
             r.args.inputs.emplace_back(argv[i]);
         }
-        if (i < argc)
-        {
+        if (i < argc) {
             r.error = r.args.command + " 不接受选项";
             return r;
         }
-        if (r.args.command == "pack" && r.args.inputs.size() < 2)
-        {
+        if (r.args.command == "pack" && r.args.inputs.size() < 2) {
             r.error = "pack 需要：pack <输出.tar.xz> <路径>...";
             return r;
         }
-        if (r.args.command == "unpack" && r.args.inputs.size() != 1)
-        {
+        if (r.args.command == "unpack" && r.args.inputs.size() != 1) {
             r.error = "unpack 需要：unpack <包.tar.xz>";
             return r;
         }
@@ -225,14 +205,11 @@ ParseResult parseArgs(int argc, char **argv)
         return r;
     }
 
-    for (; i < argc; ++i)
-    {
+    for (; i < argc; ++i) {
         const std::string_view a = argv[i];
 
-        const auto takeValue = [&](std::string_view opt, std::string &out) -> bool
-        {
-            if (i + 1 >= argc)
-            {
+        const auto takeValue = [&](std::string_view opt, std::string& out) -> bool {
+            if (i + 1 >= argc) {
                 r.error = std::string(opt) + " 需要一个值";
                 return false;
             }
@@ -240,201 +217,134 @@ ParseResult parseArgs(int argc, char **argv)
             return true;
         };
 
-        if (a == "-h" || a == "--help")
-        {
+        if (a == "-h" || a == "--help") {
             r.showHelp = true;
             r.ok = true;
             return r;
-        }
-        else if (a == "-H" || a == "--host")
-        {
-            if (!takeValue(a, r.args.config.host))
-            {
+        } else if (a == "-H" || a == "--host") {
+            if (!takeValue(a, r.args.config.host)) {
                 return r;
             }
-        }
-        else if (a == "-p" || a == "--port")
-        {
+        } else if (a == "-p" || a == "--port") {
             std::string v;
-            if (!takeValue(a, v))
-            {
+            if (!takeValue(a, v)) {
                 return r;
             }
             std::uint64_t n = 0;
-            if (!parseU64(v, n) || n == 0 || n > 65535)
-            {
+            if (!parseU64(v, n) || n == 0 || n > 65535) {
                 r.error = "端口非法: " + v;
                 return r;
             }
             r.args.config.port = static_cast<std::uint16_t>(n);
-        }
-        else if (a == "--password")
-        {
-            if (!takeValue(a, r.args.config.password))
-            {
+        } else if (a == "--password") {
+            if (!takeValue(a, r.args.config.password)) {
                 return r;
             }
-        }
-        else if (a == "--no-auth")
-        {
+        } else if (a == "--no-auth") {
             // 显式声明"中继已关闭认证"。与 --password 互斥的校验放在
             // 解析后的统一检查里，和子命令必备参数的检查放在一起。
             r.args.config.serverAllowNoAuth = true;
-        }
-        else if (a == "--id")
-        {
-            if (!takeValue(a, r.args.config.requestedId))
-            {
+        } else if (a == "--id") {
+            if (!takeValue(a, r.args.config.requestedId)) {
                 return r;
             }
-        }
-        else if (a == "--chunk-size")
-        {
+        } else if (a == "--chunk-size") {
             std::string v;
-            if (!takeValue(a, v))
-            {
+            if (!takeValue(a, v)) {
                 return r;
             }
             std::uint64_t n = 0;
-            if (!parseU64(v, n) || n == 0 || n > (1u << 20) * 16)
-            {
+            if (!parseU64(v, n) || n == 0 || n > (1u << 20) * 16) {
                 r.error = "分块大小非法: " + v;
                 return r;
             }
             r.args.config.chunkSize = static_cast<std::uint32_t>(n);
-        }
-        else if (a == "--idle-timeout")
-        {
+        } else if (a == "--idle-timeout") {
             std::string v;
-            if (!takeValue(a, v))
-            {
+            if (!takeValue(a, v)) {
                 return r;
             }
             std::uint64_t n = 0;
-            if (!parseU64(v, n) || n == 0)
-            {
+            if (!parseU64(v, n) || n == 0) {
                 r.error = "空闲超时非法: " + v;
                 return r;
             }
             r.args.config.idleTimeout = std::chrono::seconds(n);
-        }
-        else if (a == "--hard-timeout")
-        {
+        } else if (a == "--hard-timeout") {
             std::string v;
-            if (!takeValue(a, v))
-            {
+            if (!takeValue(a, v)) {
                 return r;
             }
             std::uint64_t n = 0;
-            if (!parseU64(v, n))
-            {
+            if (!parseU64(v, n)) {
                 r.error = "总时长上限非法: " + v;
                 return r;
             }
             r.args.config.hardTimeout = std::chrono::seconds(n);
-        }
-        else if (a == "-q" || a == "--quiet")
-        {
+        } else if (a == "-q" || a == "--quiet") {
             r.args.quiet = true;
-        }
-        else if (a == "--stats")
-        {
+        } else if (a == "--stats") {
             r.args.stats = true;
-        }
-        else if (a == "--to")
-        {
-            if (!takeValue(a, r.args.to))
-            {
+        } else if (a == "--to") {
+            if (!takeValue(a, r.args.to)) {
                 return r;
             }
-        }
-        else if (a == "--to-dir")
-        {
-            if (!takeValue(a, r.args.toDir))
-            {
+        } else if (a == "--to-dir") {
+            if (!takeValue(a, r.args.toDir)) {
                 return r;
             }
-        }
-        else if (a == "--as")
-        {
-            if (!takeValue(a, r.args.asName))
-            {
+        } else if (a == "--as") {
+            if (!takeValue(a, r.args.asName)) {
                 return r;
             }
-        }
-        else if (a == "--self-send")
-        {
+        } else if (a == "--self-send") {
             // 自检：recv 时把自己的这个文件也发给"自己"（服务端绕回本连接）。
             // 一条命令验完中继 + 认证 + 传输 + 落盘，不需要第二台机器。
-            if (!takeValue(a, r.args.config.selfSendPath))
-            {
+            if (!takeValue(a, r.args.config.selfSendPath)) {
                 return r;
             }
-        }
-        else if (a == "--self-browse")
-        {
+        } else if (a == "--self-browse") {
             // 自检列举：recv 时在**接收会话上**向自己要一次目录。走的是 GUI
             // 远端浏览那条路（browseOnSession），CLI 的 ls 走的是另一条
             // （一次性连接），两条不能互相替代。
             r.args.config.selfBrowse = true;
-        }
-        else if (a == "--pull-from")
-        {
+        } else if (a == "--pull-from") {
             // 远端取回（PROTOCOL.md §11.9）：recv 时请这个对端把文件发过来。
-            if (!takeValue(a, r.args.config.pullFrom))
-            {
+            if (!takeValue(a, r.args.config.pullFrom)) {
                 return r;
             }
-        }
-        else if (a == "--pull-path")
-        {
-            if (!takeValue(a, r.args.config.pullPath))
-            {
+        } else if (a == "--pull-path") {
+            if (!takeValue(a, r.args.config.pullPath)) {
                 return r;
             }
-        }
-        else if (a == "--unpack")
-        {
+        } else if (a == "--unpack") {
             // 收到 .tar.xz 就解开（对别人主动发来的包也生效）。
             r.args.config.unpackArchives = true;
-        }
-        else if (a == "--pull-dir")
-        {
+        } else if (a == "--pull-dir") {
             // 目录取回：请对端打包成 tar.xz 再发（PROTOCOL.md §11.10）。
             // 复用 pullPath 存路径，用 pullAsArchive 区分"文件"与"目录"——
             // 两者在请求侧只差一个帧类型。
-            if (!takeValue(a, r.args.config.pullPath))
-            {
+            if (!takeValue(a, r.args.config.pullPath)) {
                 return r;
             }
             r.args.config.pullAsArchive = true;
             // 目录取回默认解包：用户要的是"目录"，不是一个 .tar.xz。
             // 想保留包就自己解——但那是少数需求，多数人拿到包只会问"东西呢"。
             r.args.config.unpackArchives = true;
-        }
-        else if (a == "--path")
-        {
-            if (!takeValue(a, r.args.path))
-            {
+        } else if (a == "--path") {
+            if (!takeValue(a, r.args.path)) {
                 return r;
             }
-        }
-        else if (a == "--share")
-        {
+        } else if (a == "--share") {
             // 允许对端列举哪个目录（PROTOCOL.md §11.8）。不给 = 不响应。
-            if (!takeValue(a, r.args.config.shareRoot))
-            {
+            if (!takeValue(a, r.args.config.shareRoot)) {
                 return r;
             }
-        }
-        else if (a == "--overwrite")
-        {
+        } else if (a == "--overwrite") {
             // 接收目标已存在时删旧收新。默认拒绝覆盖（保护用户文件），
             // "反复发同一个文件到同一目录"的场景需要显式打开。
             r.args.config.overwriteExisting = true;
-        }
-        else
-        {
+        } else {
             r.error = "未知选项: " + std::string(a);
             return r;
         }
@@ -442,64 +352,53 @@ ParseResult parseArgs(int argc, char **argv)
 
     // 子命令的必备参数。放在解析之后统一检查，这样 "send 缺 --to" 与
     // "recv 缺 --to-dir" 都能得到明确的说法，而不是靠解析顺序碰运气。
-    if (r.args.command == "send" && r.args.to.empty())
-    {
+    if (r.args.command == "send" && r.args.to.empty()) {
         r.error = "send 需要 --to 指定目标对端";
         return r;
     }
-    if (r.args.command == "recv" && r.args.toDir.empty())
-    {
+    if (r.args.command == "recv" && r.args.toDir.empty()) {
         r.error = "recv 需要 --to-dir 指定落点目录";
         return r;
     }
-    if (r.args.command == "ls" && r.args.to.empty())
-    {
+    if (r.args.command == "ls" && r.args.to.empty()) {
         r.error = "ls 需要 --to 指定要列举哪个对端";
         return r;
     }
-    if (r.args.command == "ls" && !r.args.config.shareRoot.empty())
-    {
+    if (r.args.command == "ls" && !r.args.config.shareRoot.empty()) {
         r.error = "--share 是接收方选项，ls 只需要 --path";
         return r;
     }
 
-    if (!r.args.config.selfSendPath.empty() && r.args.command != "recv")
-    {
+    if (!r.args.config.selfSendPath.empty() && r.args.command != "recv") {
         // 自检发送是"接收会话上搭车发送"，只有 recv 有接收会话。
         r.error = "--self-send 只能与 recv 一起用";
         return r;
     }
-    if (!r.args.config.pullFrom.empty() && r.args.command != "recv")
-    {
+    if (!r.args.config.pullFrom.empty() && r.args.command != "recv") {
         // 取回要搭在接收会话上：回程的文件需要它收下。
         r.error = "--pull-from 只能与 recv 一起用";
         return r;
     }
-    if (!r.args.config.pullPath.empty() && r.args.config.pullFrom.empty())
-    {
+    if (!r.args.config.pullPath.empty() && r.args.config.pullFrom.empty()) {
         r.error = "--pull-path 需要配合 --pull-from（说明从哪个对端取）";
         return r;
     }
-    if (r.args.config.pullAsArchive && r.args.command != "recv")
-    {
+    if (r.args.config.pullAsArchive && r.args.command != "recv") {
         r.error = "--pull-dir 只能与 recv 一起用";
         return r;
     }
-    if (!r.args.config.pullFrom.empty() && r.args.config.pullPath.empty())
-    {
+    if (!r.args.config.pullFrom.empty() && r.args.config.pullPath.empty()) {
         // 空路径指的是共享根（一个目录），取回它只会得到"不存在或目录"。
         // 与其让对方回一个含糊的 kNotFound，不如在参数校验处就说清楚。
         r.error = "--pull-from 需要配合 --pull-path 指定要取回哪个文件";
         return r;
     }
-    if (r.args.config.selfBrowse && r.args.command != "recv")
-    {
+    if (r.args.config.selfBrowse && r.args.command != "recv") {
         // 同理：要搭在接收会话上。
         r.error = "--self-browse 只能与 recv 一起用";
         return r;
     }
-    if (r.args.config.selfBrowse && !r.args.config.selfSendPath.empty())
-    {
+    if (r.args.config.selfBrowse && !r.args.config.selfSendPath.empty()) {
         // 两者都靠"做完就退出"，同时给会让退出条件含糊（列完就退还是传完才退）。
         r.error = "--self-browse 与 --self-send 不能同时使用";
         return r;
@@ -509,8 +408,7 @@ ParseResult parseArgs(int argc, char **argv)
     // 配置：按认证走会被无认证中继拒绝，按无认证走会被认证中继拒绝。
     // 与 relayerd 的"口令与 allow-no-auth 必须恰好给一个"是同一条规则
     // 在两端的镜像。
-    if (r.args.config.serverAllowNoAuth && !r.args.config.password.empty())
-    {
+    if (r.args.config.serverAllowNoAuth && !r.args.config.password.empty()) {
         r.error = "--no-auth 与 --password 不能同时给出";
         return r;
     }
@@ -519,8 +417,7 @@ ParseResult parseArgs(int argc, char **argv)
     // 是协议层的"unauthenticated peer sent non-auth frame"——话不算错，
     // 但要用户从协议错误里反推"我漏了个参数"，不如在这里就说清。
     // 由 e2e 的 no-auth 场景看门（parseArgs 在匿名命名空间里，单测够不着）。
-    if (!r.args.config.serverAllowNoAuth && r.args.config.password.empty())
-    {
+    if (!r.args.config.serverAllowNoAuth && r.args.config.password.empty()) {
         r.error = "必须提供 --password，或用 --no-auth 声明中继已关闭认证";
         return r;
     }
@@ -529,9 +426,9 @@ ParseResult parseArgs(int argc, char **argv)
     return r;
 }
 
-}  // namespace
+}   // namespace
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     // 同 relayerd：先修终端编码再输出任何东西。本文件目前全用 printf 系
     // （用法、报错、进度行），关键是 use_utf8_locale()；init() 一并调用，
@@ -541,40 +438,34 @@ int main(int argc, char **argv)
     relayer::console::use_utf8_locale();
 
     const auto parsed = parseArgs(argc, argv);
-    if (!parsed.ok)
-    {
+    if (!parsed.ok) {
         std::fprintf(stderr, "错误: %s\n\n", parsed.error.c_str());
         printUsage();
         return kExitUsage;
     }
-    if (parsed.showHelp)
-    {
+    if (parsed.showHelp) {
         printUsage();
         return kExitOk;
     }
 
-    const auto &a = parsed.args;
+    const auto& a = parsed.args;
 
     // 本地压缩 / 解压：不联网，直接做完了返回。
-    if (a.command == "pack")
-    {
+    if (a.command == "pack") {
         std::vector<std::string> sources(a.inputs.begin() + 1, a.inputs.end());
         std::string err;
-        if (!relayer::cli::Client::createArchive(sources, a.inputs.front(), err))
-        {
+        if (!relayer::cli::Client::createArchive(sources, a.inputs.front(), err)) {
             std::fprintf(stderr, "压缩失败：%s\n", err.c_str());
             return 2;
         }
         std::printf("已压缩：%s\n", a.inputs.front().c_str());
         return kExitOk;
     }
-    if (a.command == "unpack")
-    {
+    if (a.command == "unpack") {
         // false：手动压缩的包**带顶层目录**，解到包的父目录即可。取回目录的
         // 包形状相反（无顶层），那条路径由接收流程自己处理，不走这里。
         const auto dir = relayer::cli::Client::unpackArchive(a.inputs.front(), false);
-        if (dir.empty())
-        {
+        if (dir.empty()) {
             std::fprintf(stderr, "解压失败（不是 tar.xz，或包已损坏）\n");
             return 2;
         }
@@ -593,10 +484,8 @@ int main(int argc, char **argv)
 
     auto client = std::make_shared<relayer::cli::Client>(
         ctx, a.config,
-        [quiet = a.quiet, &progressDirty](const relayer::cli::ProgressReport &p)
-        {
-            if (quiet)
-            {
+        [quiet = a.quiet, &progressDirty](const relayer::cli::ProgressReport& p) {
+            if (quiet) {
                 return;
             }
             const double pct =
@@ -606,26 +495,18 @@ int main(int argc, char **argv)
             std::fflush(stderr);
             progressDirty = true;
         },
-        [&done, &outcome](const relayer::cli::Outcome &o)
-        {
+        [&done, &outcome](const relayer::cli::Outcome& o) {
             outcome = o;
             done = true;
         });
 
-    if (a.command == "send")
-    {
+    if (a.command == "send") {
         client->sendFile(a.file, a.asName, a.to);
-    }
-    else if (a.command == "recv")
-    {
+    } else if (a.command == "recv") {
         client->receiveFile(a.toDir);
-    }
-    else if (a.command == "ls")
-    {
+    } else if (a.command == "ls") {
         client->browsePeer(a.to, a.path);
-    }
-    else
-    {
+    } else {
         client->listPeers();
     }
 
@@ -633,14 +514,11 @@ int main(int argc, char **argv)
     // 的定时器，但仍可能有排队的 completed handler，所以这里靠 done 标志
     // 而不是靠 run() 返回——stop() 之后再 run() 一次会立即返回，这样做
     // 既能跑完收尾，也不会卡住。
-    while (!done)
-    {
-        if (ctx.stopped())
-        {
+    while (!done) {
+        if (ctx.stopped()) {
             ctx.restart();
         }
-        if (ctx.run_for(std::chrono::milliseconds(50)) == 0 && !done)
-        {
+        if (ctx.run_for(std::chrono::milliseconds(50)) == 0 && !done) {
             // 没有任何事件在等，说明内部状态机已经彻底停下（既不完成也不
             // 报错）。这是逻辑 bug，不该让进程挂住。
             std::fprintf(stderr, "\n错误: 内部状态机停止响应\n");
@@ -649,22 +527,19 @@ int main(int argc, char **argv)
     }
 
     // 进度行之后要换行，否则结论会接在进度条后面。
-    if (progressDirty)
-    {
+    if (progressDirty) {
         std::fprintf(stderr, "\n");
     }
 
     // 统计行在结论之前打：脚本通常按"先拿到 STATS，再判断退出码"的顺序
     // 处理，而结论那行在失败时走 stderr。同一路输出（stdout）便于抓。
-    if (a.stats)
-    {
-        const auto &s = outcome.stats;
+    if (a.stats) {
+        const auto& s = outcome.stats;
         std::printf("STATS chunksSent=%llu chunksReceived=%llu chunksRetransmitted=%llu "
                     "duplicateChunks=%llu acksSent=%llu acksReceived=%llu\n",
                     static_cast<unsigned long long>(s.chunksSent), static_cast<unsigned long long>(s.chunksReceived),
-                    static_cast<unsigned long long>(s.chunksRetransmitted),
-                    static_cast<unsigned long long>(s.duplicateChunks), static_cast<unsigned long long>(s.acksSent),
-                    static_cast<unsigned long long>(s.acksReceived));
+                    static_cast<unsigned long long>(s.chunksRetransmitted), static_cast<unsigned long long>(s.duplicateChunks),
+                    static_cast<unsigned long long>(s.acksSent), static_cast<unsigned long long>(s.acksReceived));
         std::fflush(stdout);
     }
 
@@ -672,39 +547,30 @@ int main(int argc, char **argv)
     // 所以格式固定（不用本地化文案）。
     // --self-browse 用同一套格式：它验的是 GUI 那条路，但结论同样是"一个
     // 目录列举结果"，让 e2e 用同一组断言比对两种情况才有可比性。
-    if ((a.command == "ls" || a.config.selfBrowse) && outcome.ok)
-    {
-        std::printf("REMOTE_LIST status=%d count=%zu\n", static_cast<int>(outcome.listStatus),
-                    outcome.remoteEntries.size());
-        for (const auto &e : outcome.remoteEntries)
-        {
-            if (e.isDir)
-            {
+    if ((a.command == "ls" || a.config.selfBrowse) && outcome.ok) {
+        std::printf("REMOTE_LIST status=%d count=%zu\n", static_cast<int>(outcome.listStatus), outcome.remoteEntries.size());
+        for (const auto& e : outcome.remoteEntries) {
+            if (e.isDir) {
                 std::printf("D  %s\n", e.name.c_str());
-            }
-            else
-            {
+            } else {
                 std::printf("F  %llu  %s\n", static_cast<unsigned long long>(e.size), e.name.c_str());
             }
         }
         std::fflush(stdout);
     }
 
-    if (outcome.ok)
-    {
+    if (outcome.ok) {
         std::printf("%s\n", outcome.summary.c_str());
         return kExitOk;
     }
 
     std::fprintf(stderr, "%s\n", outcome.summary.c_str());
-    if (!outcome.status.ok() && !outcome.status.message.empty())
-    {
+    if (!outcome.status.ok() && !outcome.status.message.empty()) {
         std::fprintf(stderr, "  原因: %s\n", outcome.status.message.c_str());
     }
 
     // 超时单独一个退出码，见文件头的说明。
-    if (outcome.status.code == relayer::ErrorCode::kTimeout)
-    {
+    if (outcome.status.code == relayer::ErrorCode::kTimeout) {
         return kExitTimeout;
     }
     return kExitFailed;

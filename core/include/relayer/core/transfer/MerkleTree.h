@@ -23,8 +23,7 @@
 // 前缀）必须两端完全一致，否则"根相同"什么也证明不了。把形状写在一个地方
 // 比写两份注释可靠。
 
-namespace relayer::core::transfer
-{
+namespace relayer::core::transfer {
 
 // 叶子/内部节点的域分隔前缀（RFC 6962 的做法）。
 //
@@ -62,8 +61,7 @@ inline constexpr std::uint32_t kDefaultChunkSize = 256u * 1024;
 
 // 第 index 块的字节长度（最后一块可能短）。
 // index 越界返回 0。
-[[nodiscard]] std::uint64_t chunkLengthAt(std::uint32_t index, std::uint64_t totalSize,
-                                          std::uint32_t chunkSize) noexcept;
+[[nodiscard]] std::uint64_t chunkLengthAt(std::uint32_t index, std::uint64_t totalSize, std::uint32_t chunkSize) noexcept;
 
 // 计算单个叶子的哈希：SHA256(0x00 || 补齐到 chunkSize 的块内容)。
 //
@@ -72,14 +70,14 @@ inline constexpr std::uint32_t kDefaultChunkSize = 256u * 1024;
 //
 // 补零通过流式 update 完成，不会为了补齐而真的分配 chunkSize 字节：
 // 块被调到上限（4 MiB）时，乘上并发任务数很容易把内存吃光。
-[[nodiscard]] crypto::Sha256::Digest leafHash(const void *chunk, std::size_t len, std::uint32_t chunkSize);
+[[nodiscard]] crypto::Sha256::Digest leafHash(const void* chunk, std::size_t len, std::uint32_t chunkSize);
 
 // 计算内部节点：SHA256(0x01 || left || right)。
-[[nodiscard]] crypto::Sha256::Digest nodeHash(const crypto::Sha256::Digest &left, const crypto::Sha256::Digest &right);
+[[nodiscard]] crypto::Sha256::Digest nodeHash(const crypto::Sha256::Digest& left, const crypto::Sha256::Digest& right);
 
 // 空文件的根：SHA256("")。写死一个常量比让各处自己处理"零叶子返回什么"
 // 安全——那边界几乎没人测。
-[[nodiscard]] const crypto::Sha256::Digest &emptyRoot() noexcept;
+[[nodiscard]] const crypto::Sha256::Digest& emptyRoot() noexcept;
 
 // 从叶子哈希列表算根。
 //
@@ -90,7 +88,7 @@ inline constexpr std::uint32_t kDefaultChunkSize = 256u * 1024;
 //
 // 第 3 条与比特币的写法不同，这是刻意的：复制最后一个会让 [a,b,c] 与
 // [a,b,c,c] 得到同一个根，两种不同的文件内容通过同一个校验。
-[[nodiscard]] crypto::Sha256::Digest computeRoot(const std::vector<crypto::Sha256::Digest> &leaves);
+[[nodiscard]] crypto::Sha256::Digest computeRoot(const std::vector<crypto::Sha256::Digest>& leaves);
 
 // 增量收集器。调用方按顺序喂块，最后取根。
 //
@@ -111,7 +109,7 @@ public:
     //
     // 顺序强制：乱序喂块会让"第几个叶子"变得不确定，而叶子顺序直接决定根。
     // 宁可在这里失败，也不要让两端各自推测顺序。
-    [[nodiscard]] Status addChunk(const void *data, std::size_t len);
+    [[nodiscard]] Status addChunk(const void* data, std::size_t len);
 
     // 已喂入的块数。
     [[nodiscard]] std::uint32_t count() const noexcept
@@ -154,12 +152,12 @@ private:
 // 从一段完整内容算根。内部按 chunkSize 切块，最后一块补零。
 // 数据量大于 chunkSize * 若干 时不建议用（会多一次切分开销），
 // 但测试与小文件用起来很方便。
-[[nodiscard]] crypto::Sha256::Digest rootOfBuffer(const void *data, std::size_t len, std::uint32_t chunkSize);
+[[nodiscard]] crypto::Sha256::Digest rootOfBuffer(const void* data, std::size_t len, std::uint32_t chunkSize);
 
 // 十六进制小写，与 §9.4 的 sha256 字段格式一致。
-[[nodiscard]] std::string toHex(const crypto::Sha256::Digest &d);
+[[nodiscard]] std::string toHex(const crypto::Sha256::Digest& d);
 
 // 解析十六进制（大小写均可）。长度不是 64 或含非十六进制字符时返回 false。
-[[nodiscard]] bool fromHex(std::string_view hex, crypto::Sha256::Digest &out) noexcept;
+[[nodiscard]] bool fromHex(std::string_view hex, crypto::Sha256::Digest& out) noexcept;
 
-}  // namespace relayer::core::transfer
+}   // namespace relayer::core::transfer

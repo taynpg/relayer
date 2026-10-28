@@ -15,8 +15,7 @@
 // 命名空间仍然是 relayer（不是 relayer::common）：调用方写
 // relayer::Status 就够了，不必关心它物理上住在哪个目录。
 
-namespace relayer
-{
+namespace relayer {
 
 // 错误码。
 //
@@ -28,13 +27,12 @@ namespace relayer
 //
 // 新增错误码时**只能往后加**，不能改动既有值：错误码会进日志、进遥测，
 // 改动既有值会让历史日志的解读发生偏移。
-enum class ErrorCode
-{
+enum class ErrorCode {
     kOk = 0,
 
     // --- 通用 ---
-    kCancelled = 1,  // 调用方主动取消
-    kTimeout = 2,    // 等待超时
+    kCancelled = 1,   // 调用方主动取消
+    kTimeout = 2,     // 等待超时
     kUnknown = 3,
 
     // --- 文件系统 ---
@@ -44,32 +42,29 @@ enum class ErrorCode
     kNotADirectory,
     kIsADirectory,
     kNoSpace,
-    kBusy,  // 文件被占用（Windows 上常见：另一个进程独占打开）
+    kBusy,   // 文件被占用（Windows 上常见：另一个进程独占打开）
     kTooManyHandles,
     kInvalidPath,
     kIoError,
     kUnsupported,
 
     // --- 协议与认证 ---
-    kProtocol = 200,  // 对端发来的字节不符合协议（magic/版本/长度/CRC 不对）
-    kAuthFailed,      // 口令错、proof 不匹配、重放
-    kIdTaken,         // 想用的标识已被占用（kClaimId 被拒，PROTOCOL.md §11.7）
-    kIdInvalid,       // 想用的标识不合法（空 / 超长 / 含 NUL）
+    kProtocol = 200,   // 对端发来的字节不符合协议（magic/版本/长度/CRC 不对）
+    kAuthFailed,       // 口令错、proof 不匹配、重放
+    kIdTaken,          // 想用的标识已被占用（kClaimId 被拒，PROTOCOL.md §11.7）
+    kIdInvalid,        // 想用的标识不合法（空 / 超长 / 含 NUL）
 };
 
 // 错误码的稳定名称，用于日志。**不要**用于本地化 UI 文案：
 // 这些字符串是给开发者和运维看的，改它们可能会破坏日志检索规则。
 [[nodiscard]] std::string_view toString(ErrorCode code) noexcept;
 
-struct Status
-{
+struct Status {
     ErrorCode code = ErrorCode::kOk;
-    std::string message;  // 面向开发者，附带上出错的具体路径与系统错误
+    std::string message;   // 面向开发者，附带上出错的具体路径与系统错误
 
     Status() = default;
-    Status(ErrorCode c, std::string msg)
-        : code(c)
-        , message(std::move(msg))
+    Status(ErrorCode c, std::string msg) : code(c), message(std::move(msg))
     {
     }
 
@@ -92,4 +87,4 @@ struct Status
     }
 };
 
-}  // namespace relayer
+}   // namespace relayer

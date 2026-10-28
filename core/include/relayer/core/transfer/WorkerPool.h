@@ -1,5 +1,7 @@
 #pragma once
 
+#include <asio/io_context.hpp>
+#include <asio/post.hpp>
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -10,9 +12,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <asio/io_context.hpp>
-#include <asio/post.hpp>
 
 #include "relayer/common/Status.h"
 
@@ -39,8 +38,7 @@
 //    一个已经排队但还没开始的写盘任务，在"用户取消传输"的语境下本来就
 //    不该执行。这一点与 std::thread 的默认语义不同，写清楚了才不会误用。
 
-namespace relayer::core::transfer
-{
+namespace relayer::core::transfer {
 
 class WorkerPool
 {
@@ -59,8 +57,8 @@ public:
     explicit WorkerPool(std::size_t threads = 0, std::size_t queueCapacity = 64);
     ~WorkerPool();
 
-    WorkerPool(const WorkerPool &) = delete;
-    WorkerPool &operator=(const WorkerPool &) = delete;
+    WorkerPool(const WorkerPool&) = delete;
+    WorkerPool& operator=(const WorkerPool&) = delete;
 
     // 提交一个任务。
     //
@@ -110,9 +108,9 @@ private:
 // 跑 io_context 时才暴露。
 //
 // handler 必须是可拷贝的（asio::post 的既有要求）。
-template <typename Handler> void postTo(asio::io_context &ctx, Handler handler)
+template <typename Handler> void postTo(asio::io_context& ctx, Handler handler)
 {
     asio::post(ctx, std::move(handler));
 }
 
-}  // namespace relayer::core::transfer
+}   // namespace relayer::core::transfer

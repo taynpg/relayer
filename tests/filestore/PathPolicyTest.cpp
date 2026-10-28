@@ -11,15 +11,13 @@
 
 #include "relayer/filestore/PathPolicy.h"
 
-#include <string>
-
 #include <catch2/catch_test_macros.hpp>
+#include <string>
 
 using relayer::filestore::PathPolicy;
 using relayer::filestore::PathStyle;
 
-namespace
-{
+namespace {
 
 PathPolicy posix()
 {
@@ -31,7 +29,7 @@ PathPolicy windows()
     return PathPolicy{PathStyle::kWindows};
 }
 
-}  // namespace
+}   // namespace
 
 // ---------------------------------------------------------------------------
 // normalize
@@ -201,7 +199,7 @@ TEST_CASE("isAbsolute Windows 认盘符与 UNC", "[path][absolute][windows]")
     REQUIRE(p.isAbsolute("C:/a"));
     REQUIRE(p.isAbsolute("C:\\a"));
     REQUIRE(p.isAbsolute("C:"));
-    REQUIRE(p.isAbsolute("/a"));  // 当前盘根
+    REQUIRE(p.isAbsolute("/a"));   // 当前盘根
     REQUIRE(p.isAbsolute("\\\\server\\share\\x"));
     REQUIRE_FALSE(p.isAbsolute("a/b"));
     REQUIRE_FALSE(p.isAbsolute(""));

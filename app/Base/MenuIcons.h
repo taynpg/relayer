@@ -19,23 +19,74 @@
 namespace MenuIcons {
 
 // 统一调色板
-inline QColor cTransfer() { return QColor("#2563EB"); }   // 蓝
-inline QColor cUpload()   { return QColor("#16A34A"); }   // 绿
-inline QColor cDownload() { return QColor("#2563EB"); }   // 蓝
-inline QColor cDelete()   { return QColor("#DC2626"); }   // 红
-inline QColor cRename()   { return QColor("#EA580C"); }   // 橙
-inline QColor cInfo()     { return QColor("#475569"); }   // 石板灰
-inline QColor cHash()     { return QColor("#7C3AED"); }   // 紫
-inline QColor cCompress() { return QColor("#0D9488"); }   // 青绿
-inline QColor cFolder()   { return QColor("#D97706"); }   // 琥珀
-inline QColor cCopy()     { return QColor("#92400E"); }   // 棕
-inline QColor cLocal()    { return QColor("#2563EB"); }   // 蓝
-inline QColor cRemote()   { return QColor("#7C3AED"); }   // 紫
-inline QColor cNew()      { return QColor("#4F46E5"); }   // 靛
-inline QColor cCheck()    { return QColor("#16A34A"); }   // 绿
-inline QColor cUncheck()  { return QColor("#64748B"); }   // 灰
-inline QColor cFill()     { return QColor("#DB2777"); }   // 玫红
-inline QColor cTime()     { return QColor("#0891B2"); }   // 青
+inline QColor cTransfer()
+{
+    return QColor("#2563EB");
+}   // 蓝
+inline QColor cUpload()
+{
+    return QColor("#16A34A");
+}   // 绿
+inline QColor cDownload()
+{
+    return QColor("#2563EB");
+}   // 蓝
+inline QColor cDelete()
+{
+    return QColor("#DC2626");
+}   // 红
+inline QColor cRename()
+{
+    return QColor("#EA580C");
+}   // 橙
+inline QColor cInfo()
+{
+    return QColor("#475569");
+}   // 石板灰
+inline QColor cHash()
+{
+    return QColor("#7C3AED");
+}   // 紫
+inline QColor cCompress()
+{
+    return QColor("#0D9488");
+}   // 青绿
+inline QColor cFolder()
+{
+    return QColor("#D97706");
+}   // 琥珀
+inline QColor cCopy()
+{
+    return QColor("#92400E");
+}   // 棕
+inline QColor cLocal()
+{
+    return QColor("#2563EB");
+}   // 蓝
+inline QColor cRemote()
+{
+    return QColor("#7C3AED");
+}   // 紫
+inline QColor cNew()
+{
+    return QColor("#4F46E5");
+}   // 靛
+inline QColor cCheck()
+{
+    return QColor("#16A34A");
+}   // 绿
+inline QColor cUncheck()
+{
+    return QColor("#64748B");
+}   // 灰
+inline QColor cFill()
+{
+    return QColor("#DB2777");
+}   // 玫红
+inline QColor cTime()
+{
+    return QColor("#0891B2");
+}   // 青
 
 // 创建设备像素比感知的透明画布（逻辑 px x px）
 inline QPixmap makePixmap(int px = 16)
@@ -51,7 +102,8 @@ inline QPixmap makePixmap(int px = 16)
 inline void drawArrowHead(QPainter& p, const QPointF& tip, const QPointF& dir, qreal size, const QColor& c)
 {
     double len = std::hypot(dir.x(), dir.y());
-    if (len < 1e-9) return;
+    if (len < 1e-9)
+        return;
     QPointF u = dir / len;
     QPointF n(-u.y(), u.x());
     QPointF base = tip - u * size;
@@ -67,7 +119,8 @@ inline void drawArrow(QPainter& p, const QPointF& from, const QPointF& to, qreal
 {
     QPointF d = to - from;
     double len = std::hypot(d.x(), d.y());
-    if (len < 1e-9) return;
+    if (len < 1e-9)
+        return;
     QPointF u = d / len;
     QPointF lineEnd = to - u * headSize * 0.6;
     p.setPen(QPen(c, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
@@ -532,7 +585,7 @@ inline QIcon timeCheck()
     p.drawLine(QPointF(6.6, 8.2), QPointF(8.6, 9.4));
     // 右侧上下双向箭头
     p.drawLine(QPointF(13.4, 4.8), QPointF(13.4, 11.6));
-    drawArrowHead(p, QPointF(13.4, 3.4), QPointF(0, -1), 2.2, c);  // 向上=更新
+    drawArrowHead(p, QPointF(13.4, 3.4), QPointF(0, -1), 2.2, c);   // 向上=更新
     drawArrowHead(p, QPointF(13.4, 13.0), QPointF(0, 1), 2.2, c);   // 向下=更旧
     p.end();
     return QIcon(pm);
@@ -571,10 +624,10 @@ inline QIcon communicate()
     // 中间双向链路：线 + 两端箭头
     p.setPen(QPen(c, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     p.drawLine(QPointF(5.6, 8), QPointF(10.4, 8));
-    drawArrowHead(p, QPointF(10.4, 8), QPointF(1, 0), 2.4, c);  // 指向右
-    drawArrowHead(p, QPointF(5.6, 8), QPointF(-1, 0), 2.4, c); // 指向左
+    drawArrowHead(p, QPointF(10.4, 8), QPointF(1, 0), 2.4, c);   // 指向右
+    drawArrowHead(p, QPointF(5.6, 8), QPointF(-1, 0), 2.4, c);   // 指向左
     p.end();
     return QIcon(pm);
 }
 
-} // namespace MenuIcons
+}   // namespace MenuIcons

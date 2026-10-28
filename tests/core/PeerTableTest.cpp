@@ -1,16 +1,14 @@
 #include "relayer/core/session/PeerTable.h"
 
+#include <catch2/catch_test_macros.hpp>
 #include <string>
 #include <vector>
 
-#include <catch2/catch_test_macros.hpp>
-
 using namespace relayer::core::session;
 
-namespace
-{
+namespace {
 
-PeerInfo peer(const std::string &id, const std::string &addr = "127.0.0.1:1000")
+PeerInfo peer(const std::string& id, const std::string& addr = "127.0.0.1:1000")
 {
     PeerInfo p;
     p.id = id;
@@ -18,7 +16,7 @@ PeerInfo peer(const std::string &id, const std::string &addr = "127.0.0.1:1000")
     return p;
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // 注册与注销
@@ -30,7 +28,7 @@ TEST_CASE("add stores and find retrieves", "[peer]")
     REQUIRE(t.add(peer("client-1")) == RegisterResult::kOk);
     REQUIRE(t.size() == 1);
 
-    const auto *p = t.find("client-1");
+    const auto* p = t.find("client-1");
     REQUIRE(p != nullptr);
     REQUIRE(p->id == "client-1");
     REQUIRE(p->address == "127.0.0.1:1000");
@@ -72,7 +70,7 @@ TEST_CASE("remove reports whether it actually removed", "[peer]")
     PeerTable t;
     REQUIRE(t.add(peer("client-1")) == RegisterResult::kOk);
     REQUIRE(t.remove("client-1"));
-    REQUIRE_FALSE(t.remove("client-1"));  // 第二次
+    REQUIRE_FALSE(t.remove("client-1"));   // 第二次
     REQUIRE_FALSE(t.remove("never-existed"));
     REQUIRE(t.empty());
 }
@@ -128,7 +126,7 @@ TEST_CASE("list returns a copy that survives table changes", "[peer]")
     REQUIRE(t.add(peer("b")) == RegisterResult::kOk);
 
     REQUIRE(snapshot.size() == 1);
-    REQUIRE(snapshot[0].id == "a");  // 快照不受影响
+    REQUIRE(snapshot[0].id == "a");   // 快照不受影响
     REQUIRE(t.list()[0].id == "b");
 }
 
@@ -381,8 +379,7 @@ TEST_CASE("claim id rejects malformed payloads", "[peer][codec]")
 TEST_CASE("answer id carries claim rejection statuses without an id", "[peer][codec]")
 {
     // 拒绝时只发状态码：带 id 会让客户端误以为"这个 id 也有效"。
-    for (const auto status : {IdAnswerStatus::kTaken, IdAnswerStatus::kInvalid})
-    {
+    for (const auto status : {IdAnswerStatus::kTaken, IdAnswerStatus::kInvalid}) {
         std::vector<char> body;
         REQUIRE(encodeAnswerId(status, "", body).ok());
         REQUIRE(body.size() == 1);
@@ -421,7 +418,7 @@ TEST_CASE("empty client list roundtrips", "[peer][codec]")
 {
     std::vector<char> body;
     REQUIRE(encodeClientList({}, body).ok());
-    REQUIRE(body.size() == 4);  // 只有 count
+    REQUIRE(body.size() == 4);   // 只有 count
 
     std::vector<PeerInfo> out{peer("stale")};
     std::string err;
@@ -438,7 +435,7 @@ TEST_CASE("client list rejects a count larger than the payload can hold", "[peer
     body.push_back(static_cast<char>(0xFF));
     body.push_back(static_cast<char>(0xFF));
     body.push_back(static_cast<char>(0xFF));
-    body.push_back(0);  // 一条记录的 idLen，但后面什么都没有
+    body.push_back(0);   // 一条记录的 idLen，但后面什么都没有
 
     std::vector<PeerInfo> out;
     std::string err;

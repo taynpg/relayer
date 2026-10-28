@@ -6,8 +6,7 @@
 #include "model/TransferTask.h"
 
 QT_BEGIN_NAMESPACE
-namespace Ui
-{
+namespace Ui {
 class MainWindow;
 }
 QT_END_NAMESPACE
@@ -19,8 +18,7 @@ class ComparisonControl;
 class ExplorerControl;
 class LogControl;
 
-namespace relayer::app
-{
+namespace relayer::app {
 class RelayTaskControl;
 }
 
@@ -40,34 +38,34 @@ class MainWindow : public QWidget
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget *parent = nullptr);
+    explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
-    MainWindow(const MainWindow &) = delete;
-    MainWindow &operator=(const MainWindow &) = delete;
+    MainWindow(const MainWindow&) = delete;
+    MainWindow& operator=(const MainWindow&) = delete;
 
 protected:
-    void closeEvent(QCloseEvent *event) override;
+    void closeEvent(QCloseEvent* event) override;
 
 private slots:
-    void onSendToPeer(const QString &peerId, const QString &peerName);
+    void onSendToPeer(const QString& peerId, const QString& peerName);
     void onProgress(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond);
-    void onOperationFinished(bool ok, const QString &summary, const QString &detail);
+    void onOperationFinished(bool ok, const QString& summary, const QString& detail);
     // 单次发送的结论（常驻会话上进行，会话不结束、id 不变）。
-    void onSendFinished(bool ok, const QString &summary, const QString &detail);
-    void onAssignedIdChanged(const QString &id);
-    void onProbeRequested(const relayer::app::ConnInfo &conn);
+    void onSendFinished(bool ok, const QString& summary, const QString& detail);
+    void onAssignedIdChanged(const QString& id);
+    void onProbeRequested(const relayer::app::ConnInfo& conn);
     void onDisconnectRequested();
-    void onTransTaskRun(const relayer::app::RelayTaskItems &items);
-    void onRemoteCheckRequested(const relayer::app::RelayTaskItems &items);
-    void onDownloadRequested(const relayer::app::RelayTaskItems &items);
-    void onRemotePullFinished(bool ok, const QString &summary);
+    void onTransTaskRun(const relayer::app::RelayTaskItems& items);
+    void onRemoteCheckRequested(const relayer::app::RelayTaskItems& items);
+    void onDownloadRequested(const relayer::app::RelayTaskItems& items);
+    void onRemotePullFinished(bool ok, const QString& summary);
 
     // 粗校验 / 时间戳校验（从本地面板发起）：与**远端面板当前目录下的同名
     // 文件**比。v1 的语义是跨面板比，v2 的两个面板正好是左本地、右远端。
-    void onCompareRequested(const QString &name, bool wantTime);
-    void onBrowsePeerRequested(const QString &peerId, const QString &peerName);
-    void onRemoteBrowseFinished(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows);
+    void onCompareRequested(const QString& name, bool wantTime);
+    void onBrowsePeerRequested(const QString& peerId, const QString& peerName);
+    void onRemoteBrowseFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteRow>& rows);
 
 private:
     void buildLayout();
@@ -76,14 +74,13 @@ private:
 
     // 把远端面板切到某个对端的某一层（空 = 共享根）。
     // 两个入口共用：对端表右键「浏览此对端的目录」、对照表右键「访问对端目录」。
-    void switchRemotePeer(const QString &peerId, const QString &peerName, const QString &relPath = QString());
+    void switchRemotePeer(const QString& peerId, const QString& peerName, const QString& relPath = QString());
 
     // "检查远端"的逐行队列：CoreService 一次只跑一个列举，所以一行一行来。
-    struct RemoteCheck
-    {
+    struct RemoteCheck {
         QString peer;
-        QString relDir;  // 对端接收根下的相对目录（列举它）
-        QString name;    // 期望在里面看到的文件名
+        QString relDir;   // 对端接收根下的相对目录（列举它）
+        QString name;     // 期望在里面看到的文件名
         qint64 localSize = 0;
     };
     void nextRemoteCheck();
@@ -99,25 +96,23 @@ private:
     //
     // "落地"的判据是 fileReceived / archiveExtracted —— 只等应答（"对方
     // 接受了"）是不够的：文件还在传，下一行的请求会被对端以"正忙"拒掉。
-    struct DownloadJob
-    {
+    struct DownloadJob {
         QString peer;
-        QString relPath;  // 对端共享根下的相对路径（relDir/name）
-        QString name;     // 期望收到的名字（认领 fileReceived 用）
+        QString relPath;   // 对端共享根下的相对路径（relDir/name）
+        QString name;      // 期望收到的名字（认领 fileReceived 用）
         bool isDir = false;
-        QString into;  // 落点：该行的本地目录；空 = 全局接收目录
+        QString into;   // 落点：该行的本地目录；空 = 全局接收目录
     };
     void nextDownload();
     void finishDownloadStep();
 
     QList<DownloadJob> downloads_;
-    int downloadIndex_ = -1;        // -1 = 空闲；否则是"已发请求、等接受"的下标
-    bool downloadWaiting_ = false;  // 已接受，等文件落地
+    int downloadIndex_ = -1;         // -1 = 空闲；否则是"已发请求、等接受"的下标
+    bool downloadWaiting_ = false;   // 已接受，等文件落地
 
     // 一次待完成的比对。远端那一侧要先列举才能拿到 size/mtime，所以这里
     // 记住本地侧的数值，等应答回来再比。
-    struct PendingCompare
-    {
+    struct PendingCompare {
         QString name;
         bool wantTime = false;
         qint64 localSize = 0;
@@ -127,15 +122,15 @@ private:
     bool compareActive_ = false;
     void finishCompare(qint64 peerSize, qint64 peerMtime);
 
-    Ui::MainWindow *ui_;
-    relayer::app::CoreService *core_;
-    ConnectorControl *connector_;
-    LogControl *log_;
-    ExplorerControl *explorer_ = nullptr;        // 本地
-    ExplorerControl *remoteExplorer_ = nullptr;  // 远端（同一个类，换数据源）
-    QGroupBox *remoteBox_ = nullptr;             // 标题带对端名，切换时一眼可见
-    ComparisonControl *comparison_ = nullptr;
-    relayer::app::RelayTaskControl *taskControl_ = nullptr;
+    Ui::MainWindow* ui_;
+    relayer::app::CoreService* core_;
+    ConnectorControl* connector_;
+    LogControl* log_;
+    ExplorerControl* explorer_ = nullptr;         // 本地
+    ExplorerControl* remoteExplorer_ = nullptr;   // 远端（同一个类，换数据源）
+    QGroupBox* remoteBox_ = nullptr;              // 标题带对端名，切换时一眼可见
+    ComparisonControl* comparison_ = nullptr;
+    relayer::app::RelayTaskControl* taskControl_ = nullptr;
 
     // 自动接收状态。receiveActive_ 表达"此刻有常驻接收会话挂着"
     // （keepReceiving：收完文件不断开）；receiveWanted_ 表达"用户想要

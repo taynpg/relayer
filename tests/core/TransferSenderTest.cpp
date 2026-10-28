@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -9,8 +10,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <catch2/catch_test_macros.hpp>
 
 #include "relayer/common/crypto/Sha256.h"
 #include "relayer/core/transfer/MerkleTree.h"
@@ -30,12 +29,11 @@ using namespace relayer::core::transfer;
 //
 // 真正需要线程的地方（并发读、背压）单独用同步/阻塞的 PostFn 覆盖。
 
-namespace
-{
+namespace {
 
 using namespace std::chrono_literals;
 
-constexpr std::uint32_t kChunk = 1024;  // 最小的合法块大小，测试用它能多切几块
+constexpr std::uint32_t kChunk = 1024;   // 最小的合法块大小，测试用它能多切几块
 
 // 同步投递：立刻在当前线程执行，不排队。
 //
@@ -49,21 +47,18 @@ PostFn inlinePost()
 std::string makeContent(std::size_t len, unsigned seed = 0)
 {
     std::string s(len, '\0');
-    for (std::size_t i = 0; i < len; ++i)
-    {
+    for (std::size_t i = 0; i < len; ++i) {
         s[i] = static_cast<char>((i * 31 + seed * 17 + 7) & 0xFF);
     }
     return s;
 }
 
 // 等线程池把活干完。用同步 PostFn 时这一步不需要，但并发用例要。
-bool waitUntil(const std::function<bool()> &pred, std::chrono::milliseconds timeout = 5000ms)
+bool waitUntil(const std::function<bool()>& pred, std::chrono::milliseconds timeout = 5000ms)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline)
-    {
-        if (pred())
-        {
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
             return true;
         }
         std::this_thread::sleep_for(1ms);
@@ -80,42 +75,36 @@ bool waitUntil(const std::function<bool()> &pred, std::chrono::milliseconds time
 // autoAck：收满一批就自动确认一遍。窗口小于总块数时**必须**打开它，
 // 否则窗口被收下来的块占满，永远发不出下一批——这不是引擎的 bug，
 // 而是"只读不确认"本身就不构成一次完整传输。
-std::vector<ReadChunk> drainUntil(TransferSender &sender, std::size_t want, bool autoAck = false,
+std::vector<ReadChunk> drainUntil(TransferSender& sender, std::size_t want, bool autoAck = false,
                                   std::chrono::milliseconds timeout = 5000ms)
 {
     std::vector<ReadChunk> out;
     const auto deadline = std::chrono::steady_clock::now() + timeout;
 
-    while (out.size() < want && std::chrono::steady_clock::now() < deadline)
-    {
-        if (autoAck && !out.empty())
-        {
+    while (out.size() < want && std::chrono::steady_clock::now() < deadline) {
+        if (autoAck && !out.empty()) {
             // 把已收到的块当成"对端已落盘"确认掉，腾出窗口。
             std::vector<bool> received(sender.totalChunks(), false);
-            for (const auto &c : out)
-            {
+            for (const auto& c : out) {
                 received[c.chunkIndex] = true;
             }
             sender.applyAck(buildAck(received, sender.totalChunks()));
         }
 
         (void)sender.pump(inlinePost());
-        for (auto &c : sender.takeReadyChunks())
-        {
+        for (auto& c : sender.takeReadyChunks()) {
             out.push_back(std::move(c));
         }
-        if (out.size() < want)
-        {
+        if (out.size() < want) {
             std::this_thread::sleep_for(1ms);
         }
     }
 
-    std::sort(out.begin(), out.end(),
-              [](const ReadChunk &a, const ReadChunk &b) { return a.chunkIndex < b.chunkIndex; });
+    std::sort(out.begin(), out.end(), [](const ReadChunk& a, const ReadChunk& b) { return a.chunkIndex < b.chunkIndex; });
     return out;
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // open 的前置校验
@@ -246,13 +235,12 @@ TEST_CASE("pump reads chunks with correct content", "[transfer][sender]")
 
     REQUIRE(chunks[0].data.size() == kChunk);
     REQUIRE(chunks[1].data.size() == kChunk);
-    REQUIRE(chunks[2].data.size() == 452);  // 尾巴
+    REQUIRE(chunks[2].data.size() == 452);   // 尾巴
 
     // 拼起来必须与源文件逐字节相同。这是"块号 -> 偏移"映射的唯一真凭据：
     // 映射写错时每块长度都对，只有拼回去才看得出。
     std::string rebuilt;
-    for (const auto &c : chunks)
-    {
+    for (const auto& c : chunks) {
         rebuilt.append(c.data.data(), c.data.size());
     }
     REQUIRE(rebuilt == content);
@@ -263,8 +251,7 @@ TEST_CASE("chunks cover the file across chunk sizes", "[transfer][sender]")
     // 换几种块大小，覆盖"正好整除 / 差一字节"两类边界。
     const auto content = makeContent(5000);
 
-    for (std::uint32_t chunk : {1024u, 2048u, 4096u})
-    {
+    for (std::uint32_t chunk : {1024u, 2048u, 4096u}) {
         INFO("chunk size " << chunk);
         filestore::MemFileStore store;
         store.putFile("/f.bin", content);
@@ -281,8 +268,7 @@ TEST_CASE("chunks cover the file across chunk sizes", "[transfer][sender]")
         REQUIRE(chunks.size() == want);
 
         std::string rebuilt;
-        for (const auto &c : chunks)
-        {
+        for (const auto& c : chunks) {
             rebuilt.append(c.data.data(), c.data.size());
         }
         REQUIRE(rebuilt == content);
@@ -377,10 +363,8 @@ TEST_CASE("pump respects maxReadInFlight", "[transfer][sender]")
     // 所以这里要等到 reading_ 真的清空。用 hasWork/pump 的返回值间接观察：
     // 反复 pump 直到提交成功，而不是假设"ACK 完立刻就能发"。
     bool submittedAgain = false;
-    for (int i = 0; i < 2000; ++i)
-    {
-        if (sender.pump(inlinePost()) == 4)
-        {
+    for (int i = 0; i < 2000; ++i) {
+        if (sender.pump(inlinePost()) == 4) {
             submittedAgain = true;
             break;
         }
@@ -396,7 +380,7 @@ TEST_CASE("worker pool back pressure returns chunks to the window", "[transfer][
     filestore::MemFileStore store;
     store.putFile("/f.bin", makeContent(10 * kChunk));
 
-    WorkerPool pool(1, 1);  // 1 线程，队列容量 1
+    WorkerPool pool(1, 1);   // 1 线程，队列容量 1
     TransferSender::Config cfg;
     cfg.windowChunks = 8;
     cfg.maxReadInFlight = 8;
@@ -414,8 +398,7 @@ TEST_CASE("worker pool back pressure returns chunks to the window", "[transfer][
     auto chunks = drainUntil(sender, 10, /*autoAck=*/true, 10000ms);
     REQUIRE(chunks.size() == 10);
 
-    for (std::uint32_t i = 0; i < 10; ++i)
-    {
+    for (std::uint32_t i = 0; i < 10; ++i) {
         INFO("chunk " << i);
         REQUIRE(chunks[i].chunkIndex == i);
         REQUIRE(chunks[i].data.size() == kChunk);
@@ -452,8 +435,7 @@ TEST_CASE("cancelAll returns chunks to the window", "[transfer][sender]")
     // 要么被丢弃。总之块号必须是 0..3 这个前缀。
     auto chunks = drainUntil(sender, 4);
     REQUIRE(chunks.size() == 4);
-    for (std::uint32_t i = 0; i < 4; ++i)
-    {
+    for (std::uint32_t i = 0; i < 4; ++i) {
         INFO("chunk " << i);
         REQUIRE(chunks[i].chunkIndex == i);
     }
@@ -481,7 +463,7 @@ TEST_CASE("done only after every chunk is acked", "[transfer][sender]")
     REQUIRE_FALSE(sender.done());
 
     ChunkAck ack;
-    ack.ackThrough = 2;  // 差最后一块
+    ack.ackThrough = 2;   // 差最后一块
     sender.applyAck(ack);
     REQUIRE_FALSE(sender.done());
     REQUIRE(sender.ackedChunks() == 2);
@@ -548,12 +530,10 @@ TEST_CASE("digest callback form delivers a result", "[transfer][sender]")
     TransferSender::DigestResult got;
     Status submit = Status::Ok();
 
-    submit = sender.computeDigest(
-        [&](TransferSender::DigestResult r)
-        {
-            got = std::move(r);
-            called.store(true, std::memory_order_release);
-        });
+    submit = sender.computeDigest([&](TransferSender::DigestResult r) {
+        got = std::move(r);
+        called.store(true, std::memory_order_release);
+    });
     REQUIRE(submit.ok());
 
     REQUIRE(waitUntil([&called] { return called.load(std::memory_order_acquire); }));

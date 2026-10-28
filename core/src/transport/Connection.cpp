@@ -1,19 +1,16 @@
 #include "relayer/core/transport/Connection.h"
 
-#include <utility>
-
 #include <asio/bind_executor.hpp>
 #include <asio/connect.hpp>
 #include <asio/post.hpp>
 #include <asio/write.hpp>
+#include <utility>
 
-namespace relayer::core::transport
-{
+namespace relayer::core::transport {
 
 std::string_view toString(ConnectionState s) noexcept
 {
-    switch (s)
-    {
+    switch (s) {
     case ConnectionState::kConnecting:
         return "connecting";
     case ConnectionState::kOpen:
@@ -26,15 +23,13 @@ std::string_view toString(ConnectionState s) noexcept
     return "unknown";
 }
 
-namespace
-{
+namespace {
 
-std::string formatPeer(const asio::ip::tcp::socket &s)
+std::string formatPeer(const asio::ip::tcp::socket& s)
 {
     asio::error_code ec;
     const auto ep = s.remote_endpoint(ec);
-    if (ec)
-    {
+    if (ec) {
         return "<unknown>";
     }
     std::string out = ep.address().to_string();
@@ -43,16 +38,11 @@ std::string formatPeer(const asio::ip::tcp::socket &s)
     return out;
 }
 
-}  // namespace
+}   // namespace
 
-Connection::Connection(asio::io_context &ctx, asio::ip::tcp::socket socket, ConnectionHandler handler,
-                       ConnectionOptions options)
-    : strand_(asio::make_strand(ctx))
-    , socket_(std::move(socket))
-    , writeTimer_(ctx)
-    , handler_(std::move(handler))
-    , options_(options)
-    , readBuffer_(options.readChunk)
+Connection::Connection(asio::io_context& ctx, asio::ip::tcp::socket socket, ConnectionHandler handler, ConnectionOptions options)
+    : strand_(asio::make_strand(ctx)), socket_(std::move(socket)), writeTimer_(ctx), handler_(std::move(handler)),
+      options_(options), readBuffer_(options.readChunk)
 {
 }
 
@@ -62,7 +52,7 @@ Connection::~Connection() = default;
 // 建连
 // ---------------------------------------------------------------------------
 
-std::shared_ptr<Connection> Connection::connect(asio::io_context &ctx, const std::string &host, std::uint16_t port,
+std::shared_ptr<Connection> Connection::connect(asio::io_context& ctx, const std::string& host, std::uint16_t port,
                                                 ConnectionHandler handler, ConnectionOptions options)
 {
     // 先建一个"未连接"的 socket 包进 Connection，这样连接过程中的失败
@@ -77,43 +67,35 @@ std::shared_ptr<Connection> Connection::connect(asio::io_context &ctx, const std
     // resolver 被销毁会导致回调访问已释放对象。
     resolver->async_resolve(
         host, std::to_string(port),
-        asio::bind_executor(conn->strand_,
-                            [conn, resolver](const asio::error_code &ec, asio::ip::tcp::resolver::results_type results)
-                            {
-                                if (ec)
-                                {
-                                    conn->doClose(Status::Fail(ErrorCode::kUnknown, "resolve failed: " + ec.message()));
-                                    return;
-                                }
+        asio::bind_executor(
+            conn->strand_, [conn, resolver](const asio::error_code& ec, asio::ip::tcp::resolver::results_type results) {
+                if (ec) {
+                    conn->doClose(Status::Fail(ErrorCode::kUnknown, "resolve failed: " + ec.message()));
+                    return;
+                }
 
-                                // async_connect 会依次尝试解析出的每个地址（IPv4 / IPv6）
-                                asio::async_connect(
-                                    conn->socket_, results,
-                                    asio::bind_executor(conn->strand_,
-                                                        [conn](const asio::error_code &cec, const auto &)
-                                                        {
-                                                            if (cec)
-                                                            {
-                                                                conn->doClose(
-                                                                    Status::Fail(ErrorCode::kUnknown,
-                                                                                 "connect failed: " + cec.message()));
-                                                                return;
-                                                            }
-                                                            conn->peer_ = formatPeer(conn->socket_);
-                                                            conn->state_ = ConnectionState::kOpen;
-                                                            conn->startRead();
-                                                            // 连接建立前 send() 排进队列的帧，
-                                                            // 这时候才能真的写出去
-                                                            conn->startWrite();
-                                                            conn->notifyEstablished();
-                                                        }));
-                            }));
+                // async_connect 会依次尝试解析出的每个地址（IPv4 / IPv6）
+                asio::async_connect(conn->socket_, results,
+                                    asio::bind_executor(conn->strand_, [conn](const asio::error_code& cec, const auto&) {
+                                        if (cec) {
+                                            conn->doClose(Status::Fail(ErrorCode::kUnknown, "connect failed: " + cec.message()));
+                                            return;
+                                        }
+                                        conn->peer_ = formatPeer(conn->socket_);
+                                        conn->state_ = ConnectionState::kOpen;
+                                        conn->startRead();
+                                        // 连接建立前 send() 排进队列的帧，
+                                        // 这时候才能真的写出去
+                                        conn->startWrite();
+                                        conn->notifyEstablished();
+                                    }));
+            }));
 
     return conn;
 }
 
-std::shared_ptr<Connection> Connection::adopt(asio::io_context &ctx, asio::ip::tcp::socket socket,
-                                              ConnectionHandler handler, ConnectionOptions options)
+std::shared_ptr<Connection> Connection::adopt(asio::io_context& ctx, asio::ip::tcp::socket socket, ConnectionHandler handler,
+                                              ConnectionOptions options)
 {
     auto conn = std::shared_ptr<Connection>(new Connection(ctx, std::move(socket), std::move(handler), options));
     conn->peer_ = formatPeer(conn->socket_);
@@ -134,8 +116,7 @@ std::shared_ptr<Connection> Connection::adopt(asio::io_context &ctx, asio::ip::t
 void Connection::notifyEstablished()
 {
     auto notify = handler_.onEstablished;
-    if (!notify)
-    {
+    if (!notify) {
         return;
     }
     // 投递而不是直接调用。理由与 doClose 里那段一样：上层很可能在回调里
@@ -151,94 +132,77 @@ void Connection::notifyEstablished()
 
 void Connection::startRead()
 {
-    if (!isActive())
-    {
+    if (!isActive()) {
         return;
     }
 
     socket_.async_read_some(asio::buffer(readBuffer_),
-                            asio::bind_executor(strand_,
-                                                [self = shared_from_this()](const asio::error_code &ec, std::size_t n)
-                                                {
-                                                    if (ec)
-                                                    {
-                                                        // 对端正常关闭（EOF）不是错误，用空 Status 表示
-                                                        if (ec == asio::error::eof ||
-                                                            ec == asio::error::connection_reset)
-                                                        {
-                                                            self->doClose(Status::Ok());
-                                                        }
-                                                        else
-                                                        {
-                                                            self->doClose(Status::Fail(ErrorCode::kIoError,
-                                                                                       "read failed: " + ec.message()));
-                                                        }
-                                                        return;
-                                                    }
+                            asio::bind_executor(strand_, [self = shared_from_this()](const asio::error_code& ec, std::size_t n) {
+                                if (ec) {
+                                    // 对端正常关闭（EOF）不是错误，用空 Status 表示
+                                    if (ec == asio::error::eof || ec == asio::error::connection_reset) {
+                                        self->doClose(Status::Ok());
+                                    } else {
+                                        self->doClose(Status::Fail(ErrorCode::kIoError, "read failed: " + ec.message()));
+                                    }
+                                    return;
+                                }
 
-                                                    self->bytesReceived_ += n;
+                                self->bytesReceived_ += n;
 
-                                                    const auto st = self->reader_.append(self->readBuffer_.data(), n);
-                                                    if (!st.ok())
-                                                    {
-                                                        self->doClose(st);
-                                                        return;
-                                                    }
+                                const auto st = self->reader_.append(self->readBuffer_.data(), n);
+                                if (!st.ok()) {
+                                    self->doClose(st);
+                                    return;
+                                }
 
-                                                    // 把能解的帧全部解完，不能只解一个就回去等：一次 read 可能收到
-                                                    // 好几帧，剩下的如果留在缓冲里，要等下一次 read 才会被处理，
-                                                    // 而对端可能已经不再发数据了。
-                                                    protocol::Frame frame;
-                                                    Status frameStatus;
-                                                    while (self->reader_.next(frame, frameStatus))
-                                                    {
-                                                        if (self->handler_.onFrame)
-                                                        {
-                                                            self->handler_.onFrame(frame);
-                                                        }
-                                                        // 回调里可能已经调用了 close()，那就不要再继续派发
-                                                        if (!self->isActive())
-                                                        {
-                                                            return;
-                                                        }
-                                                    }
+                                // 把能解的帧全部解完，不能只解一个就回去等：一次 read 可能收到
+                                // 好几帧，剩下的如果留在缓冲里，要等下一次 read 才会被处理，
+                                // 而对端可能已经不再发数据了。
+                                protocol::Frame frame;
+                                Status frameStatus;
+                                while (self->reader_.next(frame, frameStatus)) {
+                                    if (self->handler_.onFrame) {
+                                        self->handler_.onFrame(frame);
+                                    }
+                                    // 回调里可能已经调用了 close()，那就不要再继续派发
+                                    if (!self->isActive()) {
+                                        return;
+                                    }
+                                }
 
-                                                    if (!frameStatus.ok())
-                                                    {
-                                                        self->doClose(frameStatus);
-                                                        return;
-                                                    }
+                                if (!frameStatus.ok()) {
+                                    self->doClose(frameStatus);
+                                    return;
+                                }
 
-                                                    self->startRead();
-                                                }));
+                                self->startRead();
+                            }));
 }
 
 // ---------------------------------------------------------------------------
 // 写
 // ---------------------------------------------------------------------------
 
-Status Connection::send(const protocol::Frame &frame)
+Status Connection::send(const protocol::Frame& frame)
 {
     // 允许在 kConnecting 阶段入队：客户端连上之后要立刻发握手的第一帧，
     // 让它等"连上了"再发没有意义，而且会让调用方多写一层状态判断。
     // 其余状态（Closing / Closed）一律拒。
-    if (state_ != ConnectionState::kOpen && state_ != ConnectionState::kConnecting)
-    {
+    if (state_ != ConnectionState::kOpen && state_ != ConnectionState::kConnecting) {
         return Status::Fail(ErrorCode::kProtocol, "connection is not open");
     }
 
     std::vector<char> wire;
     const auto st = protocol::packFrameChecked(frame, wire);
-    if (!st.ok())
-    {
+    if (!st.ok()) {
         // 帧本身非法（字段超长等）。这是调用方的 bug，不是连接的错，
         // 所以不关闭连接——但要报上去。
         return st;
     }
 
     const bool bulk = protocol::isBulkFrame(frame.type);
-    if (pendingControlBytes_ + pendingBulkBytes_ + wire.size() > options_.maxPendingWrites)
-    {
+    if (pendingControlBytes_ + pendingBulkBytes_ + wire.size() > options_.maxPendingWrites) {
         // 对端不读，我们的队列在涨。继续排下去会吃光内存。
         // 断开是唯一正确的选择：这已经不是"慢"，是"对面不收"。
         doClose(Status::Fail(ErrorCode::kNoSpace, "send queue overflow: peer is not reading"));
@@ -247,19 +211,15 @@ Status Connection::send(const protocol::Frame &frame)
 
     ++framesSent_;
     const std::size_t size = wire.size();
-    if (bulk)
-    {
+    if (bulk) {
         pendingBulkBytes_ += size;
         bulkQueue_.push_back(std::move(wire));
-    }
-    else
-    {
+    } else {
         pendingControlBytes_ += size;
         controlQueue_.push_back(std::move(wire));
     }
 
-    if (!writing_)
-    {
+    if (!writing_) {
         startWrite();
     }
     return Status::Ok();
@@ -270,10 +230,9 @@ void Connection::startWrite()
     // 控制队列优先。空指针判断放在前面而不是用下标索引：两个队列是独立的
     // 成员，选中的那个要在异步回调里继续用，所以必须记下"这一次写的是哪条"。
     const bool fromControl = !controlQueue_.empty();
-    auto &queue = fromControl ? controlQueue_ : bulkQueue_;
+    auto& queue = fromControl ? controlQueue_ : bulkQueue_;
 
-    if (queue.empty() || !isActive())
-    {
+    if (queue.empty() || !isActive()) {
         writing_ = false;
         return;
     }
@@ -289,61 +248,49 @@ void Connection::startWrite()
     //
     // 不能从入队算起：排队本身可能合法地很长（前面还有别的帧要发），
     // 从入队计时会把"慢"误判成"死"。
-    if (options_.writeTimeout.count() > 0)
-    {
+    if (options_.writeTimeout.count() > 0) {
         writeTimer_.expires_after(options_.writeTimeout);
-        writeTimer_.async_wait(asio::bind_executor(strand_,
-                                                   [self = shared_from_this()](const asio::error_code &ec)
-                                                   {
-                                                       // operation_aborted 是我们自己取消的（写完成、或连接已关）。
-                                                       if (ec)
-                                                       {
-                                                           return;
-                                                       }
-                                                       // 到这里说明这一帧写了整整 writeTimeout 还没写完。TCP 发送
-                                                       // 窗口被对端堵死，队列已经不会动了——控制帧也发不出去，
-                                                       // 上层只会一直等到自己的空闲超时。主动断开，让错误立刻可见。
-                                                       self->doClose(Status::Fail(
-                                                           ErrorCode::kTimeout, "write stalled: peer is not reading"));
-                                                   }));
+        writeTimer_.async_wait(asio::bind_executor(strand_, [self = shared_from_this()](const asio::error_code& ec) {
+            // operation_aborted 是我们自己取消的（写完成、或连接已关）。
+            if (ec) {
+                return;
+            }
+            // 到这里说明这一帧写了整整 writeTimeout 还没写完。TCP 发送
+            // 窗口被对端堵死，队列已经不会动了——控制帧也发不出去，
+            // 上层只会一直等到自己的空闲超时。主动断开，让错误立刻可见。
+            self->doClose(Status::Fail(ErrorCode::kTimeout, "write stalled: peer is not reading"));
+        }));
     }
 
-    const auto &front = queue.front();
+    const auto& front = queue.front();
     asio::async_write(
         socket_, asio::buffer(front),
-        asio::bind_executor(strand_,
-                            [self = shared_from_this(), fromControl](const asio::error_code &ec, std::size_t n)
-                            {
-                                // 这一帧已经有结论了，停掉超时计时。
-                                self->writeTimer_.cancel();
+        asio::bind_executor(strand_, [self = shared_from_this(), fromControl](const asio::error_code& ec, std::size_t n) {
+            // 这一帧已经有结论了，停掉超时计时。
+            self->writeTimer_.cancel();
 
-                                if (ec)
-                                {
-                                    self->doClose(Status::Fail(ErrorCode::kIoError, "write failed: " + ec.message()));
-                                    return;
-                                }
+            if (ec) {
+                self->doClose(Status::Fail(ErrorCode::kIoError, "write failed: " + ec.message()));
+                return;
+            }
 
-                                self->bytesSent_ += n;
-                                // 用与发起时同一个 fromControl 选队列：这期间
-                                // 另一条队列可能已经被追加了新帧，但**队首**
-                                // 永远是发起那次写的那一帧。
-                                auto &q = fromControl ? self->controlQueue_ : self->bulkQueue_;
-                                if (!q.empty())
-                                {
-                                    const std::size_t done = q.front().size();
-                                    if (fromControl)
-                                    {
-                                        self->pendingControlBytes_ -= done;
-                                    }
-                                    else
-                                    {
-                                        self->pendingBulkBytes_ -= done;
-                                    }
-                                    q.pop_front();
-                                }
+            self->bytesSent_ += n;
+            // 用与发起时同一个 fromControl 选队列：这期间
+            // 另一条队列可能已经被追加了新帧，但**队首**
+            // 永远是发起那次写的那一帧。
+            auto& q = fromControl ? self->controlQueue_ : self->bulkQueue_;
+            if (!q.empty()) {
+                const std::size_t done = q.front().size();
+                if (fromControl) {
+                    self->pendingControlBytes_ -= done;
+                } else {
+                    self->pendingBulkBytes_ -= done;
+                }
+                q.pop_front();
+            }
 
-                                self->startWrite();
-                            }));
+            self->startWrite();
+        }));
 }
 
 // ---------------------------------------------------------------------------
@@ -362,8 +309,7 @@ void Connection::doClose(Status reason)
     // 没有这个保护的话，读和写可能各自报错（对端 RST 时很常见：读报
     // connection_reset、写报 broken_pipe），两条路径都会走到这里，
     // 上层就会收到两次 onClosed 并对同一份资源释放两次。
-    if (state_ == ConnectionState::kClosed || state_ == ConnectionState::kClosing)
-    {
+    if (state_ == ConnectionState::kClosed || state_ == ConnectionState::kClosing) {
         return;
     }
     state_ = ConnectionState::kClosing;
@@ -385,8 +331,7 @@ void Connection::doClose(Status reason)
 
     state_ = ConnectionState::kClosed;
 
-    if (closedNotified_)
-    {
+    if (closedNotified_) {
         return;
     }
     closedNotified_ = true;
@@ -398,12 +343,11 @@ void Connection::doClose(Status reason)
     // handler_，就是 use-after-free。先把 std::function 拷一份出来，
     // 之后 lambda 只持有这份拷贝，与 this 的生死无关。
     auto notify = handler_.onClosed;
-    if (!notify)
-    {
+    if (!notify) {
         return;
     }
 
     asio::post(strand_, [n = std::move(notify), r = std::move(reason)]() mutable { n(std::move(r)); });
 }
 
-}  // namespace relayer::core::transport
+}   // namespace relayer::core::transport

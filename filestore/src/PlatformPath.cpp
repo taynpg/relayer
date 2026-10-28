@@ -14,25 +14,20 @@
 #include <cerrno>
 #endif
 
-namespace relayer::filestore::detail
-{
+namespace relayer::filestore::detail {
 
 #ifdef _WIN32
 
-std::wstring toNative(const std::string &utf8)
+std::wstring toNative(const std::string& utf8)
 {
-    if (utf8.empty())
-    {
+    if (utf8.empty()) {
         return {};
     }
-    const int need =
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
-    if (need <= 0)
-    {
+    const int need = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    if (need <= 0) {
         // 非法 UTF-8：退回按系统代码页解释，至少不让调用方拿到空串
         const int fallback = MultiByteToWideChar(CP_ACP, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
-        if (fallback <= 0)
-        {
+        if (fallback <= 0) {
             return {};
         }
         std::wstring out(static_cast<std::size_t>(fallback), L'\0');
@@ -44,16 +39,13 @@ std::wstring toNative(const std::string &utf8)
     return out;
 }
 
-std::string fromNative(const std::wstring &wide)
+std::string fromNative(const std::wstring& wide)
 {
-    if (wide.empty())
-    {
+    if (wide.empty()) {
         return {};
     }
-    const int need =
-        WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
-    if (need <= 0)
-    {
+    const int need = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+    if (need <= 0) {
         return {};
     }
     std::string out(static_cast<std::size_t>(need), '\0');
@@ -63,12 +55,12 @@ std::string fromNative(const std::wstring &wide)
 
 #else
 
-NativePath toNative(const std::string &utf8)
+NativePath toNative(const std::string& utf8)
 {
     return utf8;
 }
 
-std::string fromNative(const std::string &native)
+std::string fromNative(const std::string& native)
 {
     return native;
 }
@@ -78,7 +70,7 @@ std::string fromNative(const std::string &native)
 // fopen 的可移植包装：Windows 走 _wfopen 以支持中文/emoji 路径，
 // 其它平台直接 fopen。所有打开文件的地方都必须经过这里，
 // 这样"编码处理只有一处"的约定才真正成立。
-std::FILE *openNativeFile(const std::string &utf8Path, const char *mode)
+std::FILE* openNativeFile(const std::string& utf8Path, const char* mode)
 {
     const NativePath native = toNative(utf8Path);
 #ifdef _WIN32
@@ -89,12 +81,12 @@ std::FILE *openNativeFile(const std::string &utf8Path, const char *mode)
 #endif
 }
 
-std::string sha256Hex(const void *data, std::size_t len)
+std::string sha256Hex(const void* data, std::size_t len)
 {
     return relayer::crypto::Sha256::hex(relayer::crypto::Sha256::hash(data, len));
 }
 
-void sha256Raw(const void *data, std::size_t len, std::uint8_t out[32])
+void sha256Raw(const void* data, std::size_t len, std::uint8_t out[32])
 {
     const auto digest = relayer::crypto::Sha256::hash(data, len);
     std::memcpy(out, digest.data(), digest.size());
@@ -103,8 +95,7 @@ void sha256Raw(const void *data, std::size_t len, std::uint8_t out[32])
 SysError classifySysError(int code)
 {
 #ifdef _WIN32
-    switch (code)
-    {
+    switch (code) {
     case ERROR_FILE_NOT_FOUND:
     case ERROR_PATH_NOT_FOUND:
     case ERROR_INVALID_DRIVE:
@@ -131,8 +122,7 @@ SysError classifySysError(int code)
         return SysError::kOther;
     }
 #else
-    switch (code)
-    {
+    switch (code) {
     case ENOENT:
     case ENOTDIR:
         return SysError::kNotFound;
@@ -158,4 +148,4 @@ SysError classifySysError(int code)
 #endif
 }
 
-}  // namespace relayer::filestore::detail
+}   // namespace relayer::filestore::detail

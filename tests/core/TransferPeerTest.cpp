@@ -1,6 +1,9 @@
 #include "relayer/core/transfer/TransferPeer.h"
 
 #include <algorithm>
+#include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -8,10 +11,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <asio/io_context.hpp>
-#include <asio/ip/tcp.hpp>
-#include <catch2/catch_test_macros.hpp>
 
 #include "relayer/core/session/Session.h"
 #include "relayer/core/transfer/MerkleTree.h"
@@ -36,12 +35,11 @@ using relayer::protocol::FrameType;
 //
 // 单独跑：core_test.exe "[peer]"
 
-namespace
-{
+namespace {
 
 using namespace std::chrono_literals;
 
-constexpr std::uint32_t kChunk = 4096;  // 小到能切出多块，大到不至于帧数爆掉
+constexpr std::uint32_t kChunk = 4096;   // 小到能切出多块，大到不至于帧数爆掉
 
 // 跑真实 socket，所以每条用例都要推进事件循环；超时给宽一点，
 // 但不至于让失败用例拖住整批。
@@ -50,8 +48,7 @@ constexpr auto kWait = std::chrono::seconds(10);
 std::string makeContent(std::size_t len, unsigned seed = 0)
 {
     std::string s(len, '\0');
-    for (std::size_t i = 0; i < len; ++i)
-    {
+    for (std::size_t i = 0; i < len; ++i) {
         s[i] = static_cast<char>((i * 131 + seed * 17 + 7) & 0xFF);
     }
     return s;
@@ -59,26 +56,22 @@ std::string makeContent(std::size_t len, unsigned seed = 0)
 
 // 两个 Store 的写读辅助。测试里既要用内存实现（快），
 // 也要用真实文件实现（验证 seek / 落盘 / 原子替换）。
-std::string readAllStore(filestore::IFileStore &store, const std::string &path)
+std::string readAllStore(filestore::IFileStore& store, const std::string& path)
 {
     Status st;
     auto in = store.openRead(path, st);
-    if (!in || !st.ok())
-    {
+    if (!in || !st.ok()) {
         return {};
     }
     std::string out;
     std::vector<char> buf(64 * 1024);
-    for (;;)
-    {
+    for (;;) {
         Status rs;
         const auto n = in->read(buf.data(), buf.size(), rs);
-        if (!rs.ok())
-        {
+        if (!rs.ok()) {
             return {};
         }
-        if (n == 0)
-        {
+        if (n == 0) {
             break;
         }
         out.append(buf.data(), n);
@@ -86,12 +79,11 @@ std::string readAllStore(filestore::IFileStore &store, const std::string &path)
     return out;
 }
 
-bool writeAllStore(filestore::IFileStore &store, const std::string &path, std::string_view content)
+bool writeAllStore(filestore::IFileStore& store, const std::string& path, std::string_view content)
 {
     Status st;
     auto out = store.openWrite(path, true, st);
-    if (!out || !st.ok())
-    {
+    if (!out || !st.ok()) {
         return false;
     }
     return out->write(content.data(), content.size()).ok() && out->flush().ok();
@@ -106,11 +98,10 @@ bool writeAllStore(filestore::IFileStore &store, const std::string &path, std::s
 // 生命周期刻意做成"成员顺序即析构顺序"：peer 先死、再是 session、最后是
 // ctx。TransferPeer 的回调里会碰 session_，反过来 session 的 onFrame 会碰
 // peer——两边都不能比对方活得久。
-struct Harness
-{
+struct Harness {
     asio::io_context ctx;
-    filestore::StdFileStore storeA;  // 发送方
-    filestore::StdFileStore storeB;  // 接收方
+    filestore::StdFileStore storeA;   // 发送方
+    filestore::StdFileStore storeB;   // 接收方
     // 两端各一个池：一个池同时跑"发送侧读盘"和"接收侧写盘"会让两者
     // 互相挤占队列，而本层没有任何跨侧调度策略来避免这种饿死。
     WorkerPool sendPool{2};
@@ -123,8 +114,7 @@ struct Harness
     std::shared_ptr<TransferPeer> receiver;
 
     // 结果。用 shared_ptr 是因为回调可能活到测试作用域之后（比如超时用例）。
-    struct Sink
-    {
+    struct Sink {
         int calls = 0;
         TransferResult result;
     };
@@ -142,13 +132,11 @@ struct Harness
     // 容器，"哪个类型漏了"恰恰是唯一有用的信息。
     void requireEveryFrameAddressed() const
     {
-        if (framesWithoutTo.empty())
-        {
+        if (framesWithoutTo.empty()) {
             return;
         }
         std::string bad;
-        for (const auto t : framesWithoutTo)
-        {
+        for (const auto t : framesWithoutTo) {
             bad += std::to_string(static_cast<unsigned>(t));
             bad += ' ';
         }
@@ -156,7 +144,7 @@ struct Harness
     }
 
     // 两端的事件循环推进。Session 里每条连接的帧都要经过它。
-    bool pumpUntil(const std::function<bool()> &pred, std::chrono::milliseconds timeout = kWait)
+    bool pumpUntil(const std::function<bool()>& pred, std::chrono::milliseconds timeout = kWait)
     {
         return relayer::test::pumpUntil(ctx, pred, timeout);
     }
@@ -170,7 +158,7 @@ struct Harness
 
 // 建一对已认证的回环会话。callback 拿到两侧 session 后再挂 peer——
 // 因为 peer 需要 session 指针，而 session 的 onFrame 又要转发给 peer。
-template <typename Fn> void connectPair(Harness &h, Fn &&onReady)
+template <typename Fn> void connectPair(Harness& h, Fn&& onReady)
 {
     asio::ip::tcp::acceptor acc(h.ctx);
     acc.open(asio::ip::tcp::v4());
@@ -200,52 +188,42 @@ template <typename Fn> void connectPair(Harness &h, Fn &&onReady)
     // 那些帧本来就不该有 to——它们是发给服务端/对端的握手，语义由帧类型
     // 决定），而 TransferPeer 只负责文件会话帧。把认证帧也算进去，
     // 这个断言就永远不空，等于没写。
-    auto noteRecipient = [&h](const Frame &f)
-    {
-        if (!relayer::protocol::isAuthType(f.type) && f.to.empty())
-        {
+    auto noteRecipient = [&h](const Frame& f) {
+        if (!relayer::protocol::isAuthType(f.type) && f.to.empty()) {
             h.framesWithoutTo.push_back(f.type);
         }
     };
 
     auto serverHandler = std::make_shared<SessionHandler>();
-    serverHandler->onFrame = [&h, noteRecipient](Session &, const Frame &f)
-    {
+    serverHandler->onFrame = [&h, noteRecipient](Session&, const Frame& f) {
         // 这一侧收到的是**发送方**发出的帧（request / chunk / finish）。
         noteRecipient(f);
-        if (h.receiver)
-        {
+        if (h.receiver) {
             h.receiver->onFrame(f);
         }
     };
 
-    acc.async_accept(
-        [&h, serverCfg, serverHandler](std::error_code ec, asio::ip::tcp::socket sock)
-        {
-            if (ec)
-            {
-                return;
-            }
-            h.server = Session::accept(h.ctx, std::move(sock), serverCfg, *serverHandler);
-        });
+    acc.async_accept([&h, serverCfg, serverHandler](std::error_code ec, asio::ip::tcp::socket sock) {
+        if (ec) {
+            return;
+        }
+        h.server = Session::accept(h.ctx, std::move(sock), serverCfg, *serverHandler);
+    });
 
     auto clientHandler = std::make_shared<SessionHandler>();
-    clientHandler->onFrame = [&h, noteRecipient](Session &, const Frame &f)
-    {
+    clientHandler->onFrame = [&h, noteRecipient](Session&, const Frame& f) {
         // 这一侧收到的是**接收方**发出的帧（answer / ack / 收尾应答）。
         // 历史上漏填 to 的正是这一类——发送方的 to 在构造时就填了，
         // 接收方的 to 要靠收到请求后才学到手，最容易忘。
         noteRecipient(f);
-        if (h.sender)
-        {
+        if (h.sender) {
             h.sender->onFrame(f);
         }
     };
 
     h.client = Session::connect(h.ctx, "127.0.0.1", port, clientCfg, *clientHandler);
 
-    REQUIRE(h.pumpUntil([&h] { return h.client && h.server && h.client->authenticated() && h.server->authenticated(); },
-                        5s));
+    REQUIRE(h.pumpUntil([&h] { return h.client && h.server && h.client->authenticated() && h.server->authenticated(); }, 5s));
 
     onReady();
 }
@@ -254,7 +232,7 @@ TransferPeer::Config peerConfig(std::uint32_t chunkSize = kChunk)
 {
     TransferPeer::Config c;
     c.chunkSize = chunkSize;
-    c.retransmitTimeout = 500ms;  // 测试里别等 3 秒
+    c.retransmitTimeout = 500ms;   // 测试里别等 3 秒
     c.sender.windowChunks = 8;
     c.sender.maxReadInFlight = 8;
     c.receiver.maxBufferedChunks = 16;
@@ -266,18 +244,15 @@ TransferPeer::Config peerConfig(std::uint32_t chunkSize = kChunk)
 //
 // 不用固定时长 pump：一次 8 块的传输在回环上只需要几毫秒，而 pump(1s)
 // 会老老实实跑满 1 秒——二十条用例累积起来就是 CI 的 timeout。
-bool driveUntil(Harness &h, const std::function<bool()> &done, std::chrono::milliseconds timeout = kWait)
+bool driveUntil(Harness& h, const std::function<bool()>& done, std::chrono::milliseconds timeout = kWait)
 {
     return h.pumpUntil(
-        [&h, &done]
-        {
+        [&h, &done] {
             // peer 的推进由外部驱动（本层不带定时器），见 TransferPeer::pump 的注释。
-            if (h.sender)
-            {
+            if (h.sender) {
                 h.sender->pump();
             }
-            if (h.receiver)
-            {
+            if (h.receiver) {
                 h.receiver->pump();
             }
             return done();
@@ -285,7 +260,7 @@ bool driveUntil(Harness &h, const std::function<bool()> &done, std::chrono::mill
         timeout);
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // 正常传输
@@ -302,25 +277,19 @@ TEST_CASE("peer transfers a file end to end", "[peer][integration]")
     const auto dstPath = dstDir.utf8() + "/received.bin";
     REQUIRE(writeAllStore(h.storeA, srcPath, content));
 
-    connectPair(h,
-                [&]
-                {
-                    h.receiver =
-                        TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 7, peerConfig(),
-                                                     [sink = h.receiverSink](const TransferResult &r)
-                                                     {
-                                                         ++sink->calls;
-                                                         sink->result = r;
-                                                     });
+    connectPair(h, [&] {
+        h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 7, peerConfig(),
+                                                  [sink = h.receiverSink](const TransferResult& r) {
+                                                      ++sink->calls;
+                                                      sink->result = r;
+                                                  });
 
-                    h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "payload.bin",
-                                                          "client-1", 7, peerConfig(),
-                                                          [sink = h.senderSink](const TransferResult &r)
-                                                          {
-                                                              ++sink->calls;
-                                                              sink->result = r;
-                                                          });
-                });
+        h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "payload.bin", "client-1", 7,
+                                              peerConfig(), [sink = h.senderSink](const TransferResult& r) {
+                                                  ++sink->calls;
+                                                  sink->result = r;
+                                              });
+    });
 
     REQUIRE(driveUntil(h, [&] { return h.senderSink->calls > 0 && h.receiverSink->calls > 0; }));
 
@@ -366,24 +335,18 @@ TEST_CASE("peer handles an empty file", "[peer][integration]")
     const auto dstPath = dstDir.utf8() + "/empty.out";
     REQUIRE(writeAllStore(h.storeA, srcPath, ""));
 
-    connectPair(h,
-                [&]
-                {
-                    h.receiver =
-                        TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 1, peerConfig(),
-                                                     [sink = h.receiverSink](const TransferResult &r)
-                                                     {
-                                                         ++sink->calls;
-                                                         sink->result = r;
-                                                     });
-                    h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "empty.bin",
-                                                          "client-1", 1, peerConfig(),
-                                                          [sink = h.senderSink](const TransferResult &r)
-                                                          {
-                                                              ++sink->calls;
-                                                              sink->result = r;
-                                                          });
-                });
+    connectPair(h, [&] {
+        h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 1, peerConfig(),
+                                                  [sink = h.receiverSink](const TransferResult& r) {
+                                                      ++sink->calls;
+                                                      sink->result = r;
+                                                  });
+        h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "empty.bin", "client-1", 1,
+                                              peerConfig(), [sink = h.senderSink](const TransferResult& r) {
+                                                  ++sink->calls;
+                                                  sink->result = r;
+                                              });
+    });
 
     REQUIRE(driveUntil(h, [&] { return h.senderSink->calls > 0 && h.receiverSink->calls > 0; }));
     REQUIRE(h.senderSink->result.outcome == TransferOutcome::kCompleted);
@@ -406,24 +369,18 @@ TEST_CASE("peer handles a single byte file", "[peer][integration]")
     const auto dstPath = dstDir.utf8() + "/one.out";
     REQUIRE(writeAllStore(h.storeA, srcPath, "x"));
 
-    connectPair(h,
-                [&]
-                {
-                    h.receiver =
-                        TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 2, peerConfig(),
-                                                     [sink = h.receiverSink](const TransferResult &r)
-                                                     {
-                                                         ++sink->calls;
-                                                         sink->result = r;
-                                                     });
-                    h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "one.bin",
-                                                          "client-1", 2, peerConfig(),
-                                                          [sink = h.senderSink](const TransferResult &r)
-                                                          {
-                                                              ++sink->calls;
-                                                              sink->result = r;
-                                                          });
-                });
+    connectPair(h, [&] {
+        h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 2, peerConfig(),
+                                                  [sink = h.receiverSink](const TransferResult& r) {
+                                                      ++sink->calls;
+                                                      sink->result = r;
+                                                  });
+        h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "one.bin", "client-1", 2,
+                                              peerConfig(), [sink = h.senderSink](const TransferResult& r) {
+                                                  ++sink->calls;
+                                                  sink->result = r;
+                                              });
+    });
 
     REQUIRE(driveUntil(h, [&] { return h.senderSink->calls > 0 && h.receiverSink->calls > 0; }));
     REQUIRE(h.receiverSink->result.outcome == TransferOutcome::kCompleted);
@@ -451,24 +408,18 @@ TEST_CASE("peer resumes from a valid partial file", "[peer][integration]")
     REQUIRE(writeAllStore(h.storeA, srcPath, content));
     REQUIRE(writeAllStore(h.storeB, dstPath + ".relaypart", partial));
 
-    connectPair(h,
-                [&]
-                {
-                    h.receiver =
-                        TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 3, peerConfig(),
-                                                     [sink = h.receiverSink](const TransferResult &r)
-                                                     {
-                                                         ++sink->calls;
-                                                         sink->result = r;
-                                                     });
-                    h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "resume.bin",
-                                                          "client-1", 3, peerConfig(),
-                                                          [sink = h.senderSink](const TransferResult &r)
-                                                          {
-                                                              ++sink->calls;
-                                                              sink->result = r;
-                                                          });
-                });
+    connectPair(h, [&] {
+        h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 3, peerConfig(),
+                                                  [sink = h.receiverSink](const TransferResult& r) {
+                                                      ++sink->calls;
+                                                      sink->result = r;
+                                                  });
+        h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "resume.bin", "client-1", 3,
+                                              peerConfig(), [sink = h.senderSink](const TransferResult& r) {
+                                                  ++sink->calls;
+                                                  sink->result = r;
+                                              });
+    });
 
     // 续传生效的直接证据：**对端应答之后、第一块数据发出之前**，
     // 发送方就应当把前 10 块算作已完成。
@@ -477,8 +428,7 @@ TEST_CASE("peer resumes from a valid partial file", "[peer][integration]")
     // 造成的重传会让这个数变大，与"是否省了前 10 块"无关。那样的断言在
     // 负载轻时碰巧通过，一有重传就红——测的是环境而不是逻辑。
     REQUIRE(h.pumpUntil(
-        [&]
-        {
+        [&] {
             h.sender->pump();
             h.receiver->pump();
             return h.sender->progress().chunksDone >= 10;
@@ -512,36 +462,27 @@ TEST_CASE("peer rejects a forged partial file and refetches everything", "[peer]
     REQUIRE(writeAllStore(h.storeA, srcPath, content));
     REQUIRE(writeAllStore(h.storeB, dstPath + ".relaypart", forged));
 
-    connectPair(h,
-                [&]
-                {
-                    h.receiver =
-                        TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 4, peerConfig(),
-                                                     [sink = h.receiverSink](const TransferResult &r)
-                                                     {
-                                                         ++sink->calls;
-                                                         sink->result = r;
-                                                     });
-                    h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "forged.bin",
-                                                          "client-1", 4, peerConfig(),
-                                                          [sink = h.senderSink](const TransferResult &r)
-                                                          {
-                                                              ++sink->calls;
-                                                              sink->result = r;
-                                                          });
-                });
+    connectPair(h, [&] {
+        h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 4, peerConfig(),
+                                                  [sink = h.receiverSink](const TransferResult& r) {
+                                                      ++sink->calls;
+                                                      sink->result = r;
+                                                  });
+        h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "forged.bin", "client-1", 4,
+                                              peerConfig(), [sink = h.senderSink](const TransferResult& r) {
+                                                  ++sink->calls;
+                                                  sink->result = r;
+                                              });
+    });
 
     REQUIRE(driveUntil(h, [&] { return h.senderSink->calls > 0 && h.receiverSink->calls > 0; }));
 
     // 结果必须正确。残片的内容是错的，如果它被当成已传部分直接续上，
     // 最终文件是坏，而这个坏**通不过**最终校验——但更糟的情形是它通过了
     // 某种弱校验。这里断言的就是"要么全量重传、要么报错"，不能默默产出坏文件。
-    if (h.receiverSink->result.outcome == TransferOutcome::kCompleted)
-    {
+    if (h.receiverSink->result.outcome == TransferOutcome::kCompleted) {
         REQUIRE(readAllStore(h.storeB, dstPath) == content);
-    }
-    else
-    {
+    } else {
         // 报错也是可接受的结果：残片不可信就该要求上层显式丢弃。
         // 但不该留下一个"看起来完成"的目标文件。
         REQUIRE_FALSE(h.storeB.stat(dstPath).exists);
@@ -568,24 +509,18 @@ TEST_CASE("peer reports an existing target instead of hanging", "[peer][integrat
     // 目标已存在且内容不同。接收方应当拒绝，而不是覆盖。
     REQUIRE(writeAllStore(h.storeB, dstPath, "something else entirely"));
 
-    connectPair(h,
-                [&]
-                {
-                    h.receiver =
-                        TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 5, peerConfig(),
-                                                     [sink = h.receiverSink](const TransferResult &r)
-                                                     {
-                                                         ++sink->calls;
-                                                         sink->result = r;
-                                                     });
-                    h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "dup.bin",
-                                                          "client-1", 5, peerConfig(),
-                                                          [sink = h.senderSink](const TransferResult &r)
-                                                          {
-                                                              ++sink->calls;
-                                                              sink->result = r;
-                                                          });
-                });
+    connectPair(h, [&] {
+        h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 5, peerConfig(),
+                                                  [sink = h.receiverSink](const TransferResult& r) {
+                                                      ++sink->calls;
+                                                      sink->result = r;
+                                                  });
+        h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "dup.bin", "client-1", 5,
+                                              peerConfig(), [sink = h.senderSink](const TransferResult& r) {
+                                                  ++sink->calls;
+                                                  sink->result = r;
+                                              });
+    });
 
     // 关键是"有结果"，不是"卡住"。一个不返回的拒绝路径在 UI 上就是
     // 永远转圈的进度条。
@@ -619,23 +554,18 @@ TEST_CASE("peer overwrites an existing target when the policy allows it", "[peer
     auto cfg = peerConfig();
     cfg.overwriteExisting = true;
 
-    connectPair(h,
-                [&]
-                {
-                    h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 8, cfg,
-                                                              [sink = h.receiverSink](const TransferResult &r)
-                                                              {
-                                                                  ++sink->calls;
-                                                                  sink->result = r;
-                                                              });
-                    h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "dup.bin",
-                                                          "client-1", 8, peerConfig(),
-                                                          [sink = h.senderSink](const TransferResult &r)
-                                                          {
-                                                              ++sink->calls;
-                                                              sink->result = r;
-                                                          });
-                });
+    connectPair(h, [&] {
+        h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 8, cfg,
+                                                  [sink = h.receiverSink](const TransferResult& r) {
+                                                      ++sink->calls;
+                                                      sink->result = r;
+                                                  });
+        h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "dup.bin", "client-1", 8,
+                                              peerConfig(), [sink = h.senderSink](const TransferResult& r) {
+                                                  ++sink->calls;
+                                                  sink->result = r;
+                                              });
+    });
 
     REQUIRE(driveUntil(h, [&] { return h.senderSink->calls > 0 && h.receiverSink->calls > 0; }));
 
@@ -665,24 +595,18 @@ TEST_CASE("local cancel notifies the peer", "[peer][integration]")
     const auto dstPath = dstDir.utf8() + "/cancel.out";
     REQUIRE(writeAllStore(h.storeA, srcPath, content));
 
-    connectPair(h,
-                [&]
-                {
-                    h.receiver =
-                        TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 6, peerConfig(),
-                                                     [sink = h.receiverSink](const TransferResult &r)
-                                                     {
-                                                         ++sink->calls;
-                                                         sink->result = r;
-                                                     });
-                    h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "cancel.bin",
-                                                          "client-1", 6, peerConfig(),
-                                                          [sink = h.senderSink](const TransferResult &r)
-                                                          {
-                                                              ++sink->calls;
-                                                              sink->result = r;
-                                                          });
-                });
+    connectPair(h, [&] {
+        h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 6, peerConfig(),
+                                                  [sink = h.receiverSink](const TransferResult& r) {
+                                                      ++sink->calls;
+                                                      sink->result = r;
+                                                  });
+        h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "cancel.bin", "client-1", 6,
+                                              peerConfig(), [sink = h.senderSink](const TransferResult& r) {
+                                                  ++sink->calls;
+                                                  sink->result = r;
+                                              });
+    });
 
     // 先让它跑起来一点，再取消——一上来就取消测不到"传输中途"。
     REQUIRE(h.pumpUntil([] { return true; }, 1ms));
@@ -720,9 +644,7 @@ TEST_CASE("sender fails fast when the source is missing", "[peer]")
     int calls = 0;
     TransferResult got;
     auto peer = TransferPeer::createSender(ctx, nullptr, store, pool, "/definitely/not/here.bin", "x.bin", "peer", 1,
-                                           peerConfig(),
-                                           [&](const TransferResult &r)
-                                           {
+                                           peerConfig(), [&](const TransferResult& r) {
                                                ++calls;
                                                got = r;
                                            });
@@ -746,14 +668,12 @@ TEST_CASE("peer ignores frames from another session", "[peer]")
     const auto dstPath = dstDir.utf8() + "/f.out";
     REQUIRE(writeAllStore(h.storeA, srcPath, makeContent(kChunk)));
 
-    connectPair(h,
-                [&]
-                {
-                    h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 100,
-                                                              peerConfig(), [](const TransferResult &) {});
-                    h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "f.bin",
-                                                          "client-1", 100, peerConfig(), [](const TransferResult &) {});
-                });
+    connectPair(h, [&] {
+        h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 100, peerConfig(),
+                                                  [](const TransferResult&) {});
+        h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "f.bin", "client-1", 100,
+                                              peerConfig(), [](const TransferResult&) {});
+    });
 
     // sessionId 不匹配的帧必须被拒。同一个 Session 上会并行跑多个传输，
     // 靠 sessionId 分派——收错了会让另一条传输的块被写进这个文件。
@@ -781,27 +701,23 @@ TEST_CASE("sender fails instead of waiting forever on a silent peer", "[peer][in
     const auto srcPath = srcDir.utf8() + "/silent.bin";
     REQUIRE(writeAllStore(h.storeA, srcPath, makeContent(4 * kChunk)));
 
-    connectPair(h,
-                [&]
-                {
-                    auto cfg = peerConfig();
-                    // 收尾等待压到 300ms：默认 60 秒是给大文件算根留的余量，
-                    // 在测试里等不起。
-                    cfg.answerTimeout = 300ms;
-                    cfg.finalizeTimeout = 300ms;
-                    cfg.retransmitTimeout = 200ms;
+    connectPair(h, [&] {
+        auto cfg = peerConfig();
+        // 收尾等待压到 300ms：默认 60 秒是给大文件算根留的余量，
+        // 在测试里等不起。
+        cfg.answerTimeout = 300ms;
+        cfg.finalizeTimeout = 300ms;
+        cfg.retransmitTimeout = 200ms;
 
-                    // 对端**不在**。没有它就没有 kFileAnswerSend，也没有任何
-                    // ACK——发送方会卡在"等一个不会来的应答"上。这正是要验的：
-                    // 这种情况必须有终点。
-                    h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "silent.bin",
-                                                          "client-1", 200, cfg,
-                                                          [sink = h.senderSink](const TransferResult &r)
-                                                          {
-                                                              ++sink->calls;
-                                                              sink->result = r;
-                                                          });
-                });
+        // 对端**不在**。没有它就没有 kFileAnswerSend，也没有任何
+        // ACK——发送方会卡在"等一个不会来的应答"上。这正是要验的：
+        // 这种情况必须有终点。
+        h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "silent.bin", "client-1", 200, cfg,
+                                              [sink = h.senderSink](const TransferResult& r) {
+                                                  ++sink->calls;
+                                                  sink->result = r;
+                                              });
+    });
 
     // 结论必须是"失败且已结束"，而不是无限等下去。
     //

@@ -13,10 +13,9 @@
 // 在 Windows 上造不出以 `/` 开头的真实文件名。
 
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <string>
 #include <vector>
-
-#include <catch2/catch_test_macros.hpp>
 
 #include "relayer/filestore/IArchive.h"
 #include "relayer/filestore/IFileStore.h"
@@ -37,13 +36,12 @@ using relayer::filestore::Status;
 using relayer::filestore::TarXzArchiver;
 using relayer::filestore::toString;
 
-namespace
-{
+namespace {
 
-constexpr const char *kArchive = "/out/archive.tar.xz";
+constexpr const char* kArchive = "/out/archive.tar.xz";
 
 // 造一个带若干文件的 store，返回归档里该放的 items。
-std::vector<ArchiveItem> seedFiles(MemFileStore &ms)
+std::vector<ArchiveItem> seedFiles(MemFileStore& ms)
 {
     REQUIRE(ms.mkdirs("/src"));
     ms.putFile("/src/readme.txt", "hello relayer");
@@ -59,7 +57,7 @@ std::vector<ArchiveItem> seedFiles(MemFileStore &ms)
     return items;
 }
 
-}  // namespace
+}   // namespace
 
 TEST_CASE("归档：格式名与后缀推断", "[archive][format]")
 {
@@ -127,12 +125,9 @@ TEST_CASE("归档：tar.xz 打包再解包", "[archive][roundtrip]")
     REQUIRE(arch.list(kArchive, entries));
     // 4 个文件
     REQUIRE(entries.size() == 4);
-    const auto findEntry = [&](const std::string &name) -> const ArchiveEntry *
-    {
-        for (const auto &e : entries)
-        {
-            if (e.name == name)
-            {
+    const auto findEntry = [&](const std::string& name) -> const ArchiveEntry* {
+        for (const auto& e : entries) {
+            if (e.name == name) {
                 return &e;
             }
         }
@@ -167,7 +162,7 @@ TEST_CASE("归档：恶意条目名在打包时被拒绝", "[archive][security]"
     items.push_back({"/src/x.txt", "a/../../b.txt"});
     items.push_back({"/src/x.txt", "C:/win.txt"});
     items.push_back({"/src/x.txt", "C:win.txt"});
-    items.push_back({"/src/x.txt", "/abs.txt"});  // 前导斜杠 → 变成相对路径，允许
+    items.push_back({"/src/x.txt", "/abs.txt"});   // 前导斜杠 → 变成相对路径，允许
     items.push_back({"/src/x.txt", "ok.txt"});
 
     TarXzArchiver arch(ms);
@@ -211,28 +206,23 @@ TEST_CASE("归档：解包时 ../../ 条目被跳过", "[archive][security][zips
         relayer::filestore::XzEncoder enc;
         std::vector<char> buf(4096);
         std::string packed;
-        for (;;)
-        {
+        for (;;) {
             const std::size_t n = tw.read(buf.data(), buf.size());
-            if (n > 0)
-            {
+            if (n > 0) {
                 REQUIRE(enc.write(buf.data(), n));
             }
             Status rs;
             const std::size_t got = enc.read(buf.data(), buf.size(), rs);
             REQUIRE(rs);
             packed.append(buf.data(), got);
-            if (tw.drained())
-            {
-                if (enc.drained())
-                {
+            if (tw.drained()) {
+                if (enc.drained()) {
                     break;
                 }
                 REQUIRE(enc.finish());
                 continue;
             }
-            if (n == 0 && got == 0)
-            {
+            if (n == 0 && got == 0) {
                 break;
             }
         }
@@ -411,8 +401,7 @@ TEST_CASE("归档：深层长路径", "[archive][longpath]")
 {
     MemFileStore ms;
     std::string deep;
-    for (int i = 0; i < 15; ++i)
-    {
+    for (int i = 0; i < 15; ++i) {
         deep += "layer" + std::to_string(i) + "/";
     }
     const std::string path = "/src/" + deep + "file.txt";
@@ -428,7 +417,7 @@ TEST_CASE("归档：深层长路径", "[archive][longpath]")
     std::vector<ArchiveEntry> entries;
     REQUIRE(arch.list(kArchive, entries));
     REQUIRE(entries.size() == 1);
-    REQUIRE(entries[0].name.size() > 100);  // 确实走了 PAX
+    REQUIRE(entries[0].name.size() > 100);   // 确实走了 PAX
 
     std::vector<std::string> extracted;
     REQUIRE(arch.extract(kArchive, "/dst", ArchiveOptions{}, extracted, skipped));

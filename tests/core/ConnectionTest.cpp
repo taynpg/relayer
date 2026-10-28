@@ -1,16 +1,15 @@
 #include "relayer/core/transport/Connection.h"
 
+#include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <asio/io_context.hpp>
-#include <asio/ip/tcp.hpp>
-#include <catch2/catch_test_macros.hpp>
 
 #include "relayer/core/protocol/Frame.h"
 #include "support/IoPump.h"
@@ -27,8 +26,7 @@ using relayer::Status;
 //
 // 标签 [integration] 让 CI 的快速通道可以选择跳过。
 
-namespace
-{
+namespace {
 
 // 事件循环推进工具来自 tests/support/IoPump.h。
 //
@@ -45,11 +43,11 @@ using relayer::test::pump;
 using relayer::test::pumpUntil;
 
 // 回环上的一个简单 acceptor，返回监听的端口。
-std::uint16_t listenOn(asio::ip::tcp::acceptor &acc)
+std::uint16_t listenOn(asio::ip::tcp::acceptor& acc)
 {
     acc.open(asio::ip::tcp::v4());
     acc.set_option(asio::ip::tcp::acceptor::reuse_address(true));
-    acc.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0));  // 0 = 让系统分配
+    acc.bind(asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 0));   // 0 = 让系统分配
     acc.listen();
     return acc.local_endpoint().port();
 }
@@ -58,7 +56,7 @@ std::uint16_t listenOn(asio::ip::tcp::acceptor &acc)
 //
 // 不用指定初始化器（Handler{.onFrame = ..., .onClosed = ...}）：那是 C++20
 // 的语法，本项目用 C++17。设计一个按位置传参的小函数比到处写三行赋值清楚。
-ConnectionHandler handler(std::function<void(const Frame &)> onFrame, std::function<void(Status)> onClosed)
+ConnectionHandler handler(std::function<void(const Frame&)> onFrame, std::function<void(Status)> onClosed)
 {
     ConnectionHandler h;
     h.onFrame = std::move(onFrame);
@@ -68,7 +66,7 @@ ConnectionHandler handler(std::function<void(const Frame &)> onFrame, std::funct
 
 // 只关心收到什么、不关心关闭的常见组合
 
-Frame makeFrame(FrameType type, const std::string &body)
+Frame makeFrame(FrameType type, const std::string& body)
 {
     Frame f;
     f.type = type;
@@ -78,7 +76,7 @@ Frame makeFrame(FrameType type, const std::string &body)
     return f;
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // 显式双端：用 adopt 两端，直接验证收发
@@ -87,17 +85,15 @@ Frame makeFrame(FrameType type, const std::string &body)
 // 这一组绕开 connect()，直接用已经配好对的 socket。connect() 的异步建连
 // 路径另有专门测试（见文件末尾的"建连失败路径"与"connect 成功路径"）。
 
-namespace
-{
+namespace {
 
 // 一对已连好的 socket。用同步 connect/accept 建立，然后各交给 Connection。
-struct SocketPair
-{
+struct SocketPair {
     asio::ip::tcp::socket a;
     asio::ip::tcp::socket b;
 };
 
-SocketPair makeSocketPair(asio::io_context &ctx)
+SocketPair makeSocketPair(asio::io_context& ctx)
 {
     asio::ip::tcp::acceptor acc(ctx);
     acc.open(asio::ip::tcp::v4());
@@ -114,7 +110,7 @@ SocketPair makeSocketPair(asio::io_context &ctx)
     return SocketPair{std::move(client), std::move(server)};
 }
 
-}  // namespace
+}   // namespace
 
 TEST_CASE("two connections exchange one frame", "[transport][connection][integration]")
 {
@@ -124,10 +120,9 @@ TEST_CASE("two connections exchange one frame", "[transport][connection][integra
     std::vector<Frame> got;
     bool closedCalled = false;
 
-    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame &) {}, [](Status) {}));
-    auto b =
-        Connection::adopt(ctx, std::move(pair.b),
-                          handler([&](const Frame &f) { got.push_back(f); }, [&](Status) { closedCalled = true; }));
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame&) {}, [](Status) {}));
+    auto b = Connection::adopt(ctx, std::move(pair.b),
+                               handler([&](const Frame& f) { got.push_back(f); }, [&](Status) { closedCalled = true; }));
 
     REQUIRE(b->state() == ConnectionState::kOpen);
 
@@ -149,14 +144,13 @@ TEST_CASE("connection preserves frame order", "[transport][connection][integrati
 
     std::vector<std::int64_t> indices;
 
-    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame &) {}, [](Status) {}));
-    auto b = Connection::adopt(ctx, std::move(pair.b),
-                               handler([&](const Frame &f) { indices.push_back(f.index); }, [](Status) {}));
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame&) {}, [](Status) {}));
+    auto b =
+        Connection::adopt(ctx, std::move(pair.b), handler([&](const Frame& f) { indices.push_back(f.index); }, [](Status) {}));
 
     // 连发 50 帧，index 各不相同
     constexpr int kCount = 50;
-    for (int i = 0; i < kCount; ++i)
-    {
+    for (int i = 0; i < kCount; ++i) {
         Frame f = makeFrame(FrameType::kChunkRequestData, "x");
         f.index = i;
         REQUIRE(a->send(f).ok());
@@ -169,8 +163,7 @@ TEST_CASE("connection preserves frame order", "[transport][connection][integrati
     // 顺序必须与发送顺序完全一致：TCP 保证字节序，而"逐帧写入"的队列
     // 保证帧边界不被交错。任何一处实现错误（比如并发 async_write）
     // 都会在这里暴露成乱序或解析失败。
-    for (int i = 0; i < kCount; ++i)
-    {
+    for (int i = 0; i < kCount; ++i) {
         REQUIRE(indices[static_cast<std::size_t>(i)] == i);
     }
 }
@@ -190,9 +183,8 @@ TEST_CASE("control frames overtake queued bulk frames", "[transport][connection]
     auto pair = makeSocketPair(ctx);
 
     std::vector<FrameType> order;
-    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame &) {}, [](Status) {}));
-    auto b = Connection::adopt(ctx, std::move(pair.b),
-                               handler([&](const Frame &f) { order.push_back(f.type); }, [](Status) {}));
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame&) {}, [](Status) {}));
+    auto b = Connection::adopt(ctx, std::move(pair.b), handler([&](const Frame& f) { order.push_back(f.type); }, [](Status) {}));
 
     // 第一帧：占住写入位置（ctx 未 run，不会有任何回调）。
     REQUIRE(a->send(makeFrame(FrameType::kChunkRequestData, "first")).ok());
@@ -239,9 +231,8 @@ TEST_CASE("a stalled write times out instead of hanging forever", "[transport][c
 
     // 只把 a 包成 Connection；b 保持裸 socket 且**不读**，制造背压。
     auto a = Connection::adopt(ctx, std::move(pair.a),
-                               handler([](const Frame &) {},
-                                       [&](Status s)
-                                       {
+                               handler([](const Frame&) {},
+                                       [&](Status s) {
                                            closedCalled = true;
                                            closedStatus = std::move(s);
                                        }),
@@ -268,10 +259,9 @@ TEST_CASE("a completed write cancels its timeout", "[transport][connection][inte
     ConnectionOptions opt;
     opt.writeTimeout = std::chrono::milliseconds(80);
 
-    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame &) {}, [&](Status) {}), opt);
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame&) {}, [&](Status) {}), opt);
     auto b = Connection::adopt(ctx, std::move(pair.b),
-                               handler([&](const Frame &f) { got.push_back(f); }, [&](Status) { closedCalled = true; }),
-                               opt);
+                               handler([&](const Frame& f) { got.push_back(f); }, [&](Status) { closedCalled = true; }), opt);
 
     REQUIRE(a->send(makeFrame(FrameType::kAskId, "x")).ok());
     REQUIRE(pumpUntil(ctx, [&] { return !got.empty(); }, std::chrono::seconds(2)));
@@ -289,14 +279,12 @@ TEST_CASE("connection carries a large body", "[transport][connection][integratio
     auto pair = makeSocketPair(ctx);
 
     std::vector<char> gotBody;
-    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame &) {}, [](Status) {}));
-    auto b =
-        Connection::adopt(ctx, std::move(pair.b), handler([&](const Frame &f) { gotBody = f.body; }, [](Status) {}));
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame&) {}, [](Status) {}));
+    auto b = Connection::adopt(ctx, std::move(pair.b), handler([&](const Frame& f) { gotBody = f.body; }, [](Status) {}));
 
     // 1MB，跨越多个 readChunk（默认 4KB）
     std::string body(1024 * 1024, '\0');
-    for (std::size_t i = 0; i < body.size(); ++i)
-    {
+    for (std::size_t i = 0; i < body.size(); ++i) {
         body[i] = static_cast<char>(i % 253);
     }
     REQUIRE(a->send(makeFrame(FrameType::kAskFileSamples, body)).ok());
@@ -319,10 +307,8 @@ TEST_CASE("bidirectional exchange works", "[transport][connection][integration]"
     std::vector<FrameType> aGot;
     std::vector<FrameType> bGot;
 
-    auto a = Connection::adopt(ctx, std::move(pair.a),
-                               handler([&](const Frame &f) { aGot.push_back(f.type); }, [](Status) {}));
-    auto b = Connection::adopt(ctx, std::move(pair.b),
-                               handler([&](const Frame &f) { bGot.push_back(f.type); }, [](Status) {}));
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([&](const Frame& f) { aGot.push_back(f.type); }, [](Status) {}));
+    auto b = Connection::adopt(ctx, std::move(pair.b), handler([&](const Frame& f) { bGot.push_back(f.type); }, [](Status) {}));
 
     REQUIRE(a->send(makeFrame(FrameType::kAskId, "1")).ok());
     REQUIRE(b->send(makeFrame(FrameType::kAnswerId, "2")).ok());
@@ -351,16 +337,14 @@ TEST_CASE("closing one side notifies the other", "[transport][connection][integr
     Status bReason;
 
     auto a = Connection::adopt(ctx, std::move(pair.a),
-                               handler([](const Frame &) {},
-                                       [&](Status s)
-                                       {
+                               handler([](const Frame&) {},
+                                       [&](Status s) {
                                            ++aClosed;
                                            aReason = std::move(s);
                                        }));
     auto b = Connection::adopt(ctx, std::move(pair.b),
-                               handler([](const Frame &) {},
-                                       [&](Status s)
-                                       {
+                               handler([](const Frame&) {},
+                                       [&](Status s) {
                                            ++bClosed;
                                            bReason = std::move(s);
                                        }));
@@ -374,7 +358,7 @@ TEST_CASE("closing one side notifies the other", "[transport][connection][integr
     // 本地主动关：双方都收到一次通知
     REQUIRE(aClosed == 1);
     REQUIRE(bClosed == 1);
-    REQUIRE(aReason.ok());  // 主动关闭不是错误
+    REQUIRE(aReason.ok());   // 主动关闭不是错误
 }
 
 TEST_CASE("onClosed is called exactly once", "[transport][connection][integration]")
@@ -384,8 +368,8 @@ TEST_CASE("onClosed is called exactly once", "[transport][connection][integratio
     auto pair = makeSocketPair(ctx);
 
     int bClosed = 0;
-    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame &) {}, [](Status) {}));
-    auto b = Connection::adopt(ctx, std::move(pair.b), handler([](const Frame &) {}, [&](Status) { ++bClosed; }));
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame&) {}, [](Status) {}));
+    auto b = Connection::adopt(ctx, std::move(pair.b), handler([](const Frame&) {}, [&](Status) { ++bClosed; }));
 
     // 触发多路关闭：先本地 close，再让它自然断开
     b->close();
@@ -400,7 +384,7 @@ TEST_CASE("onClosed is called exactly once", "[transport][connection][integratio
     a->close();
     a->close();
     pump(ctx, std::chrono::milliseconds(50));
-    REQUIRE(bClosed == 1);  // 没有因为 a 的关闭再来一次
+    REQUIRE(bClosed == 1);   // 没有因为 a 的关闭再来一次
 }
 
 TEST_CASE("send after close fails", "[transport][connection][integration]")
@@ -408,7 +392,7 @@ TEST_CASE("send after close fails", "[transport][connection][integration]")
     asio::io_context ctx;
     auto pair = makeSocketPair(ctx);
 
-    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame &) {}, [](Status) {}));
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame&) {}, [](Status) {}));
     a->close();
 
     const auto st = a->send(makeFrame(FrameType::kAskId, "x"));
@@ -421,11 +405,11 @@ TEST_CASE("peer disconnect is observed", "[transport][connection][integration]")
     auto pair = makeSocketPair(ctx);
 
     int closedCount = 0;
-    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame &) {}, [&](Status) { ++closedCount; }));
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame&) {}, [&](Status) { ++closedCount; }));
     {
-        auto b = Connection::adopt(ctx, std::move(pair.b), handler([](const Frame &) {}, [](Status) {}));
+        auto b = Connection::adopt(ctx, std::move(pair.b), handler([](const Frame&) {}, [](Status) {}));
         b->close();
-    }  // b 析构
+    }   // b 析构
 
     REQUIRE(pumpUntil(ctx, [&] { return closedCount == 1; }, std::chrono::seconds(2)));
     REQUIRE(closedCount == 1);
@@ -443,10 +427,10 @@ TEST_CASE("sending an oversized field is rejected without closing", "[transport]
     auto pair = makeSocketPair(ctx);
 
     bool closed = false;
-    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame &) {}, [&](Status) { closed = true; }));
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame&) {}, [&](Status) { closed = true; }));
 
     Frame bad = makeFrame(FrameType::kAskId, "x");
-    bad.from = std::string(300, 'f');  // 超过 kMaxRouteField(255)
+    bad.from = std::string(300, 'f');   // 超过 kMaxRouteField(255)
 
     const auto st = a->send(bad);
     REQUIRE_FALSE(st.ok());
@@ -457,7 +441,7 @@ TEST_CASE("sending an oversized field is rejected without closing", "[transport]
     // 给一小段跑掉可能残留的写完成回调即可。
     REQUIRE(a->send(makeFrame(FrameType::kAskId, "ok")).ok());
     pump(ctx, std::chrono::milliseconds(50));
-    REQUIRE(a->framesSent() == 1);  // 只算成功的那一次
+    REQUIRE(a->framesSent() == 1);   // 只算成功的那一次
 }
 
 // ===========================================================================
@@ -476,25 +460,21 @@ TEST_CASE("connect succeeds and can send the first frame immediately", "[transpo
     std::vector<FrameType> serverGot;
     Status serverCloseReason;
     int serverClosed = 0;
-    std::shared_ptr<Connection> serverConn;  // 在外面持有，让服务端连接活到测试结束
+    std::shared_ptr<Connection> serverConn;   // 在外面持有，让服务端连接活到测试结束
 
-    acc.async_accept(
-        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
-        {
-            REQUIRE_FALSE(ec);
-            ConnectionHandler h;
-            h.onFrame = [&](const Frame &f) { serverGot.push_back(f.type); };
-            h.onClosed = [&](Status s)
-            {
-                serverCloseReason = std::move(s);
-                ++serverClosed;
-            };
-            serverConn = Connection::adopt(ctx, std::move(sock), std::move(h));
-        });
+    acc.async_accept([&](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        REQUIRE_FALSE(ec);
+        ConnectionHandler h;
+        h.onFrame = [&](const Frame& f) { serverGot.push_back(f.type); };
+        h.onClosed = [&](Status s) {
+            serverCloseReason = std::move(s);
+            ++serverClosed;
+        };
+        serverConn = Connection::adopt(ctx, std::move(sock), std::move(h));
+    });
 
     bool clientClosed = false;
-    auto client = Connection::connect(ctx, "127.0.0.1", port,
-                                      handler([](const Frame &) {}, [&](Status) { clientClosed = true; }));
+    auto client = Connection::connect(ctx, "127.0.0.1", port, handler([](const Frame&) {}, [&](Status) { clientClosed = true; }));
     REQUIRE(client != nullptr);
 
     // 立刻发——此时还没连上，帧应当进队列
@@ -524,9 +504,8 @@ TEST_CASE("connecting to a closed port reports failure", "[transport][connection
     // 保留返回的指针：Connection 内部用 shared_from_this 维持存活，
     // 但外部若一个引用都不留，连接对象会在建连完成前被销毁。
     auto conn = Connection::connect(ctx, "127.0.0.1", port,
-                                    handler([](const Frame &) {},
-                                            [&](Status s)
-                                            {
+                                    handler([](const Frame&) {},
+                                            [&](Status s) {
                                                 closedCalled = true;
                                                 reason = std::move(s);
                                             }));
@@ -547,9 +526,8 @@ TEST_CASE("resolving a bogus host reports failure", "[transport][connection][int
     Status reason;
 
     auto conn = Connection::connect(ctx, "this-host-does-not-exist.invalid", 12345,
-                                    handler([](const Frame &) {},
-                                            [&](Status s)
-                                            {
+                                    handler([](const Frame&) {},
+                                            [&](Status s) {
                                                 closedCalled = true;
                                                 reason = std::move(s);
                                             }));
@@ -584,10 +562,10 @@ TEST_CASE("adopt reports established before any frame", "[transport][connection]
 
     ConnectionHandler hb;
     hb.onEstablished = [&] { events.emplace_back("established"); };
-    hb.onFrame = [&](const Frame &) { events.emplace_back("frame"); };
+    hb.onFrame = [&](const Frame&) { events.emplace_back("frame"); };
     hb.onClosed = [&](Status) { events.emplace_back("closed"); };
 
-    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame &) {}, [](Status) {}));
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame&) {}, [](Status) {}));
     auto b = Connection::adopt(ctx, std::move(pair.b), hb);
 
     // adopt 里投递的是异步通知，所以此刻还没跑过回调
@@ -637,15 +615,12 @@ TEST_CASE("connect reports established once connect succeeds", "[transport][conn
     // 正常关闭，我们就没法区分"连接健康"和"连接已经结束"了。
     bool accepted = false;
     std::shared_ptr<asio::ip::tcp::socket> serverSock;
-    acc.async_accept(
-        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
-        {
-            if (!ec && sock.is_open())
-            {
-                accepted = true;
-                serverSock = std::make_shared<asio::ip::tcp::socket>(std::move(sock));
-            }
-        });
+    acc.async_accept([&](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        if (!ec && sock.is_open()) {
+            accepted = true;
+            serverSock = std::make_shared<asio::ip::tcp::socket>(std::move(sock));
+        }
+    });
 
     // accepted 是 **acceptor 侧**的事件，establishedCount 是**客户端侧**的。
     // 两者是两条独立的完成路径：内核完成三次握手后，accept 回调先跑、

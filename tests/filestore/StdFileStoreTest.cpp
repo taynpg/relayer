@@ -1,9 +1,8 @@
 #include "relayer/filestore/StdFileStore.h"
 
+#include <catch2/catch_test_macros.hpp>
 #include <string>
 #include <vector>
-
-#include <catch2/catch_test_macros.hpp>
 
 #include "support/TempDir.h"
 
@@ -16,35 +15,30 @@ using relayer::filestore::StdFileStore;
 using relayer::test::TempDir;
 using relayer::test::writeFile;
 
-namespace
-{
+namespace {
 
-std::vector<char> readAll(StdFileStore &fs, const std::string &path, Status &st)
+std::vector<char> readAll(StdFileStore& fs, const std::string& path, Status& st)
 {
     std::vector<char> out;
     auto stream = fs.openRead(path, st);
-    if (!stream)
-    {
+    if (!stream) {
         return out;
     }
     char buf[4096];
-    for (;;)
-    {
+    for (;;) {
         const std::size_t n = stream->read(buf, sizeof(buf), st);
         out.insert(out.end(), buf, buf + n);
-        if (!st)
-        {
+        if (!st) {
             return {};
         }
-        if (n == 0)
-        {
+        if (n == 0) {
             break;
         }
     }
     return out;
 }
 
-}  // namespace
+}   // namespace
 
 // ---------------------------------------------------------------------------
 // 路径
@@ -241,14 +235,11 @@ TEST_CASE("list 非递归只返回直接子项", "[filestore][dir]")
 
     bool sawDir = false;
     bool sawFile = false;
-    for (const auto &e : entries)
-    {
-        if (e.name == "a")
-        {
+    for (const auto& e : entries) {
+        if (e.name == "a") {
             sawDir = e.isDir;
         }
-        if (e.name == "y.bin")
-        {
+        if (e.name == "y.bin") {
             sawFile = !e.isDir && e.size == 1;
         }
     }
@@ -368,7 +359,7 @@ TEST_CASE("quickFingerprint 用 sizeOverride 匹配残片归属", "[filestore][f
     const std::string part = dir.path("src.bin.relaypart");
     const std::string content = "0123456789ABCDEF";
     REQUIRE(writeFile(src, content));
-    REQUIRE(writeFile(part, content.substr(0, 6)));  // 只写了前 6 字节
+    REQUIRE(writeFile(part, content.substr(0, 6)));   // 只写了前 6 字节
 
     const std::string srcFp = fs.quickFingerprint(src);
     REQUIRE_FALSE(srcFp.empty());

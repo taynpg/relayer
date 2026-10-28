@@ -1,16 +1,14 @@
 #include "relayer/core/session/FileList.h"
 
+#include <catch2/catch_test_macros.hpp>
 #include <string>
 #include <vector>
 
-#include <catch2/catch_test_macros.hpp>
-
 using namespace relayer::core::session;
 
-namespace
-{
+namespace {
 
-RemoteEntry entry(const std::string &name, bool isDir, std::uint64_t size, std::int64_t mtime)
+RemoteEntry entry(const std::string& name, bool isDir, std::uint64_t size, std::int64_t mtime)
 {
     RemoteEntry e;
     e.name = name;
@@ -20,7 +18,7 @@ RemoteEntry entry(const std::string &name, bool isDir, std::uint64_t size, std::
     return e;
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // kAskFileList
@@ -172,32 +170,29 @@ TEST_CASE("answer file list refuses empty entry names", "[filelist][codec]")
 // 条目名必须是单段（防不可信对端把路径拼进来）
 // ---------------------------------------------------------------------------
 
-namespace
-{
+namespace {
 
 // 手工拼 body：encode 会拒绝非法名字，测解码侧只能自己造字节。
 // 布局见 PROTOCOL.md §11.8：status(u8) count(u32) 后跟 count 个条目。
-std::vector<char> rawAnswer(const std::vector<std::string> &names)
+std::vector<char> rawAnswer(const std::vector<std::string>& names)
 {
     std::vector<char> out;
-    out.push_back(0);  // status = kOk
+    out.push_back(0);   // status = kOk
     const auto count = static_cast<std::uint32_t>(names.size());
-    for (int i = 0; i < 4; ++i)
-    {
-        out.push_back(static_cast<char>((count >> (8 * i)) & 0xFF));  // 小端
+    for (int i = 0; i < 4; ++i) {
+        out.push_back(static_cast<char>((count >> (8 * i)) & 0xFF));   // 小端
     }
-    for (const auto &n : names)
-    {
+    for (const auto& n : names) {
         out.push_back(static_cast<char>(n.size()));
         out.insert(out.end(), n.begin(), n.end());
-        out.push_back(0);  // type = 文件
+        out.push_back(0);   // type = 文件
         out.insert(out.end(), 8, 0);
         out.insert(out.end(), 8, 0);
     }
     return out;
 }
 
-}  // namespace
+}   // namespace
 
 TEST_CASE("answer file list rejects a parent-directory entry name", "[filelist][codec]")
 {

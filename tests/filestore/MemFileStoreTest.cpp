@@ -13,10 +13,9 @@
 
 #include "relayer/filestore/MemFileStore.h"
 
+#include <catch2/catch_test_macros.hpp>
 #include <string>
 #include <vector>
-
-#include <catch2/catch_test_macros.hpp>
 
 #include "relayer/filestore/StdFileStore.h"
 #include "support/TempDir.h"
@@ -31,51 +30,44 @@ using relayer::filestore::StdFileStore;
 using relayer::test::TempDir;
 using relayer::test::writeFile;
 
-namespace
-{
+namespace {
 
-std::string readAll(IFileStore &fs, const std::string &path, Status &st)
+std::string readAll(IFileStore& fs, const std::string& path, Status& st)
 {
     std::string out;
     auto stream = fs.openRead(path, st);
-    if (!stream)
-    {
+    if (!stream) {
         return out;
     }
     char buf[4096];
-    for (;;)
-    {
+    for (;;) {
         const std::size_t n = stream->read(buf, sizeof(buf), st);
         out.append(buf, n);
-        if (!st)
-        {
+        if (!st) {
             return {};
         }
-        if (n == 0)
-        {
+        if (n == 0) {
             break;
         }
     }
     return out;
 }
 
-bool writeAll(IFileStore &fs, const std::string &path, const std::string &content, Status &st)
+bool writeAll(IFileStore& fs, const std::string& path, const std::string& content, Status& st)
 {
     auto w = fs.openWrite(path, true, st);
-    if (!w)
-    {
+    if (!w) {
         return false;
     }
     st = w->write(content.data(), content.size());
-    if (!st)
-    {
+    if (!st) {
         return false;
     }
     st = w->flush();
     return static_cast<bool>(st);
 }
 
-}  // namespace
+}   // namespace
 
 // ---------------------------------------------------------------------------
 // 基本读写
@@ -204,18 +196,15 @@ TEST_CASE("MemFileStore list 非递归只给直接子项", "[mem][dir]")
 
     std::vector<DirEntry> out;
     REQUIRE(fs.list("/d", false, out));
-    REQUIRE(out.size() == 2);  // a.txt 与 sub
+    REQUIRE(out.size() == 2);   // a.txt 与 sub
 
     bool sawSub = false;
     bool sawA = false;
-    for (const auto &e : out)
-    {
-        if (e.name == "sub")
-        {
+    for (const auto& e : out) {
+        if (e.name == "sub") {
             sawSub = e.isDir;
         }
-        if (e.name == "a.txt")
-        {
+        if (e.name == "a.txt") {
             sawA = !e.isDir && e.size == 1;
         }
     }
@@ -434,7 +423,7 @@ TEST_CASE("关闭 flushOnClose 模拟进程崩溃丢缓冲", "[mem][fault]")
     auto w = fs.openWrite("/lost.bin", true, st);
     REQUIRE(w);
     REQUIRE(w->write("data", 4));
-    w.reset();  // 不 flush
+    w.reset();   // 不 flush
 
     // 数据没落盘——模拟"写流还没 flush 进程就挂了"
     REQUIRE(fs.getFile("/lost.bin").empty());

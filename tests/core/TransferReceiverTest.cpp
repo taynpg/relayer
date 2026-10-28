@@ -1,14 +1,13 @@
 #include "relayer/core/transfer/TransferReceiver.h"
 
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <catch2/catch_test_macros.hpp>
 
 #include "relayer/common/crypto/Sha256.h"
 #include "relayer/core/transfer/MerkleTree.h"
@@ -28,12 +27,11 @@ using namespace relayer::core::transfer;
 // 接收侧比发送侧更需要这一点：这里的断言是"文件里现在是什么内容"，
 // 而半写状态下的内容是没有意义的。
 
-namespace
-{
+namespace {
 
 using namespace std::chrono_literals;
 
-constexpr std::uint32_t kChunk = 1024;  // 最小合法块大小，方便多切几块
+constexpr std::uint32_t kChunk = 1024;   // 最小合法块大小，方便多切几块
 
 PostFn inlinePost()
 {
@@ -43,21 +41,18 @@ PostFn inlinePost()
 std::string makeContent(std::size_t len, unsigned seed = 0)
 {
     std::string s(len, '\0');
-    for (std::size_t i = 0; i < len; ++i)
-    {
+    for (std::size_t i = 0; i < len; ++i) {
         s[i] = static_cast<char>((i * 31 + seed * 17 + 7) & 0xFF);
     }
     return s;
 }
 
 // 等条件成立。同步 PostFn 下多数用例不需要，但并发/真实线程池的用例要。
-bool waitUntil(const std::function<bool()> &pred, std::chrono::milliseconds timeout = 5000ms)
+bool waitUntil(const std::function<bool()>& pred, std::chrono::milliseconds timeout = 5000ms)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline)
-    {
-        if (pred())
-        {
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
             return true;
         }
         std::this_thread::sleep_for(1ms);
@@ -74,28 +69,25 @@ bool waitUntil(const std::function<bool()> &pred, std::chrono::milliseconds time
 // 这一点与发送侧完全一样（TransferSenderTest 里的 drainUntil）。第一次
 // 写接收侧测试时我也假设了 inlinePost 会同步整条链路，结果 8 条用例
 // 一起红——失败的断言是 writtenChunks()==0，很容易误以为实现没写。
-void settle(TransferReceiver &r, std::chrono::milliseconds timeout = 5000ms)
+void settle(TransferReceiver& r, std::chrono::milliseconds timeout = 5000ms)
 {
     REQUIRE(waitUntil([&] { return !r.hasPendingWrites(); }, timeout));
 }
 
 // 读回一个文件（测试断言用）。
-std::string readAll(filestore::IFileStore &store, const std::string &path)
+std::string readAll(filestore::IFileStore& store, const std::string& path)
 {
     Status st;
     auto in = store.openRead(path, st);
-    if (!in)
-    {
+    if (!in) {
         return {};
     }
     std::string out;
     char buf[4096];
-    for (;;)
-    {
+    for (;;) {
         Status rs;
         const auto n = in->read(buf, sizeof(buf), rs);
-        if (!rs.ok() || n == 0)
-        {
+        if (!rs.ok() || n == 0) {
             break;
         }
         out.append(buf, n);
@@ -104,7 +96,7 @@ std::string readAll(filestore::IFileStore &store, const std::string &path)
 }
 
 // 构造一个能被 open() 接受的描述。
-TransferDesc makeDesc(const std::string &content, std::uint32_t chunkSize, const std::string &root = "out.bin")
+TransferDesc makeDesc(const std::string& content, std::uint32_t chunkSize, const std::string& root = "out.bin")
 {
     TransferDesc d;
     d.displayName = "out.bin";
@@ -126,12 +118,10 @@ TransferDesc makeDesc(const std::string &content, std::uint32_t chunkSize, const
 // 结尾等一次是刻意的：调用方紧接着几乎总是断言"文件内容对不对"或
 // "一共落了几块"，那两件事都要等写盘完成。让 feedAll 兜住这一步，
 // 每个用例就不用各自记得加 settle ——漏加的症状是"偶发 0 块"。
-void feedAll(TransferReceiver &r, const std::string &content, std::uint32_t chunkSize,
-             const PostFn &post = inlinePost())
+void feedAll(TransferReceiver& r, const std::string& content, std::uint32_t chunkSize, const PostFn& post = inlinePost())
 {
     const auto total = chunkCountFor(content.size(), chunkSize);
-    for (std::uint32_t i = 0; i < total; ++i)
-    {
+    for (std::uint32_t i = 0; i < total; ++i) {
         const auto off = static_cast<std::size_t>(i) * chunkSize;
         const auto len = static_cast<std::size_t>(chunkLengthAt(i, content.size(), chunkSize));
         REQUIRE(r.acceptChunk(i, content.data() + off, len, post).ok());
@@ -139,7 +129,7 @@ void feedAll(TransferReceiver &r, const std::string &content, std::uint32_t chun
     REQUIRE(waitUntil([&] { return !r.hasPendingWrites(); }));
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // open
@@ -178,10 +168,10 @@ TEST_CASE("receiver open rejects a bad chunk size", "[transfer][receiver]")
     TransferReceiver r(store, pool);
     std::uint32_t resumeFrom = 0;
 
-    desc.chunkSize = 100;  // 小于 kMinChunkSize
+    desc.chunkSize = 100;   // 小于 kMinChunkSize
     REQUIRE_FALSE(r.open(desc, "out.bin", resumeFrom).ok());
 
-    desc.chunkSize = kChunk + 1;  // 未对齐
+    desc.chunkSize = kChunk + 1;   // 未对齐
     REQUIRE_FALSE(r.open(desc, "out.bin", resumeFrom).ok());
 }
 
@@ -317,8 +307,7 @@ TEST_CASE("receiver accepts chunks out of order", "[transfer][receiver]")
 
     // 3, 0, 2, 1
     const std::vector<std::uint32_t> order = {3, 0, 2, 1};
-    for (auto i : order)
-    {
+    for (auto i : order) {
         REQUIRE(r.acceptChunk(i, content.data() + i * kChunk, kChunk, inlinePost()).ok());
     }
 
@@ -384,7 +373,7 @@ TEST_CASE("receiver drops a duplicate chunk without writing twice", "[transfer][
     const auto again = r.acceptChunk(0, content.data(), content.size(), inlinePost());
     REQUIRE_FALSE(again.ok());
     REQUIRE(again.code == ErrorCode::kAlreadyExists);
-    REQUIRE(r.writtenChunks() == 1);  // 没有重复计数
+    REQUIRE(r.writtenChunks() == 1);   // 没有重复计数
 }
 
 TEST_CASE("receiver reports kBusy when the buffer is full", "[transfer][receiver][backpressure]")
@@ -465,13 +454,12 @@ TEST_CASE("receiver ack counts only written chunks", "[transfer][receiver][ack]"
 
     // 全部受理但都不写盘
     PostFn dropPost = [](std::function<void()>) {};
-    for (std::uint32_t i = 0; i < 4; ++i)
-    {
+    for (std::uint32_t i = 0; i < 4; ++i) {
         REQUIRE(r.acceptChunk(i, content.data() + i * kChunk, kChunk, dropPost).ok());
     }
 
     const auto ack = r.buildCurrentAck();
-    REQUIRE(ack.ackThrough == 0);  // 一块都没落盘
+    REQUIRE(ack.ackThrough == 0);   // 一块都没落盘
     REQUIRE(ack.bitmap.empty());
 }
 
@@ -488,8 +476,7 @@ TEST_CASE("receiver ack advances through a contiguous prefix", "[transfer][recei
     REQUIRE(r.open(desc, "out.bin", resumeFrom).ok());
 
     // 收 0,1,2 和 4（跳过 3）
-    for (std::uint32_t i : {0u, 1u, 2u, 4u})
-    {
+    for (std::uint32_t i : {0u, 1u, 2u, 4u}) {
         REQUIRE(r.acceptChunk(i, content.data() + i * kChunk, kChunk, inlinePost()).ok());
     }
 
@@ -516,7 +503,7 @@ TEST_CASE("receiver finalize verifies the root and renames", "[transfer][receive
     filestore::MemFileStore store;
     WorkerPool pool(1);
 
-    const auto content = makeContent(3 * kChunk + 37);  // 末尾短块
+    const auto content = makeContent(3 * kChunk + 37);   // 末尾短块
     const auto desc = makeDesc(content, kChunk);
 
     TransferReceiver r(store, pool);
@@ -703,8 +690,7 @@ TEST_CASE("receiver works with a real worker pool", "[transfer][receiver][thread
     // 倒序喂：让块号与到达顺序完全相反，最大化"写错位置"的暴露概率。
     // post 用 inlinePost：回调在提交线程上跑（这里就是主线程），
     // 但写盘仍在线程池上——正是要验证的组合。
-    for (std::uint32_t i = total; i-- > 0;)
-    {
+    for (std::uint32_t i = total; i-- > 0;) {
         const auto off = static_cast<std::size_t>(i) * kChunk;
         const auto len = static_cast<std::size_t>(chunkLengthAt(i, content.size(), kChunk));
 

@@ -17,8 +17,7 @@
 // 变成结构。谁读 socket、谁写 socket、什么时候断线，全都不在这里决定。
 // 这条边界让协议层可以被纯粹的字节级测试覆盖，不需要起端口。
 
-namespace relayer::protocol
-{
+namespace relayer::protocol {
 
 // ---------------------------------------------------------------------------
 // 帧类型
@@ -36,16 +35,15 @@ namespace relayer::protocol
 //
 // 新增类型时按段追加到**末尾**，不要复用已废弃的号：老客户端会把废弃号
 // 当成自己认识的那个类型，行为错乱比直接断开更难排查。
-enum class FrameType : std::uint16_t
-{
+enum class FrameType : std::uint16_t {
     // --- 握手 / 认证（0..99） ---
     //
     // 这三个是 v2 新增的。连接建立后，服务端发的第一帧必须是 kAuthChallenge；
     // 客户端在收到 kAuthResult(ok) 之前发的任何业务帧都应被丢弃。
-    kAuthChallenge = 0,  // S->C: salt || nonceS
-    kAuthResponse = 1,   // C->S: nonceC || proof
-    kAuthResult = 2,     // S->C: status || serverProof
-    kAuthAbort = 3,      // 双向: status（任一方放弃，随后关闭连接）
+    kAuthChallenge = 0,   // S->C: salt || nonceS
+    kAuthResponse = 1,    // C->S: nonceC || proof
+    kAuthResult = 2,      // S->C: status || serverProof
+    kAuthAbort = 3,       // 双向: status（任一方放弃，随后关闭连接）
 
     // --- 控制与会话信令（100..199） ---
     kAskId = 100,
@@ -126,8 +124,7 @@ enum class FrameType : std::uint16_t
 };
 
 // 分段边界。用 constexpr 而不是散落的魔法数字，是因为接收方要按段分派。
-namespace type_range
-{
+namespace type_range {
 constexpr std::uint16_t kAuthBegin = 0;
 constexpr std::uint16_t kAuthEnd = 99;
 constexpr std::uint16_t kControlBegin = 100;
@@ -139,7 +136,7 @@ constexpr std::uint16_t kFileSessionEnd = 549;
 constexpr std::uint16_t kDirectBegin = 550;
 constexpr std::uint16_t kDirectEnd = 599;
 constexpr std::uint16_t kChunkBegin = 600;
-}  // namespace type_range
+}   // namespace type_range
 
 [[nodiscard]] constexpr bool isAuthType(FrameType t) noexcept
 {
@@ -203,8 +200,7 @@ constexpr std::uint16_t kChunkBegin = 600;
 // v1 把方向、加密、校验等信息挤在同一个 int16 的不同位上，导致"按 mark 是否
 // 非零判方向"这类推断在加了加密位之后立即出错。v2 保留位布局但**禁止用
 // 数值范围推断语义**：只用下面这些具名位。
-enum FrameFlags : std::uint16_t
-{
+enum FrameFlags : std::uint16_t {
     kFlagNone = 0,
 
     // 该帧由「接收文件数据的一侧」发出。
@@ -230,8 +226,7 @@ enum FrameFlags : std::uint16_t
 // 常量
 // ---------------------------------------------------------------------------
 
-namespace frame
-{
+namespace frame {
 // 'R','F','M','1' 按小端读成 u32
 constexpr std::uint32_t kMagic = 0x314D4652;
 constexpr std::uint16_t kVersion = 2;
@@ -254,14 +249,13 @@ constexpr std::size_t kRoutePrefixSize = 3;
 
 // 帧的最小合法长度：固定头 + 三个空路由字段（各 1 字节长度前缀）
 constexpr std::uint32_t kMinFrameSize = kFixedHeaderSize + kRoutePrefixSize;
-}  // namespace frame
+}   // namespace frame
 
 // ---------------------------------------------------------------------------
 // 帧
 // ---------------------------------------------------------------------------
 
-struct Frame
-{
+struct Frame {
     FrameType type{};
 
     // 原始标志位。**不要**直接和数值比较，用 hasFlag()。
@@ -276,9 +270,9 @@ struct Frame
     //   - 其余：0
     std::int64_t index{};
 
-    std::string from;   // 源端 id（服务端会强制覆写，见 PROTOCOL.md）
-    std::string to;     // 目标端 id
-    std::string fuuid;  // 文件/任务 uuid，控制类帧用；数据帧留空以省字节
+    std::string from;    // 源端 id（服务端会强制覆写，见 PROTOCOL.md）
+    std::string to;      // 目标端 id
+    std::string fuuid;   // 文件/任务 uuid，控制类帧用；数据帧留空以省字节
 
     std::vector<char> body;
 
@@ -305,25 +299,24 @@ struct Frame
 // 失败原因只有两种，都是调用方的编程错误（字段超长 / 帧太大），
 // 不是运行时的正常分支，所以主接口用空 vector 表示失败就够了。
 // 需要可诊断的日志时用下面的 packFrameChecked 拿到具体原因。
-[[nodiscard]] std::vector<char> packFrame(const Frame &f);
+[[nodiscard]] std::vector<char> packFrame(const Frame& f);
 
 // 同上，但把失败原因写进 out 的 Status / 错误信息里。
 // 这个重载同时是 packFrame 的实现，两者行为保证一致。
-[[nodiscard]] Status packFrameChecked(const Frame &f, std::vector<char> &out);
+[[nodiscard]] Status packFrameChecked(const Frame& f, std::vector<char>& out);
 
 // CRC32（IEEE 802.3，多项式 0xEDB88320，初值与末值都取反）。
 // 与 zlib 的 crc32() 结果一致。帧头与 body 校验都用它。
-[[nodiscard]] std::uint32_t crc32(const void *data, std::size_t len) noexcept;
+[[nodiscard]] std::uint32_t crc32(const void* data, std::size_t len) noexcept;
 
 // ---------------------------------------------------------------------------
 // 解包
 // ---------------------------------------------------------------------------
 
-enum class UnPackResult
-{
-    kNeedMoreData,   // 输入还没收全，保留数据等下一次
-    kOk,             // 解出一帧，out 有效，consumed 为消耗字节数
-    kProtocolError,  // 流已不可恢复（版本不符、body CRC 错），调用方应断开
+enum class UnPackResult {
+    kNeedMoreData,    // 输入还没收全，保留数据等下一次
+    kOk,              // 解出一帧，out 有效，consumed 为消耗字节数
+    kProtocolError,   // 流已不可恢复（版本不符、body CRC 错），调用方应断开
 };
 
 // 从 [data, data + len) 的**起始位置**尝试解出一帧。
@@ -345,6 +338,6 @@ enum class UnPackResult
 // 因此单看 magic 会误判，算法是"找 magic -> 校验 frameLen 范围 -> 校验 headerCrc"，
 // 任何一步不过就跳过 1 字节继续找。这样误判最多浪费一次 CRC 计算，不会把
 // 解析器卡在一个虚假的超长帧长上。
-UnPackResult unpackFrame(const char *data, std::size_t len, Frame &out, std::size_t &consumed);
+UnPackResult unpackFrame(const char* data, std::size_t len, Frame& out, std::size_t& consumed);
 
-}  // namespace relayer::protocol
+}   // namespace relayer::protocol

@@ -7,8 +7,7 @@
 #include "bridge/CoreService.h"
 
 QT_BEGIN_NAMESPACE
-namespace Ui
-{
+namespace Ui {
 class ConnectorControl;
 }
 QT_END_NAMESPACE
@@ -34,11 +33,11 @@ class ConnectorControl : public QDialog
     Q_OBJECT
 
 public:
-    explicit ConnectorControl(QWidget *parent = nullptr);
+    explicit ConnectorControl(QWidget* parent = nullptr);
     ~ConnectorControl() override;
 
-    ConnectorControl(const ConnectorControl &) = delete;
-    ConnectorControl &operator=(const ConnectorControl &) = delete;
+    ConnectorControl(const ConnectorControl&) = delete;
+    ConnectorControl& operator=(const ConnectorControl&) = delete;
 
     // 当前通信对象（对端表格右键选定）。空表示未选。
     QString currentPeerId() const
@@ -51,26 +50,26 @@ public:
     //
     // 不在这里做在线校验：调用方（MainWindow）有自己的提示口径，而且
     // 列表可能是旧的。address 可空（有些入口只知道 id）。
-    void setCurrentPeer(const QString &id, const QString &address = QString());
+    void setCurrentPeer(const QString& id, const QString& address = QString());
 
     // 最近一次在线列表里有没有这个 id。列表为空（还没刷新过）时返回
     // false——调用方据此区分"确定不在线"与"不知道"，别把后者当错误拦下。
-    bool isPeerOnline(const QString &id) const
+    bool isPeerOnline(const QString& id) const
     {
         return onlineIds_.contains(id);
     }
 
 signals:
     // 右键"发送文件到此对端"。MainWindow 负责弹文件选择框并调 CoreService。
-    void sendToPeerRequested(const QString &peerId, const QString &peerName);
+    void sendToPeerRequested(const QString& peerId, const QString& peerName);
 
     // 右键"浏览此对端的目录"（PROTOCOL.md §11.8）。窗口由 MainWindow 建，
     // 因为浏览要走 CoreService 的常驻会话。
-    void browsePeerRequested(const QString &peerId, const QString &peerName);
+    void browsePeerRequested(const QString& peerId, const QString& peerName);
 
     // 用户点了"连接"，参数校验通过。MainWindow 记住这组参数，供发送与
     // 自动接收复用（CoreService 一次一个操作，每次操作都要重新给参数）。
-    void probeRequested(const relayer::app::ConnInfo &conn);
+    void probeRequested(const relayer::app::ConnInfo& conn);
 
     // 用户点了"断开"：请求结束常驻会话。由 MainWindow 落手，因为只有它
     // 知道自动接收的状态机（receiveWanted_），直接在这里取消会被自动
@@ -78,27 +77,27 @@ signals:
     void disconnectRequested();
 
     // 连接/探测的结论，交给日志面板显示。
-    void logMessage(const QString &msg);
+    void logMessage(const QString& msg);
 
 public:
     // 注入 CoreService 并接线。由 MainWindow 在构造完两者之后调用——
     // 构造函数里拿不到（MainWindow 先建 CoreService 再建本控件也行，
     // 但显式 attach 让依赖方向一眼可见，不依赖构造顺序约定）。
-    void attachCoreService(relayer::app::CoreService *core);
+    void attachCoreService(relayer::app::CoreService* core);
 
 private slots:
     void onConnectClicked();
     void onDisconnectClicked();
     void onRefreshClicked();
-    void onTableContextMenu(const QPoint &pos);
+    void onTableContextMenu(const QPoint& pos);
 
 private:
     void initTable();
     void initButtons();
     void initAuth();
     void loadIpHistory();
-    void saveIpHistory(const QString &ipPort);
-    bool parseHostPort(const QString &text, QString &host, quint16 &port) const;
+    void saveIpHistory(const QString& ipPort);
+    bool parseHostPort(const QString& text, QString& host, quint16& port) const;
 
     // 只用对端表/选中对象，不动会话（断开时清显示）。
     void clearPeerView();
@@ -109,12 +108,12 @@ private:
 
     // ---- CoreService 信号 ----
     void onBusyChanged(bool busy);
-    void onAssignedIdChanged(const QString &id);
+    void onAssignedIdChanged(const QString& id);
     void onOperationFinished(bool ok);
-    void onPeerListReceived(const QList<relayer::app::PeerRow> &rows);
+    void onPeerListReceived(const QList<relayer::app::PeerRow>& rows);
 
-    Ui::ConnectorControl *ui_;
-    relayer::app::CoreService *core_;
+    Ui::ConnectorControl* ui_;
+    relayer::app::CoreService* core_;
     QString currentPeerId_;
 
     // 常驻会话已建立（拿到非空 id）。空 id 是"认证刚过、id 还没分配"的

@@ -1,15 +1,14 @@
 #include "relayer/core/session/Session.h"
 
+#include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/write.hpp>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <asio/io_context.hpp>
-#include <asio/ip/tcp.hpp>
-#include <asio/write.hpp>
-#include <catch2/catch_test_macros.hpp>
 
 #include "relayer/core/auth/Handshake.h"
 #include "relayer/core/protocol/Frame.h"
@@ -26,10 +25,9 @@ using relayer::Status;
 //
 // 单独跑：core_test.exe "[session]"
 
-namespace
-{
+namespace {
 
-constexpr const char *kPassword = "correct horse battery staple";
+constexpr const char* kPassword = "correct horse battery staple";
 
 // 事件循环推进工具来自 tests/support/IoPump.h。
 //
@@ -43,13 +41,12 @@ using relayer::test::pump;
 using relayer::test::pumpUntil;
 
 // 回环上的一对已连接 socket。测试"服务端单侧"行为时用，省掉连接建立。
-struct SocketPair
-{
+struct SocketPair {
     asio::ip::tcp::socket a;
     asio::ip::tcp::socket b;
 };
 
-SocketPair makeSocketPair(asio::io_context &ctx)
+SocketPair makeSocketPair(asio::io_context& ctx)
 {
     asio::ip::tcp::acceptor acc(ctx);
     acc.open(asio::ip::tcp::v4());
@@ -77,7 +74,7 @@ SessionConfig serverConfig(bool allowNoAuth = false, std::string peerId = "clien
     return c;
 }
 
-SessionConfig clientConfig(const std::string &password = kPassword, bool noAuth = false)
+SessionConfig clientConfig(const std::string& password = kPassword, bool noAuth = false)
 {
     SessionConfig c;
     c.role = Role::kClient;
@@ -87,8 +84,7 @@ SessionConfig clientConfig(const std::string &password = kPassword, bool noAuth 
 }
 
 // 一次会话里的观测结果。用 shared_ptr 持有，因为回调会活到测试作用域之后。
-struct Observation
-{
+struct Observation {
     std::vector<Frame> frames;
     int authenticated = 0;
     std::string assignedId;
@@ -97,19 +93,17 @@ struct Observation
     bool closeStatusSet = false;
 };
 
-SessionHandler makeHandler(const std::shared_ptr<Observation> &obs)
+SessionHandler makeHandler(const std::shared_ptr<Observation>& obs)
 {
     SessionHandler h;
     // 回调首参是触发它的那条会话。本文件的用例一次只跑一条连接，
     // 所以这里不关心它；但签名必须带上，否则编译不过。
-    h.onAuthenticated = [obs](Session &, std::string id)
-    {
+    h.onAuthenticated = [obs](Session&, std::string id) {
         ++obs->authenticated;
         obs->assignedId = std::move(id);
     };
-    h.onFrame = [obs](Session &, const Frame &f) { obs->frames.push_back(f); };
-    h.onClosed = [obs](std::string, Status s)
-    {
+    h.onFrame = [obs](Session&, const Frame& f) { obs->frames.push_back(f); };
+    h.onClosed = [obs](std::string, Status s) {
         ++obs->closed;
         obs->closeStatus = std::move(s);
         obs->closeStatusSet = true;
@@ -117,7 +111,7 @@ SessionHandler makeHandler(const std::shared_ptr<Observation> &obs)
     return h;
 }
 
-Frame makeFrame(FrameType type, const std::string &from = {}, const std::string &to = {})
+Frame makeFrame(FrameType type, const std::string& from = {}, const std::string& to = {})
 {
     Frame f;
     f.type = type;
@@ -126,7 +120,7 @@ Frame makeFrame(FrameType type, const std::string &from = {}, const std::string 
     return f;
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // 认证往返
@@ -149,21 +143,17 @@ TEST_CASE("handshake succeeds over loopback", "[session][integration]")
     auto clientObs = std::make_shared<Observation>();
 
     std::shared_ptr<Session> server;
-    acc.async_accept(
-        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
-        {
-            if (ec)
-            {
-                return;
-            }
-            server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
-        });
+    acc.async_accept([&](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        if (ec) {
+            return;
+        }
+        server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
+    });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
     REQUIRE(client != nullptr);
 
-    REQUIRE(
-        pumpUntil(ctx, [&] { return server->authenticated() && client->authenticated(); }, std::chrono::seconds(3)));
+    REQUIRE(pumpUntil(ctx, [&] { return server->authenticated() && client->authenticated(); }, std::chrono::seconds(3)));
 
     REQUIRE(server != nullptr);
 
@@ -203,15 +193,12 @@ TEST_CASE("wrong password fails fast with auth error", "[session][integration]")
     auto clientObs = std::make_shared<Observation>();
 
     std::shared_ptr<Session> server;
-    acc.async_accept(
-        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
-        {
-            if (ec)
-            {
-                return;
-            }
-            server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
-        });
+    acc.async_accept([&](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        if (ec) {
+            return;
+        }
+        server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
+    });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig("wrong password"), makeHandler(clientObs));
 
@@ -264,31 +251,26 @@ TEST_CASE("server allocates a fresh id through the allocator", "[session][integr
     int allocCalls = 0;
 
     std::shared_ptr<Session> server;
-    acc.async_accept(
-        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
-        {
-            if (ec)
-            {
-                return;
-            }
-            auto cfg = serverConfig();
-            cfg.initialPeerId = "should-be-ignored";
-            cfg.allocatePeerId = [&table, &hint, &allocCalls]
-            {
-                ++allocCalls;
-                auto id = allocateId(table, hint);
-                // 真实服务端分配完立刻登记，否则下一条连接会拿到同一个号。
-                (void)table.add(PeerInfo{id, "127.0.0.1:0"});
-                return id;
-            };
-            server = Session::accept(ctx, std::move(sock), cfg, makeHandler(serverObs));
-        });
+    acc.async_accept([&](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        if (ec) {
+            return;
+        }
+        auto cfg = serverConfig();
+        cfg.initialPeerId = "should-be-ignored";
+        cfg.allocatePeerId = [&table, &hint, &allocCalls] {
+            ++allocCalls;
+            auto id = allocateId(table, hint);
+            // 真实服务端分配完立刻登记，否则下一条连接会拿到同一个号。
+            (void)table.add(PeerInfo{id, "127.0.0.1:0"});
+            return id;
+        };
+        server = Session::accept(ctx, std::move(sock), cfg, makeHandler(serverObs));
+    });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
     // 要等**两端**都认证完：client->assignedId() 是服务端 kAnswerId 到达后
     // 才填上的，只等服务端会读到空 id。
-    REQUIRE(
-        pumpUntil(ctx, [&] { return server->authenticated() && client->authenticated(); }, std::chrono::seconds(3)));
+    REQUIRE(pumpUntil(ctx, [&] { return server->authenticated() && client->authenticated(); }, std::chrono::seconds(3)));
 
     REQUIRE(server != nullptr);
     REQUIRE(allocCalls == 1);
@@ -316,18 +298,15 @@ TEST_CASE("failed allocation falls back and still announces", "[session][integra
     auto clientObs = std::make_shared<Observation>();
 
     std::shared_ptr<Session> server;
-    acc.async_accept(
-        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
-        {
-            if (ec)
-            {
-                return;
-            }
-            auto cfg = serverConfig(false, "fallback-id");
-            // 同样是构造前配置：accept 返回时分配可能已经发生过了。
-            cfg.allocatePeerId = [] { return std::string{}; };
-            server = Session::accept(ctx, std::move(sock), cfg, makeHandler(serverObs));
-        });
+    acc.async_accept([&](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        if (ec) {
+            return;
+        }
+        auto cfg = serverConfig(false, "fallback-id");
+        // 同样是构造前配置：accept 返回时分配可能已经发生过了。
+        cfg.allocatePeerId = [] { return std::string{}; };
+        server = Session::accept(ctx, std::move(sock), cfg, makeHandler(serverObs));
+    });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
     // 这条用例要求的完成度比上一条更高：clientObs->authenticated 得是 2
@@ -336,7 +315,7 @@ TEST_CASE("failed allocation falls back and still announces", "[session][integra
 
     REQUIRE(server->assignedId() == "fallback-id");
     REQUIRE(client->assignedId() == "fallback-id");
-    REQUIRE(clientObs->authenticated == 2);  // 匿名一次 + 身份到位一次
+    REQUIRE(clientObs->authenticated == 2);   // 匿名一次 + 身份到位一次
 }
 
 TEST_CASE("late allocator install is rejected after auth", "[session][integration][id]")
@@ -360,26 +339,21 @@ TEST_CASE("late allocator install is rejected after auth", "[session][integratio
     auto clientObs = std::make_shared<Observation>();
 
     std::shared_ptr<Session> server;
-    acc.async_accept(
-        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
-        {
-            if (ec)
-            {
-                return;
-            }
-            server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
-        });
+    acc.async_accept([&](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        if (ec) {
+            return;
+        }
+        server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
+    });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
     REQUIRE(pumpUntil(ctx, [&] { return server->authenticated(); }, std::chrono::seconds(2)));
 
     bool called = false;
-    const bool accepted = server->setPeerIdAllocator(
-        [&called]
-        {
-            called = true;
-            return std::string{"too-late"};
-        });
+    const bool accepted = server->setPeerIdAllocator([&called] {
+        called = true;
+        return std::string{"too-late"};
+    });
     REQUIRE_FALSE(accepted);
     REQUIRE_FALSE(called);
     REQUIRE(server->assignedId() == "client-1");
@@ -409,19 +383,15 @@ TEST_CASE("business frames pass in both directions after auth", "[session][integ
     auto clientObs = std::make_shared<Observation>();
 
     std::shared_ptr<Session> server;
-    acc.async_accept(
-        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
-        {
-            if (ec)
-            {
-                return;
-            }
-            server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
-        });
+    acc.async_accept([&](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        if (ec) {
+            return;
+        }
+        server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
+    });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
-    REQUIRE(
-        pumpUntil(ctx, [&] { return client->authenticated() && server->authenticated(); }, std::chrono::seconds(2)));
+    REQUIRE(pumpUntil(ctx, [&] { return client->authenticated() && server->authenticated(); }, std::chrono::seconds(2)));
 
     // 客户端 -> 服务端
     REQUIRE(client->send(makeFrame(FrameType::kAskId, "client-1")).ok());
@@ -476,15 +446,12 @@ TEST_CASE("forward rewrites a forged from to the authenticated id", "[session][i
     auto clientObs = std::make_shared<Observation>();
 
     std::shared_ptr<Session> server;
-    acc.async_accept(
-        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
-        {
-            if (ec)
-            {
-                return;
-            }
-            server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
-        });
+    acc.async_accept([&](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        if (ec) {
+            return;
+        }
+        server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
+    });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
     REQUIRE(pumpUntil(ctx, [&] { return server != nullptr && server->authenticated(); }, std::chrono::seconds(3)));
@@ -517,15 +484,12 @@ TEST_CASE("server cannot send a frame claiming a third party", "[session][integr
     auto clientObs = std::make_shared<Observation>();
 
     std::shared_ptr<Session> server;
-    acc.async_accept(
-        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
-        {
-            if (ec)
-            {
-                return;
-            }
-            server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
-        });
+    acc.async_accept([&](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        if (ec) {
+            return;
+        }
+        server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
+    });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
     REQUIRE(pumpUntil(ctx, [&] { return server != nullptr && server->authenticated(); }, std::chrono::seconds(3)));
@@ -566,15 +530,12 @@ TEST_CASE("forward and send have disjoint identity rules", "[session][integratio
     auto clientObs = std::make_shared<Observation>();
 
     std::shared_ptr<Session> server;
-    acc.async_accept(
-        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
-        {
-            if (ec)
-            {
-                return;
-            }
-            server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
-        });
+    acc.async_accept([&](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        if (ec) {
+            return;
+        }
+        server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
+    });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
     REQUIRE(pumpUntil(ctx, [&] { return server != nullptr && server->authenticated(); }, std::chrono::seconds(3)));
@@ -607,15 +568,12 @@ TEST_CASE("forward without an authenticated identity is refused", "[session][int
     auto clientObs = std::make_shared<Observation>();
 
     std::shared_ptr<Session> server;
-    acc.async_accept(
-        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
-        {
-            if (ec)
-            {
-                return;
-            }
-            server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
-        });
+    acc.async_accept([&](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        if (ec) {
+            return;
+        }
+        server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
+    });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), makeHandler(clientObs));
     REQUIRE(pumpUntil(ctx, [&] { return server != nullptr && server->authenticated(); }, std::chrono::seconds(3)));
@@ -696,7 +654,7 @@ TEST_CASE("heartbeat ask is answered before auth", "[session][integration][heart
     // 会话没被断开，而且发出了应答
     REQUIRE(obs->closed == 0);
     REQUIRE_FALSE(server->authenticated());
-    REQUIRE(server->framesOut() == 2);  // Challenge + AnswerHeart
+    REQUIRE(server->framesOut() == 2);   // Challenge + AnswerHeart
 }
 
 TEST_CASE("session does not ping while idle clock is fresh", "[session][integration][heartbeat]")
@@ -708,7 +666,7 @@ TEST_CASE("session does not ping while idle clock is fresh", "[session][integrat
 
     auto obs = std::make_shared<Observation>();
     auto cfg = serverConfig();
-    cfg.handshakeTimeout = std::chrono::seconds(0);  // 关掉握手超时，单独看心跳
+    cfg.handshakeTimeout = std::chrono::seconds(0);   // 关掉握手超时，单独看心跳
     auto server = Session::accept(ctx, std::move(pair.a), cfg, makeHandler(obs));
     pump(ctx, std::chrono::milliseconds(100));
 
@@ -733,7 +691,7 @@ TEST_CASE("close notifies exactly once", "[session][integration]")
     pump(ctx, std::chrono::milliseconds(100));
 
     server->close();
-    server->close();  // 幂等
+    server->close();   // 幂等
 
     // 只通知一次。上方 peer 表之类的资源释放依赖这个承诺，所有断言都必须
     // 落在"等到了第一次"之后。
@@ -766,8 +724,7 @@ TEST_CASE("peer disconnect surfaces as a closed session", "[session][integration
 // onAuthenticated 的调用次数
 // ===========================================================================
 
-TEST_CASE("client onAuthenticated fires twice, once empty then with the real id",
-          "[session][integration][id]")
+TEST_CASE("client onAuthenticated fires twice, once empty then with the real id", "[session][integration][id]")
 {
     // 这条用例不是在"验证一个特性"，而是把**已知的行为**钉死，因为上层
     // 很容易在它上面栽跟头。
@@ -802,27 +759,22 @@ TEST_CASE("client onAuthenticated fires twice, once empty then with the real id"
     // 单独记下客户端每次拿到的 id，而不只是最后一次。
     std::vector<std::string> clientIds;
     auto clientHandler = makeHandler(clientObs);
-    clientHandler.onAuthenticated = [clientObs, &clientIds](Session &, std::string id)
-    {
+    clientHandler.onAuthenticated = [clientObs, &clientIds](Session&, std::string id) {
         ++clientObs->authenticated;
         clientObs->assignedId = id;
         clientIds.push_back(std::move(id));
     };
 
     std::shared_ptr<Session> server;
-    acc.async_accept(
-        [&](const asio::error_code &ec, asio::ip::tcp::socket sock)
-        {
-            if (ec)
-            {
-                return;
-            }
-            server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
-        });
+    acc.async_accept([&](const asio::error_code& ec, asio::ip::tcp::socket sock) {
+        if (ec) {
+            return;
+        }
+        server = Session::accept(ctx, std::move(sock), serverConfig(), makeHandler(serverObs));
+    });
 
     auto client = Session::connect(ctx, "127.0.0.1", port, clientConfig(), clientHandler);
-    REQUIRE(pumpUntil(ctx, [&] { return client->authenticated() && !client->assignedId().empty(); },
-                      std::chrono::seconds(3)));
+    REQUIRE(pumpUntil(ctx, [&] { return client->authenticated() && !client->assignedId().empty(); }, std::chrono::seconds(3)));
     // 再跑一小段，把可能存在的多余回调也收进来。
     pump(ctx, std::chrono::milliseconds(50));
 

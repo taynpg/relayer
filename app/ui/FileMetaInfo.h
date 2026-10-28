@@ -4,8 +4,7 @@
 #include <QString>
 
 QT_BEGIN_NAMESPACE
-namespace Ui
-{
+namespace Ui {
 class FileMetaInfo;
 }
 QT_END_NAMESPACE
@@ -24,21 +23,21 @@ class FileMetaInfo : public QDialog
     Q_OBJECT
 
 public:
-    explicit FileMetaInfo(QWidget *parent = nullptr);
+    explicit FileMetaInfo(QWidget* parent = nullptr);
     ~FileMetaInfo() override;
 
-    FileMetaInfo(const FileMetaInfo &) = delete;
-    FileMetaInfo &operator=(const FileMetaInfo &) = delete;
+    FileMetaInfo(const FileMetaInfo&) = delete;
+    FileMetaInfo& operator=(const FileMetaInfo&) = delete;
 
     // dirText：本地绝对路径，或远端的 `peer:/rel`（空 = 未知）。
     // size / modifiedMs 传 -1 表示"不适用"（目录的大小、远端没给时间）。
-    void setMeta(const QString &dirText, const QString &name, bool isDir, qint64 size, qint64 modifiedMs, bool remote);
+    void setMeta(const QString& dirText, const QString& name, bool isDir, qint64 size, qint64 modifiedMs, bool remote);
 
 private:
     void applyMeta();
-    void copyToClipboard(const QString &text, const QString &what);
+    void copyToClipboard(const QString& text, const QString& what);
 
-    Ui::FileMetaInfo *ui_ = nullptr;
+    Ui::FileMetaInfo* ui_ = nullptr;
 
     QString dirText_;
     QString name_;

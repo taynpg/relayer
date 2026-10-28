@@ -1,13 +1,11 @@
 #include "relayer/core/session/Session.h"
 
-#include <utility>
-
 #include <asio/post.hpp>
+#include <utility>
 
 #include "relayer/core/session/PeerTable.h"
 
-namespace relayer::core::session
-{
+namespace relayer::core::session {
 
 // 访问桥。
 //
@@ -18,24 +16,22 @@ namespace relayer::core::session
 // 必须定义在匿名命名空间**之外**：定义在里面就成了
 // `session::{anonymous}::SessionAccess`，与头文件里 friend 声明的
 // `session::SessionAccess` 不是同一个类型，友元关系不成立。
-struct SessionAccess
-{
-    static void established(Session &s)
+struct SessionAccess {
+    static void established(Session& s)
     {
         s.notifyEstablished();
     }
-    static void inbound(Session &s, const Frame &f)
+    static void inbound(Session& s, const Frame& f)
     {
         s.handleInbound(f);
     }
-    static void transportClosed(Session &s, Status st)
+    static void transportClosed(Session& s, Status st)
     {
         s.handleTransportClosed(std::move(st));
     }
 };
 
-namespace
-{
+namespace {
 
 using transport::ConnectionHandler;
 using transport::HeartbeatAction;
@@ -57,53 +53,43 @@ Status failStatus(ErrorCode code, std::string message)
 // 为什么必须是 weak_ptr：Session 持有 conn_，conn_ 的回调若强引用 Session，
 // 就形成环——两者引用计数永远不归零，连接和会话一起泄漏。反过来，回调里
 // 拿不到强引用说明 Session 已经销毁，直接返回就是正确的行为。
-ConnectionHandler makeHandler(const std::weak_ptr<Session> &weak)
+ConnectionHandler makeHandler(const std::weak_ptr<Session>& weak)
 {
     ConnectionHandler ch;
 
-    ch.onEstablished = [weak]
-    {
-        if (auto self = weak.lock())
-        {
+    ch.onEstablished = [weak] {
+        if (auto self = weak.lock()) {
             SessionAccess::established(*self);
         }
     };
-    ch.onFrame = [weak](const Frame &f)
-    {
-        if (auto self = weak.lock())
-        {
+    ch.onFrame = [weak](const Frame& f) {
+        if (auto self = weak.lock()) {
             SessionAccess::inbound(*self, f);
         }
     };
-    ch.onClosed = [weak](Status s)
-    {
-        if (auto self = weak.lock())
-        {
+    ch.onClosed = [weak](Status s) {
+        if (auto self = weak.lock()) {
             SessionAccess::transportClosed(*self, std::move(s));
         }
     };
     return ch;
 }
 
-}  // namespace
+}   // namespace
 
 // ---------------------------------------------------------------------------
 // 构造与启动
 // ---------------------------------------------------------------------------
 
-Session::Session(asio::io_context &ctx, SessionConfig config, SessionHandler handler)
-    : ctx_(ctx)
-    , config_(std::move(config))
-    , handler_(std::move(handler))
-    , handshakeTimer_(ctx)
-    , heartbeatTimer_(ctx)
-    , selfId_(config_.serverId)
+Session::Session(asio::io_context& ctx, SessionConfig config, SessionHandler handler)
+    : ctx_(ctx), config_(std::move(config)), handler_(std::move(handler)), handshakeTimer_(ctx), heartbeatTimer_(ctx),
+      selfId_(config_.serverId)
 {
 }
 
 Session::~Session() = default;
 
-std::shared_ptr<Session> Session::connect(asio::io_context &ctx, const std::string &host, std::uint16_t port,
+std::shared_ptr<Session> Session::connect(asio::io_context& ctx, const std::string& host, std::uint16_t port,
                                           SessionConfig config, SessionHandler handler)
 {
     config.role = Role::kClient;
@@ -117,8 +103,7 @@ std::shared_ptr<Session> Session::connect(asio::io_context &ctx, const std::stri
     // Challenge），但相位要先进 kWaitChallenge——否则收到 Challenge 时
     // 会被判成"握手还没开始"。
     const auto st = session->clientAuth_->start();
-    if (!st.ok())
-    {
+    if (!st.ok()) {
         // 启动失败几乎只可能是 CSPRNG 不可用。这种环境下继续跑没有意义，
         // 但要通过 onClosed 通知而不是抛出去——上层只有一条结束路径。
         session->finish(st, false);
@@ -132,7 +117,7 @@ std::shared_ptr<Session> Session::connect(asio::io_context &ctx, const std::stri
     return session;
 }
 
-std::shared_ptr<Session> Session::accept(asio::io_context &ctx, asio::ip::tcp::socket socket, SessionConfig config,
+std::shared_ptr<Session> Session::accept(asio::io_context& ctx, asio::ip::tcp::socket socket, SessionConfig config,
                                          SessionHandler handler)
 {
     config.role = Role::kServer;
@@ -153,8 +138,8 @@ std::shared_ptr<Session> Session::accept(asio::io_context &ctx, asio::ip::tcp::s
     // 空身份是安全的默认值：identityToBind 返回空 → 转发被拒。忘了配 id
     // 的部署不会静默变成"可以任意冒充他人"。
 
-    session->conn_ = Connection::adopt(ctx, std::move(socket), makeHandler(std::weak_ptr<Session>(session)),
-                                       session->config_.connection);
+    session->conn_ =
+        Connection::adopt(ctx, std::move(socket), makeHandler(std::weak_ptr<Session>(session)), session->config_.connection);
     return session;
 }
 
@@ -164,8 +149,7 @@ std::shared_ptr<Session> Session::accept(asio::io_context &ctx, asio::ip::tcp::s
 
 void Session::notifyEstablished()
 {
-    if (finished_)
-    {
+    if (finished_) {
         return;
     }
 
@@ -176,16 +160,14 @@ void Session::notifyEstablished()
     // 的 ping，而真正该测的"连上之后有没有动静"根本没测到。
     heartbeat_.reset(Clock::now());
 
-    if (config_.role == Role::kClient && clientAuth_ && clientAuth_->established())
-    {
+    if (config_.role == Role::kClient && clientAuth_ && clientAuth_->established()) {
         // 客户端配置成 kNoAuth：start() 时已处于 kEstablished，
         // 不需要等服务端的任何帧。
         enterAuthenticated();
         return;
     }
 
-    if (config_.role == Role::kServer)
-    {
+    if (config_.role == Role::kServer) {
         // 服务端发第一帧 Challenge（PROTOCOL.md §7.1）。
         //
         // 放在这里而不是构造函数里：构造函数执行时框架还没接管 socket。
@@ -194,22 +176,19 @@ void Session::notifyEstablished()
         Frame challenge;
         bool hasOut = false;
         const auto st = serverAuth_->start(challenge, hasOut);
-        if (!st.ok())
-        {
+        if (!st.ok()) {
             finish(st, true);
             return;
         }
 
-        if (!hasOut)
-        {
+        if (!hasOut) {
             // allowNoAuth 为真：服务端不发 Challenge，直接进入已认证相位。
             enterAuthenticated();
             return;
         }
 
         const auto sent = conn_->send(challenge);
-        if (!sent.ok())
-        {
+        if (!sent.ok()) {
             finish(sent, true);
             return;
         }
@@ -225,29 +204,24 @@ void Session::notifyEstablished()
 // 握手
 // ---------------------------------------------------------------------------
 
-Status Session::stepHandshake(const Frame &in)
+Status Session::stepHandshake(const Frame& in)
 {
     Frame reply;
     bool hasOut = false;
 
     Status st = Status::Ok();
-    if (config_.role == Role::kServer)
-    {
+    if (config_.role == Role::kServer) {
         st = serverAuth_->handleFrame(in, reply, hasOut);
-    }
-    else
-    {
+    } else {
         st = clientAuth_->handleFrame(in, reply, hasOut);
     }
 
     // 无论成功失败，状态机都可能吐出一帧（Challenge / Response / Result / Abort）。
     // 失败路径上的 abort 尤其重要：不发它，对端只能靠超时才知道失败——那
     // 是 30 秒的空白，用户看到的是"卡住了"而不是"口令错了"。
-    if (hasOut)
-    {
+    if (hasOut) {
         const auto sent = conn_->send(reply);
-        if (!sent.ok())
-        {
+        if (!sent.ok()) {
             return sent;
         }
         ++framesOut_;
@@ -260,10 +234,9 @@ Status Session::stepHandshake(const Frame &in)
 // 入站分派
 // ---------------------------------------------------------------------------
 
-void Session::handleInbound(const Frame &frame)
+void Session::handleInbound(const Frame& frame)
 {
-    if (finished_)
-    {
+    if (finished_) {
         return;
     }
 
@@ -277,8 +250,7 @@ void Session::handleInbound(const Frame &frame)
     // 策略层判定。所有"该不该收"的判断都在那里，本层不重复。
     const auto decision = checkInbound(config_.role, authenticated_, frame);
 
-    switch (decision.action)
-    {
+    switch (decision.action) {
     case InboundAction::kAnswerHeart:
         sendHeartbeatAnswer();
         return;
@@ -297,19 +269,15 @@ void Session::handleInbound(const Frame &frame)
         break;
     }
 
-    if (!authenticated_)
-    {
+    if (!authenticated_) {
         const auto st = stepHandshake(frame);
-        if (!st.ok())
-        {
+        if (!st.ok()) {
             finish(st, true);
             return;
         }
 
-        const bool nowEstablished =
-            (config_.role == Role::kServer) ? serverAuth_->established() : clientAuth_->established();
-        if (nowEstablished)
-        {
+        const bool nowEstablished = (config_.role == Role::kServer) ? serverAuth_->established() : clientAuth_->established();
+        if (nowEstablished) {
             enterAuthenticated();
         }
         return;
@@ -324,11 +292,9 @@ void Session::handleInbound(const Frame &frame)
     // 但认证帧在已认证相位出现仍要走一遍状态机：它会把这种情况判成重放
     // 并返回失败。这就是"认证后收到 Challenge"的处理路径，不需要在这里
     // 单独写一个 if。
-    if (protocol::isAuthType(frame.type))
-    {
+    if (protocol::isAuthType(frame.type)) {
         const auto st = stepHandshake(frame);
-        if (!st.ok())
-        {
+        if (!st.ok()) {
             finish(st, true);
         }
         return;
@@ -338,25 +304,21 @@ void Session::handleInbound(const Frame &frame)
     //
     // 在这里拦下来而不是交给上层，是因为 assignedId() 是 Session 自己的
     // 状态；让上层去调 setAssignedId 就等于把"谁维护这个字段"搞成两处。
-    if (config_.role == Role::kClient && frame.type == FrameType::kAnswerId)
-    {
+    if (config_.role == Role::kClient && frame.type == FrameType::kAnswerId) {
         std::uint8_t status = 1;
         std::string id;
         std::string err;
-        if (!decodeAnswerId(frame.body, status, id, err))
-        {
+        if (!decodeAnswerId(frame.body, status, id, err)) {
             ++framesRejected_;
             finish(failStatus(ErrorCode::kProtocol, "malformed answer_id: " + err), true);
             return;
         }
-        if (status != 0)
-        {
+        if (status != 0) {
             // 非零 status 有两种来源：认证后"没分配到 id"（既有语义，可以
             // 容忍——服务端没配分配器时就是这样），以及我们自己刚发的
             // kClaimId 被拒。后者必须当场失败：用户声明了身份，达不成就
             // 没有可用的 id，继续跑只会拿着临时号发文件、发到错的人那里。
-            if (claimPending_)
-            {
+            if (claimPending_) {
                 claimPending_ = false;
                 claimTarget_.clear();
                 const bool taken = status == static_cast<std::uint8_t>(IdAnswerStatus::kTaken);
@@ -374,34 +336,29 @@ void Session::handleInbound(const Frame &frame)
         // 只有在"拿到的就是这个声明的名字"时才算声明结束。服务端在认证
         // 完成时已发过一次临时号，那条应答可能比声明还晚到——它同样是
         // status=0，但显然不代表声明有了结果。
-        if (claimPending_ && (claimTarget_.empty() || id == claimTarget_))
-        {
+        if (claimPending_ && (claimTarget_.empty() || id == claimTarget_)) {
             claimPending_ = false;
             claimTarget_.clear();
         }
-        if (assignedId_ != id)
-        {
+        if (assignedId_ != id) {
             assignedId_ = id;
             // 身份变了要再通知一次：上层可能要在 UI 上显示它，或者
             // 用它做路由。只在真的变化时通知，避免重复回调。
-            if (handler_.onAuthenticated)
-            {
+            if (handler_.onAuthenticated) {
                 handler_.onAuthenticated(*this, assignedId_);
             }
         }
         return;
     }
 
-    if (handler_.onFrame)
-    {
+    if (handler_.onFrame) {
         handler_.onFrame(*this, frame);
     }
 }
 
 void Session::enterAuthenticated()
 {
-    if (authenticated_)
-    {
+    if (authenticated_) {
         return;
     }
     authenticated_ = true;
@@ -413,8 +370,7 @@ void Session::enterAuthenticated()
     // 30 秒的测试里永远不会出现。
     handshakeTimer_.cancel();
 
-    if (config_.role == Role::kServer)
-    {
+    if (config_.role == Role::kServer) {
         enterAuthenticatedServer();
         return;
     }
@@ -430,8 +386,7 @@ void Session::enterAuthenticated()
     //
     // 上层因此可能连着收到两次 onAuthenticated：先空身份、后真实 id。
     // 回调必须写成幂等的——Cli 那边靠"只在 id 变化时才做后续动作"来保证。
-    if (handler_.onAuthenticated)
-    {
+    if (handler_.onAuthenticated) {
         handler_.onAuthenticated(*this, assignedId_);
     }
 }
@@ -454,12 +409,10 @@ void Session::enterAuthenticatedServer()
     // "占了 peer 表里的一个号"，而握手失败的连接不该占号。之前放在
     // constructor 里试过：失败路径要额外补一次"还号"，那条路径一旦
     // 漏掉就是号段泄漏。现在只有一条入口。
-    if (config_.allocatePeerId)
-    {
+    if (config_.allocatePeerId) {
         assignedId_ = config_.allocatePeerId();
     }
-    if (assignedId_.empty() && !config_.initialPeerId.empty())
-    {
+    if (assignedId_.empty() && !config_.initialPeerId.empty()) {
         assignedId_ = config_.initialPeerId;
     }
 
@@ -470,49 +423,41 @@ void Session::enterAuthenticatedServer()
     // 在一次往返之后再检查一遍。
     Frame answer;
     answer.type = FrameType::kAnswerId;
-    if (encodeAnswerId(assignedId_, answer.body).ok())
-    {
+    if (encodeAnswerId(assignedId_, answer.body).ok()) {
         (void)deliver(answer);
     }
 
-    if (handler_.onAuthenticated)
-    {
+    if (handler_.onAuthenticated) {
         handler_.onAuthenticated(*this, assignedId_);
     }
 }
 
 void Session::startHandshakeTimer()
 {
-    if (config_.handshakeTimeout.count() <= 0)
-    {
+    if (config_.handshakeTimeout.count() <= 0) {
         return;
     }
 
     handshakeTimer_.expires_after(config_.handshakeTimeout);
-    handshakeTimer_.async_wait(
-        [weak = weak_from_this()](const asio::error_code &ec)
-        {
-            if (ec)
-            {
-                // operation_aborted：定时器被取消（握手成功或会话已结束）。
-                // 这不是错误，正常返回。
-                return;
-            }
-            auto self = weak.lock();
-            if (!self || self->finished_ || self->authenticated_)
-            {
-                return;
-            }
+    handshakeTimer_.async_wait([weak = weak_from_this()](const asio::error_code& ec) {
+        if (ec) {
+            // operation_aborted：定时器被取消（握手成功或会话已结束）。
+            // 这不是错误，正常返回。
+            return;
+        }
+        auto self = weak.lock();
+        if (!self || self->finished_ || self->authenticated_) {
+            return;
+        }
 
-            ++self->handshakeTimeouts_;
-            self->finish(failStatus(ErrorCode::kTimeout, "handshake did not complete in time"), true);
-        });
+        ++self->handshakeTimeouts_;
+        self->finish(failStatus(ErrorCode::kTimeout, "handshake did not complete in time"), true);
+    });
 }
 
 void Session::startHeartbeatTimer()
 {
-    if (heartbeatTimerStarted_ || finished_)
-    {
+    if (heartbeatTimerStarted_ || finished_) {
         return;
     }
     heartbeatTimerStarted_ = true;
@@ -521,33 +466,28 @@ void Session::startHeartbeatTimer()
 
 void Session::scheduleNextHeartbeat()
 {
-    if (finished_)
-    {
+    if (finished_) {
         return;
     }
 
     heartbeatTimer_.expires_after(transport::heartbeat::kTickInterval);
-    heartbeatTimer_.async_wait(
-        [weak = weak_from_this()](const asio::error_code &ec)
-        {
-            if (ec)
-            {
-                // operation_aborted：会话已结束，定时器被 cancel。正常退出。
-                return;
-            }
-            auto self = weak.lock();
-            if (!self || self->finished_)
-            {
-                return;
-            }
+    heartbeatTimer_.async_wait([weak = weak_from_this()](const asio::error_code& ec) {
+        if (ec) {
+            // operation_aborted：会话已结束，定时器被 cancel。正常退出。
+            return;
+        }
+        auto self = weak.lock();
+        if (!self || self->finished_) {
+            return;
+        }
 
-            self->pollHeartbeatNow();
+        self->pollHeartbeatNow();
 
-            // 必须先判 finished_ 再排下一轮：pollHeartbeatNow() 可能已经
-            // 因为超时把会话关掉了。不判的话，已结束的会话会继续留一个
-            // 每秒唤醒的定时器，进程里所有连接都这么泄漏的话空转开销很可观。
-            self->scheduleNextHeartbeat();
-        });
+        // 必须先判 finished_ 再排下一轮：pollHeartbeatNow() 可能已经
+        // 因为超时把会话关掉了。不判的话，已结束的会话会继续留一个
+        // 每秒唤醒的定时器，进程里所有连接都这么泄漏的话空转开销很可观。
+        self->scheduleNextHeartbeat();
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -562,8 +502,7 @@ void Session::sendHeartbeatAnswer()
     // 心跳帧不带身份：它是连接层的活性探测，与身份无关（PROTOCOL.md §11.2）。
     // 带上 from 反而会触发服务端的出站断言，还得解释"为什么心跳可以例外"。
     const auto st = conn_->send(answer);
-    if (st.ok())
-    {
+    if (st.ok()) {
         ++framesOut_;
     }
     // 发不出去不单独处理：连接已经不可用时，下一次读/写回调自然会把连接
@@ -572,23 +511,19 @@ void Session::sendHeartbeatAnswer()
 
 void Session::pollHeartbeatNow()
 {
-    if (finished_)
-    {
+    if (finished_) {
         return;
     }
 
-    switch (heartbeat_.check(Clock::now()))
-    {
+    switch (heartbeat_.check(Clock::now())) {
     case HeartbeatAction::kNone:
         return;
 
-    case HeartbeatAction::kSendPing:
-    {
+    case HeartbeatAction::kSendPing: {
         Frame ping;
         ping.type = FrameType::kAskHeart;
         const auto st = conn_->send(ping);
-        if (!st.ok())
-        {
+        if (!st.ok()) {
             finish(st, true);
             return;
         }
@@ -607,22 +542,19 @@ void Session::pollHeartbeatNow()
 // 发送
 // ---------------------------------------------------------------------------
 
-Status Session::send(const Frame &frame)
+Status Session::send(const Frame& frame)
 {
-    if (finished_)
-    {
+    if (finished_) {
         return failStatus(ErrorCode::kCancelled, "session is closed");
     }
-    if (!authenticated_)
-    {
+    if (!authenticated_) {
         // 未认证就发业务帧：上层调用顺序错了。挡在本地，而不是让帧发出去
         // 被对端断开——错误发生在本地就在本地报，日志才能指到真正的调用点。
         return failStatus(ErrorCode::kAuthFailed, "cannot send business frame before authentication");
     }
 
     const auto check = checkOutbound(config_.role, frame, config_.serverId);
-    if (!check.allowed)
-    {
+    if (!check.allowed) {
         ++framesRejected_;
         // **不**断开连接：这是本地实现 bug，对端没做错事。断开只会把问题
         // 推给对端，让排查方向跑偏。
@@ -634,12 +566,10 @@ Status Session::send(const Frame &frame)
 
 Status Session::claimPeerId(std::string_view id)
 {
-    if (config_.role != Role::kClient)
-    {
+    if (config_.role != Role::kClient) {
         return failStatus(ErrorCode::kProtocol, "claimPeerId is client-only");
     }
-    if (!authenticated_)
-    {
+    if (!authenticated_) {
         // 服务端只在认证完成后才处理业务帧；提前发会被当成相位错误断开。
         return failStatus(ErrorCode::kAuthFailed, "claimPeerId requires an authenticated session");
     }
@@ -647,8 +577,7 @@ Status Session::claimPeerId(std::string_view id)
     Frame claim;
     claim.type = FrameType::kClaimId;
     // 本地先校验格式：非法 id 发出去也是被拒，早失败能指到调用点。
-    if (const auto st = encodeClaimId(id, claim.body); !st.ok())
-    {
+    if (const auto st = encodeClaimId(id, claim.body); !st.ok()) {
         return st;
     }
 
@@ -656,8 +585,7 @@ Status Session::claimPeerId(std::string_view id)
     claimTarget_.assign(id);
     claimPending_ = true;
     const auto st = send(claim);
-    if (!st.ok())
-    {
+    if (!st.ok()) {
         claimPending_ = false;
         claimTarget_.clear();
     }
@@ -666,16 +594,13 @@ Status Session::claimPeerId(std::string_view id)
 
 Status Session::assignPeerId(std::string newId)
 {
-    if (config_.role != Role::kServer)
-    {
+    if (config_.role != Role::kServer) {
         return failStatus(ErrorCode::kProtocol, "assignPeerId is server-only");
     }
-    if (!authenticated_)
-    {
+    if (!authenticated_) {
         return failStatus(ErrorCode::kAuthFailed, "assignPeerId requires an authenticated session");
     }
-    if (!isValidPeerId(newId))
-    {
+    if (!isValidPeerId(newId)) {
         return failStatus(ErrorCode::kProtocol, "assigned id is not a valid routing field");
     }
 
@@ -683,8 +608,7 @@ Status Session::assignPeerId(std::string newId)
 
     Frame answer;
     answer.type = FrameType::kAnswerId;
-    if (const auto st = encodeAnswerId(assignedId_, answer.body); !st.ok())
-    {
+    if (const auto st = encodeAnswerId(assignedId_, answer.body); !st.ok()) {
         return st;
     }
     // 通知失败不当成致命错误：对端可能刚好断开，此时它已经收不到任何东西。
@@ -692,8 +616,7 @@ Status Session::assignPeerId(std::string newId)
 
     // 上层（Server）靠这次回调把注册表里的键换掉。通知走的是同一条
     // "身份变了要再说一次"的路径，客户端侧无需新增处理。
-    if (handler_.onAuthenticated)
-    {
+    if (handler_.onAuthenticated) {
         handler_.onAuthenticated(*this, assignedId_);
     }
     return Status::Ok();
@@ -701,12 +624,10 @@ Status Session::assignPeerId(std::string newId)
 
 Status Session::forward(Frame frame, std::string_view authenticatedId)
 {
-    if (finished_)
-    {
+    if (finished_) {
         return failStatus(ErrorCode::kCancelled, "session is closed");
     }
-    if (!authenticated_)
-    {
+    if (!authenticated_) {
         return failStatus(ErrorCode::kAuthFailed, "cannot forward before authentication");
     }
 
@@ -724,14 +645,12 @@ Status Session::forward(Frame frame, std::string_view authenticatedId)
     // 但这里仍然要断言，而不是直接发：applyIdentityBinding 在"未认证"
     // 或"客户端侧"会返回空串且不改写，那样 from 仍是对方的自称。漏掉这个
     // 检查，第 484 行的返回值就白算了。
-    if (bound.empty() || bound != authenticatedId)
-    {
+    if (bound.empty() || bound != authenticatedId) {
         ++framesRejected_;
         return failStatus(ErrorCode::kProtocol, "forward requires an authenticated identity to bind");
     }
 
-    if (frame.to.empty())
-    {
+    if (frame.to.empty()) {
         // 转发必须有目标。空 to 是"发给服务端自己"的写法（§11.3），
         // 那类帧走 send() 而不是 forward()。
         ++framesRejected_;
@@ -741,13 +660,12 @@ Status Session::forward(Frame frame, std::string_view authenticatedId)
     return deliver(frame);
 }
 
-Status Session::deliver(const Frame &frame)
+Status Session::deliver(const Frame& frame)
 {
     // 真正落到连接上的唯一出口。两个公开的发送入口都先做完各自的断言再
     // 调它，这样"计数"和"实际写出"只有一处，不会出现"一个入口忘了计数"。
     const auto st = conn_->send(frame);
-    if (st.ok())
-    {
+    if (st.ok()) {
         ++framesOut_;
     }
     return st;
@@ -772,8 +690,7 @@ void Session::handleTransportClosed(Status status)
 
 void Session::finish(Status status, bool closeTransport)
 {
-    if (finished_)
-    {
+    if (finished_) {
         return;
     }
     finished_ = true;
@@ -781,8 +698,7 @@ void Session::finish(Status status, bool closeTransport)
     handshakeTimer_.cancel();
     heartbeatTimer_.cancel();
 
-    if (closeTransport && conn_)
-    {
+    if (closeTransport && conn_) {
         conn_->close();
     }
 
@@ -790,8 +706,7 @@ void Session::finish(Status status, bool closeTransport)
     // Session 引用，那一刻 this 就没了。与 Connection::doClose 里的做法
     // 是同一个理由——所以 id 也必须是拷贝，不能到投递时才去读 this。
     auto notify = handler_.onClosed;
-    if (!notify)
-    {
+    if (!notify) {
         return;
     }
     std::string id = assignedId_;
@@ -799,8 +714,8 @@ void Session::finish(Status status, bool closeTransport)
     // 投递而不是同步调用。finish() 有很多调用点（包括在 Connection 的帧
     // 回调里），同步通知会让上层在"会话还在处理这一帧"的栈上就把会话
     // 拆掉，之后本函数剩下的语句会访问已销毁的对象。
-    asio::post(ctx_, [n = std::move(notify), id = std::move(id), s = std::move(status)]() mutable
-               { n(std::move(id), std::move(s)); });
+    asio::post(ctx_,
+               [n = std::move(notify), id = std::move(id), s = std::move(status)]() mutable { n(std::move(id), std::move(s)); });
 }
 
 std::string Session::peer() const
@@ -808,4 +723,4 @@ std::string Session::peer() const
     return conn_ ? conn_->peer() : std::string{};
 }
 
-}  // namespace relayer::core::session
+}   // namespace relayer::core::session

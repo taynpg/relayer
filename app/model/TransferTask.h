@@ -17,27 +17,24 @@
 //   relDir    <- FileItemData::remoteRoot 的 v2 语义化：不再是对方的
 //                绝对路径，而是"对方接收根目录之下的相对目录"（协议层
 //                由 kFileRequestSend 的 root 字段承载，见 PROTOCOL.md §9.4）
-namespace relayer::app
-{
+namespace relayer::app {
 
-struct RelayTaskItem
-{
-    QString name;  // 文件/目录名（不含路径）
+struct RelayTaskItem {
+    QString name;   // 文件/目录名（不含路径）
     bool isDir = false;
-    QString localDir;  // 本地根目录（文件所在目录，或目录本身）
-    QString peerId;    // 目标对端 id（空 = 未指定，发送前必须补上）
-    QString relDir;    // 对方接收根目录之下的相对目录（可为空 = 直接落根）
+    QString localDir;   // 本地根目录（文件所在目录，或目录本身）
+    QString peerId;     // 目标对端 id（空 = 未指定，发送前必须补上）
+    QString relDir;     // 对方接收根目录之下的相对目录（可为空 = 直接落根）
 };
 
-inline bool operator==(const RelayTaskItem &a, const RelayTaskItem &b)
+inline bool operator==(const RelayTaskItem& a, const RelayTaskItem& b)
 {
-    return a.name == b.name && a.isDir == b.isDir && a.localDir == b.localDir && a.peerId == b.peerId &&
-           a.relDir == b.relDir;
+    return a.name == b.name && a.isDir == b.isDir && a.localDir == b.localDir && a.peerId == b.peerId && a.relDir == b.relDir;
 }
 
 using RelayTaskItems = QList<RelayTaskItem>;
 
-}  // namespace relayer::app
+}   // namespace relayer::app
 
 Q_DECLARE_METATYPE(relayer::app::RelayTaskItem)
 Q_DECLARE_METATYPE(relayer::app::RelayTaskItems)

@@ -24,8 +24,7 @@
 // 让缓冲无限增长。所以这里有一个硬上限，超了就判协议错误——宁可断开，
 // 也不能让一条连接吃光内存。
 
-namespace relayer::core::transport
-{
+namespace relayer::core::transport {
 
 // 缓冲上限。
 //
@@ -45,8 +44,8 @@ public:
     // 协议错误（版本不符 / CRC 错）或缓冲溢出。
     //
     // 注意：追加成功不代表能解出帧——帧可能还没收全。解帧用 next()。
-    [[nodiscard]] Status append(const char *data, std::size_t len);
-    [[nodiscard]] Status append(const std::vector<char> &data);
+    [[nodiscard]] Status append(const char* data, std::size_t len);
+    [[nodiscard]] Status append(const std::vector<char>& data);
 
     // 尝试取出一帧。
     //
@@ -56,7 +55,7 @@ public:
     //
     // 用法是 while (reader.next(f, st)) { handle(f); } —— 一次 read 之后
     // 要把能解的帧全部解完，不能只解一个就回去等。
-    [[nodiscard]] bool next(protocol::Frame &frame, Status &status);
+    [[nodiscard]] bool next(protocol::Frame& frame, Status& status);
 
     // 当前缓冲的字节数（诊断用）
     [[nodiscard]] std::size_t buffered() const noexcept
@@ -90,4 +89,4 @@ private:
     std::uint64_t garbageBytes_ = 0;
 };
 
-}  // namespace relayer::core::transport
+}   // namespace relayer::core::transport

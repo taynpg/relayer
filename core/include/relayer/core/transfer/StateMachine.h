@@ -21,8 +21,7 @@
 //   另一个好处是：这张表就是 PROTOCOL.md §8.2 那张表的可执行版本。文档改了
 //   而代码没改，工具能查出来（tools/check_transition_doc.py）。
 
-namespace relayer::core::transfer
-{
+namespace relayer::core::transfer {
 
 // ---------------------------------------------------------------------------
 // 状态
@@ -31,42 +30,39 @@ namespace relayer::core::transfer
 // 与 PROTOCOL.md §8.1 一一对应。数值不稳定，**不要**序列化到线上或日志里
 // 依赖数字：日志用 toString()。
 
-enum class State
-{
-    kIdle,          // 连接已建立，未开始任何会话
-    kHandshaking,   // 认证握手中
-    kTransferring,  // 正在传数据块
-    kFinalizing,    // 数据发完，等最终校验与落盘确认
-    kInterrupted,   // 中断（网络/取消/对端消失），可续传
-    kDone,          // 成功完成；也用于"作废"
+enum class State {
+    kIdle,           // 连接已建立，未开始任何会话
+    kHandshaking,    // 认证握手中
+    kTransferring,   // 正在传数据块
+    kFinalizing,     // 数据发完，等最终校验与落盘确认
+    kInterrupted,    // 中断（网络/取消/对端消失），可续传
+    kDone,           // 成功完成；也用于"作废"
 };
 
 // ---------------------------------------------------------------------------
 // 事件
 // ---------------------------------------------------------------------------
 
-enum class Event
-{
-    kStartHandshake,  // Idle -> Handshaking
-    kAuthOk,          // 握手通过
-    kAuthFail,        // 握手失败 -> 作废
-    kStartTransfer,   // 开始传数据
-    kAllChunksAcked,  // 所有块都已确认 -> 进入收尾
-    kInterrupt,       // 中断 -> 可续传
-    kVerifyOk,        // 收尾校验通过 -> 完成
-    kVerifyFail,      // 收尾校验失败 -> 可续传
-    kResume,          // 从 Interrupted 恢复
-    kAbort,           // 放弃 -> 完成（作废）
+enum class Event {
+    kStartHandshake,   // Idle -> Handshaking
+    kAuthOk,           // 握手通过
+    kAuthFail,         // 握手失败 -> 作废
+    kStartTransfer,    // 开始传数据
+    kAllChunksAcked,   // 所有块都已确认 -> 进入收尾
+    kInterrupt,        // 中断 -> 可续传
+    kVerifyOk,         // 收尾校验通过 -> 完成
+    kVerifyFail,       // 收尾校验失败 -> 可续传
+    kResume,           // 从 Interrupted 恢复
+    kAbort,            // 放弃 -> 完成（作废）
 };
 
 // 遍历用的边界常量。加新状态/事件时必须同步更新这两个值和 kTransitionCount
 // 的期望值，否则 tests/core/StateMachineTest.cpp 的完整性测试会失败——这是
 // 刻意的：漏更新等于漏测试。
-namespace detail
-{
+namespace detail {
 inline constexpr std::size_t kStateCount = 6;
 inline constexpr std::size_t kEventCount = 10;
-}  // namespace detail
+}   // namespace detail
 
 // 稳定名称，用于日志与文档比对。未定义值返回 "unknown"。
 [[nodiscard]] std::string_view toString(State s) noexcept;
@@ -85,8 +81,7 @@ inline constexpr std::size_t kEventCount = 10;
 // 转移表
 // ---------------------------------------------------------------------------
 
-struct Transition
-{
+struct Transition {
     State from;
     Event event;
     State to;
@@ -125,7 +120,7 @@ inline constexpr std::size_t kTransitionCount = sizeof(kTransitions) / sizeof(kT
 //
 // 返回指针而不是 optional<State>，是为了让调用方在日志里能同时拿到 from/to
 // 和事件，而不必再拼一次。
-[[nodiscard]] const Transition *findTransition(State from, Event event) noexcept;
+[[nodiscard]] const Transition* findTransition(State from, Event event) noexcept;
 
 // 等价于 findTransition(...) != nullptr。
 [[nodiscard]] bool isLegalTransition(State from, Event event) noexcept;
@@ -166,4 +161,4 @@ private:
     State state_;
 };
 
-}  // namespace relayer::core::transfer
+}   // namespace relayer::core::transfer

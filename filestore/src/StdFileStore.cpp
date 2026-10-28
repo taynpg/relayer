@@ -19,10 +19,8 @@ namespace fs = std::filesystem;
 #include <windows.h>
 #endif
 
-namespace relayer::filestore
-{
-namespace
-{
+namespace relayer::filestore {
+namespace {
 
 // errno 到 ErrorCode 的统一映射。
 // 注意 Windows 上 fopen 失败时 errno 是 CRT 的映射值（EBUSY 等），
@@ -31,8 +29,7 @@ namespace
 // 原生 API 单独判断。
 ErrorCode errnoToCode(int err)
 {
-    switch (detail::classifySysError(err))
-    {
+    switch (detail::classifySysError(err)) {
     case detail::SysError::kNone:
         return ErrorCode::kOk;
     case detail::SysError::kNotFound:
@@ -58,11 +55,10 @@ ErrorCode errnoToCode(int err)
 }
 
 // 统一的失败构造：附上路径与系统提示，日志里能直接定位
-Status fromSystem(const std::error_code &ec, const char *op, const std::string &path)
+Status fromSystem(const std::error_code& ec, const char* op, const std::string& path)
 {
     ErrorCode code = ErrorCode::kIoError;
-    switch (detail::classifySysError(ec.value()))
-    {
+    switch (detail::classifySysError(ec.value())) {
     case detail::SysError::kNotFound:
         code = ErrorCode::kNotFound;
         break;
@@ -100,7 +96,7 @@ fs::path toPath(std::string_view p)
     return fs::path(detail::toNative(std::string(p)));
 }
 
-}  // namespace
+}   // namespace
 
 // ---------------------------------------------------------------------------
 // 路径
@@ -134,8 +130,7 @@ FileStat StdFileStore::stat(std::string_view path) const
     std::error_code ec;
     const fs::path p = toPath(path);
     const auto st = fs::symlink_status(p, ec);
-    if (ec || !fs::exists(st))
-    {
+    if (ec || !fs::exists(st)) {
         return out;
     }
     out.exists = true;
@@ -143,23 +138,19 @@ FileStat StdFileStore::stat(std::string_view path) const
 
     // 符号链接跟随后再取真实属性：断链时 exists 仍为 true 但大小取不到
     const auto target = fs::status(p, ec);
-    if (!ec)
-    {
+    if (!ec) {
         out.isDir = fs::is_directory(target);
         out.readable = (target.permissions() & fs::perms::owner_read) != fs::perms::none;
         out.writable = (target.permissions() & fs::perms::owner_write) != fs::perms::none;
         out.executable = (target.permissions() & fs::perms::owner_exec) != fs::perms::none;
     }
-    if (!out.isDir)
-    {
+    if (!out.isDir) {
         const auto size = fs::file_size(p, ec);
-        if (!ec)
-        {
+        if (!ec) {
             out.size = size;
         }
         const auto ftime = fs::last_write_time(p, ec);
-        if (!ec)
-        {
+        if (!ec) {
             // C++17 的 file_time_type 纪元未标准化，用 duration 相对值换算到 Unix epoch。
             // 这里取的是"距实现纪元秒数减去系统当前时刻距 Unix epoch 的差"，
             // 结果对同一实现内的一致性判断够用（续传只比较相等性）。
@@ -176,31 +167,25 @@ FileStat StdFileStore::stat(std::string_view path) const
     // 出问题的组合（可执行位只给确实需要执行的扩展名）。
     out.mode = static_cast<std::uint16_t>(out.isDir ? 0755 : 0644);
 #if defined(_WIN32)
-    if (!out.isDir)
-    {
+    if (!out.isDir) {
         // 扩展名判断，大小写不敏感
-        const std::string ext = [&]
-        {
+        const std::string ext = [&] {
             const std::size_t dot = std::string_view(path).find_last_of('.');
-            if (dot == std::string_view::npos)
-            {
+            if (dot == std::string_view::npos) {
                 return std::string{};
             }
             std::string e(path.substr(dot));
-            for (char &c : e)
-            {
+            for (char& c : e) {
                 c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             }
             return e;
         }();
-        if (ext == ".exe" || ext == ".bat" || ext == ".cmd" || ext == ".dll" || ext == ".com")
-        {
+        if (ext == ".exe" || ext == ".bat" || ext == ".cmd" || ext == ".dll" || ext == ".com") {
             out.mode = 0755;
         }
     }
 #else
-    if (!ec)
-    {
+    if (!ec) {
         const auto raw = static_cast<unsigned>(target.permissions());
         out.mode = static_cast<std::uint16_t>(raw & 07777U);
     }
@@ -213,15 +198,12 @@ Status StdFileStore::probeWritable(std::string_view path) const
     const fs::path p = toPath(path);
     std::error_code ec;
 
-    if (fs::exists(p, ec))
-    {
+    if (fs::exists(p, ec)) {
         // 存在：以追加模式打开但不写任何内容，Windows 上能区分"被独占占用"与"没权限"
-        std::FILE *fp = detail::openNativeFile(std::string(path), "ab");
-        if (fp == nullptr)
-        {
+        std::FILE* fp = detail::openNativeFile(std::string(path), "ab");
+        if (fp == nullptr) {
             const int err = errno;
-            switch (detail::classifySysError(err))
-            {
+            switch (detail::classifySysError(err)) {
             case detail::SysError::kBusy:
                 return Status::Fail(ErrorCode::kBusy, "file is locked by another process: " + std::string(path));
             case detail::SysError::kPermission:
@@ -237,12 +219,10 @@ Status StdFileStore::probeWritable(std::string_view path) const
 
     // 不存在：探测父目录
     const fs::path dir = p.parent_path();
-    if (!fs::exists(dir, ec))
-    {
+    if (!fs::exists(dir, ec)) {
         return Status::Fail(ErrorCode::kNotFound, "parent directory does not exist: " + dir.generic_string());
     }
-    if (!fs::is_directory(dir, ec))
-    {
+    if (!fs::is_directory(dir, ec)) {
         return Status::Fail(ErrorCode::kNotADirectory, "parent is not a directory: " + dir.generic_string());
     }
     return Status::Ok();
@@ -252,29 +232,25 @@ Status StdFileStore::probeWritable(std::string_view path) const
 // 读写
 // ---------------------------------------------------------------------------
 
-std::unique_ptr<IReadStream> StdFileStore::openRead(std::string_view path, Status &st) const
+std::unique_ptr<IReadStream> StdFileStore::openRead(std::string_view path, Status& st) const
 {
     st = Status::Ok();
-    std::FILE *fp = detail::openNativeFile(std::string(path), "rb");
-    if (fp == nullptr)
-    {
+    std::FILE* fp = detail::openNativeFile(std::string(path), "rb");
+    if (fp == nullptr) {
         const int err = errno;
-        st = Status::Fail(errnoToCode(err),
-                          "open for read failed: " + std::string(path) + " (" + std::strerror(err) + ")");
+        st = Status::Fail(errnoToCode(err), "open for read failed: " + std::string(path) + " (" + std::strerror(err) + ")");
         return nullptr;
     }
     return std::make_unique<detail::StdReadStream>(fp, std::string(path));
 }
 
-std::unique_ptr<IWriteStream> StdFileStore::openWrite(std::string_view path, bool truncate, Status &st) const
+std::unique_ptr<IWriteStream> StdFileStore::openWrite(std::string_view path, bool truncate, Status& st) const
 {
     st = Status::Ok();
-    std::FILE *fp = detail::openNativeFile(std::string(path), truncate ? "wb" : "r+b");
-    if (fp == nullptr)
-    {
+    std::FILE* fp = detail::openNativeFile(std::string(path), truncate ? "wb" : "r+b");
+    if (fp == nullptr) {
         const int err = errno;
-        st = Status::Fail(errnoToCode(err),
-                          "open for write failed: " + std::string(path) + " (" + std::strerror(err) + ")");
+        st = Status::Fail(errnoToCode(err), "open for write failed: " + std::string(path) + " (" + std::strerror(err) + ")");
         return nullptr;
     }
     return std::make_unique<detail::StdWriteStream>(fp, std::string(path));
@@ -284,61 +260,50 @@ std::unique_ptr<IWriteStream> StdFileStore::openWrite(std::string_view path, boo
 // 目录
 // ---------------------------------------------------------------------------
 
-Status StdFileStore::list(std::string_view dir, bool recursive, std::vector<DirEntry> &out) const
+Status StdFileStore::list(std::string_view dir, bool recursive, std::vector<DirEntry>& out) const
 {
     out.clear();
     std::error_code ec;
     const fs::path base = toPath(dir);
-    if (!fs::exists(base, ec))
-    {
+    if (!fs::exists(base, ec)) {
         return Status::Fail(ErrorCode::kNotFound, "directory not found: " + std::string(dir));
     }
-    if (!fs::is_directory(base, ec))
-    {
+    if (!fs::is_directory(base, ec)) {
         return Status::Fail(ErrorCode::kNotADirectory, "not a directory: " + std::string(dir));
     }
 
-    auto emit = [&out](const fs::directory_entry &entry)
-    {
+    auto emit = [&out](const fs::directory_entry& entry) {
         std::error_code inner;
         DirEntry e;
         e.name = detail::fromNative(entry.path().filename().wstring());
         e.isDir = entry.is_directory(inner);
-        if (!e.isDir)
-        {
+        if (!e.isDir) {
             const auto size = entry.file_size(inner);
             e.size = inner ? 0 : size;
         }
         out.push_back(std::move(e));
     };
 
-    if (!recursive)
-    {
-        for (const auto &entry : fs::directory_iterator(base, ec))
-        {
-            if (ec)
-            {
+    if (!recursive) {
+        for (const auto& entry : fs::directory_iterator(base, ec)) {
+            if (ec) {
                 return fromSystem(ec, "list", std::string(dir));
             }
             emit(entry);
         }
-        if (ec)
-        {
+        if (ec) {
             return fromSystem(ec, "list", std::string(dir));
         }
         return Status::Ok();
     }
 
     fs::recursive_directory_iterator it(base, fs::directory_options::skip_permission_denied, ec);
-    if (ec)
-    {
+    if (ec) {
         return fromSystem(ec, "recursive list", std::string(dir));
     }
     const fs::recursive_directory_iterator end;
-    for (; it != end; it.increment(ec))
-    {
-        if (ec)
-        {
+    for (; it != end; it.increment(ec)) {
+        if (ec) {
             // 递归中某个子目录无权限：跳过继续，不要整体失败
             ec.clear();
             continue;
@@ -352,13 +317,11 @@ Status StdFileStore::mkdirs(std::string_view dir) const
 {
     std::error_code ec;
     const fs::path p = toPath(dir);
-    if (fs::exists(p, ec) && fs::is_directory(p, ec))
-    {
+    if (fs::exists(p, ec) && fs::is_directory(p, ec)) {
         return Status::Ok();
     }
     fs::create_directories(p, ec);
-    if (ec && !fs::is_directory(p, ec))
-    {
+    if (ec && !fs::is_directory(p, ec)) {
         return fromSystem(ec, "mkdirs", std::string(dir));
     }
     return Status::Ok();
@@ -373,11 +336,10 @@ Status StdFileStore::remove(std::string_view path) const
     std::error_code ec;
     const fs::path p = toPath(path);
     const bool removed = fs::remove(p, ec);
-    if (ec)
-    {
+    if (ec) {
         return fromSystem(ec, "remove", std::string(path));
     }
-    (void)removed;  // 不存在时返回 false 且 ec 为空，视为成功
+    (void)removed;   // 不存在时返回 false 且 ec 为空，视为成功
     return Status::Ok();
 }
 
@@ -385,8 +347,7 @@ Status StdFileStore::resize(std::string_view path, std::uint64_t size) const
 {
     Status st;
     auto stream = openWrite(path, false, st);
-    if (!stream)
-    {
+    if (!stream) {
         return st;
     }
     return stream->resize(size);
@@ -399,16 +360,14 @@ Status StdFileStore::atomicReplace(std::string_view from, std::string_view to) c
     // MOVEFILE_REPLACE_EXISTING 才是"覆盖式原子替换"的正确语义。
     const std::wstring wfrom = detail::toNative(std::string(from));
     const std::wstring wto = detail::toNative(std::string(to));
-    if (::MoveFileExW(wfrom.c_str(), wto.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0)
-    {
+    if (::MoveFileExW(wfrom.c_str(), wto.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0) {
         return Status::Ok();
     }
     return Status::Fail(ErrorCode::kIoError, "atomicReplace failed: " + std::string(from) + " -> " + std::string(to));
 #else
     std::error_code ec;
     fs::rename(toPath(from), toPath(to), ec);
-    if (ec)
-    {
+    if (ec) {
         return fromSystem(ec, "atomicReplace", std::string(from) + " -> " + std::string(to));
     }
     return Status::Ok();
@@ -423,18 +382,14 @@ std::string StdFileStore::quickFingerprint(std::string_view path, std::int64_t s
 {
     Status st;
     auto stream = openRead(path, st);
-    if (!stream)
-    {
+    if (!stream) {
         return {};
     }
 
     std::uint64_t total = 0;
-    if (sizeOverride >= 0)
-    {
+    if (sizeOverride >= 0) {
         total = static_cast<std::uint64_t>(sizeOverride);
-    }
-    else
-    {
+    } else {
         const FileStat fs = stat(path);
         total = fs.size;
     }
@@ -459,16 +414,13 @@ std::string StdFileStore::quickFingerprint(std::string_view path, std::int64_t s
 
     std::vector<char> head(want, '\0');
     std::size_t got = 0;
-    while (got < want)
-    {
+    while (got < want) {
         Status rs;
         const std::size_t n = stream->read(head.data() + got, want - got, rs);
-        if (!rs)
-        {
+        if (!rs) {
             return {};
         }
-        if (n == 0)
-        {
+        if (n == 0) {
             break;
         }
         got += n;
@@ -477,8 +429,7 @@ std::string StdFileStore::quickFingerprint(std::string_view path, std::int64_t s
     relayer::crypto::Sha256 h;
     std::uint8_t totalLe[8];
     std::uint8_t validLe[8];
-    for (int i = 0; i < 8; ++i)
-    {
+    for (int i = 0; i < 8; ++i) {
         totalLe[i] = static_cast<std::uint8_t>((total >> (i * 8)) & 0xFF);
         validLe[i] = static_cast<std::uint8_t>((static_cast<std::uint64_t>(got) >> (i * 8)) & 0xFF);
     }
@@ -488,4 +439,4 @@ std::string StdFileStore::quickFingerprint(std::string_view path, std::int64_t s
     return relayer::crypto::Sha256::hex(h.digest());
 }
 
-}  // namespace relayer::filestore
+}   // namespace relayer::filestore

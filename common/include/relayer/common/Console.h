@@ -15,8 +15,7 @@
 // 因此不受影响）。
 //
 // 约定：所有 string 参数与输出内容均为 UTF-8 字节串。
-namespace relayer::console
-{
+namespace relayer::console {
 
 /// 初始化终端：Windows 下接管 std::cout / std::cerr / std::clog，
 /// 并开启 ANSI 转义支持；其他平台什么都不做。幂等，可重复调用。
@@ -43,4 +42,4 @@ void write(std::string_view text);
 /// 输出 UTF-8 文本到标准错误并刷新（提示与错误信息，重定向时不会混进结果）。
 void write_error(std::string_view text);
 
-}  // namespace relayer::console
+}   // namespace relayer::console

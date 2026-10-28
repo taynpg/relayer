@@ -1,12 +1,11 @@
+#include <asio/io_context.hpp>
+#include <asio/signal_set.hpp>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <string>
 #include <string_view>
-
-#include <asio/io_context.hpp>
-#include <asio/signal_set.hpp>
 
 #include "relayer/common/Console.h"
 #include "relayer/server/Server.h"
@@ -22,8 +21,7 @@
 //   1  参数错误
 //   2  启动失败（端口占用、口令缺失等）
 
-namespace
-{
+namespace {
 
 constexpr int kExitOk = 0;
 constexpr int kExitUsage = 1;
@@ -48,29 +46,25 @@ void printUsage()
                 "服务端。一个忘记配口令就上线的中继等于任何人都能借它传文件。\n");
 }
 
-struct ParseResult
-{
+struct ParseResult {
     bool ok = false;
     bool showHelp = false;
     relayer::server::ServerConfig config;
 };
 
-ParseResult parseArgs(int argc, char **argv)
+ParseResult parseArgs(int argc, char** argv)
 {
     ParseResult r;
     r.config.port = 9527;
 
-    for (int i = 1; i < argc; ++i)
-    {
+    for (int i = 1; i < argc; ++i) {
         const std::string_view a = argv[i];
 
         // 需要跟一个值的选项。抽成 lambda 是为了统一处理"忘了给值"：
         // 少一个参数值是最常见的命令行错误，而默认行为（把它当成空串）
         // 会让服务端以一个空口令启动。
-        const auto takeValue = [&](std::string_view opt, std::string &out) -> bool
-        {
-            if (i + 1 >= argc)
-            {
+        const auto takeValue = [&](std::string_view opt, std::string& out) -> bool {
+            if (i + 1 >= argc) {
                 std::fprintf(stderr, "错误: %.*s 需要一个值\n", static_cast<int>(opt.size()), opt.data());
                 return false;
             }
@@ -78,124 +72,88 @@ ParseResult parseArgs(int argc, char **argv)
             return true;
         };
 
-        if (a == "-h" || a == "--help")
-        {
+        if (a == "-h" || a == "--help") {
             r.showHelp = true;
             r.ok = true;
             return r;
         }
 
-        if (a == "-l" || a == "--listen")
-        {
-            if (!takeValue(a, r.config.listenAddress))
-            {
+        if (a == "-l" || a == "--listen") {
+            if (!takeValue(a, r.config.listenAddress)) {
                 return r;
             }
-        }
-        else if (a == "-p" || a == "--port")
-        {
+        } else if (a == "-p" || a == "--port") {
             std::string v;
-            if (!takeValue(a, v))
-            {
+            if (!takeValue(a, v)) {
                 return r;
             }
-            try
-            {
+            try {
                 const auto n = std::stoul(v);
-                if (n > 65535)
-                {
+                if (n > 65535) {
                     std::fprintf(stderr, "错误: 端口超出范围: %s\n", v.c_str());
                     return r;
                 }
                 r.config.port = static_cast<std::uint16_t>(n);
-            }
-            catch (const std::exception &)
-            {
+            } catch (const std::exception&) {
                 std::fprintf(stderr, "错误: 端口不是数字: %s\n", v.c_str());
                 return r;
             }
-        }
-        else if (a == "--id")
-        {
-            if (!takeValue(a, r.config.serverId))
-            {
+        } else if (a == "--id") {
+            if (!takeValue(a, r.config.serverId)) {
                 return r;
             }
-        }
-        else if (a == "--password")
-        {
-            if (!takeValue(a, r.config.password))
-            {
+        } else if (a == "--password") {
+            if (!takeValue(a, r.config.password)) {
                 return r;
             }
-        }
-        else if (a == "--allow-no-auth")
-        {
+        } else if (a == "--allow-no-auth") {
             r.config.allowNoAuth = true;
-        }
-        else if (a == "--max-peers")
-        {
+        } else if (a == "--max-peers") {
             std::string v;
-            if (!takeValue(a, v))
-            {
+            if (!takeValue(a, v)) {
                 return r;
             }
-            try
-            {
+            try {
                 const auto n = std::stoul(v);
-                if (n == 0)
-                {
+                if (n == 0) {
                     std::fprintf(stderr, "错误: --max-peers 必须大于 0\n");
                     return r;
                 }
                 r.config.maxPeers = n;
-            }
-            catch (const std::exception &)
-            {
+            } catch (const std::exception&) {
                 std::fprintf(stderr, "错误: --max-peers 不是数字: %s\n", v.c_str());
                 return r;
             }
-        }
-        else if (a == "--drop-data-frames")
-        {
+        } else if (a == "--drop-data-frames") {
             // **测试专用**。格式："3,7" → 丢掉第 3 和第 7 个转发的数据帧。
             //
             // 生产上永远不该出现这个参数，所以启动日志里会明确打一条
             // warning：一个悄悄丢帧的中继比一个明显崩溃的中继更难查。
             std::string v;
-            if (!takeValue(a, v))
-            {
+            if (!takeValue(a, v)) {
                 return r;
             }
             std::string_view rest(v);
-            while (!rest.empty())
-            {
+            while (!rest.empty()) {
                 const auto comma = rest.find(',');
                 const auto piece = rest.substr(0, comma);
-                try
-                {
+                try {
                     const auto n = std::stoull(std::string(piece));
-                    if (n == 0)
-                    {
+                    if (n == 0) {
                         std::fprintf(stderr, "错误: --drop-data-frames 的序号从 1 开始\n");
                         return r;
                     }
                     r.config.dropDataFrames.push_back(n);
-                }
-                catch (const std::exception &)
-                {
+                } catch (const std::exception&) {
                     std::fprintf(stderr, "错误: --drop-data-frames 里有非数字项: %s\n", std::string(piece).c_str());
                     return r;
                 }
-                if (comma == std::string_view::npos)
-                {
+                if (comma == std::string_view::npos) {
                     break;
                 }
                 rest.remove_prefix(comma + 1);
             }
-        }
-        else
-        {
+        } else {
             std::fprintf(stderr, "错误: 未知参数: %s\n", argv[i]);
             return r;
         }
@@ -205,13 +163,11 @@ ParseResult parseArgs(int argc, char **argv)
     //
     // 都不给时**拒绝启动**（而不是默认关闭认证）：一个忘记配口令的中继
     // 是所有人都能借道传文件的开放节点，而"忘了配"比"故意开"常见得多。
-    if (r.config.password.empty() && !r.config.allowNoAuth)
-    {
+    if (r.config.password.empty() && !r.config.allowNoAuth) {
         std::fprintf(stderr, "错误: 必须提供 --password，或用 --allow-no-auth 显式关闭认证\n");
         return r;
     }
-    if (!r.config.password.empty() && r.config.allowNoAuth)
-    {
+    if (!r.config.password.empty() && r.config.allowNoAuth) {
         std::fprintf(stderr, "错误: --password 与 --allow-no-auth 不能同时给出\n");
         return r;
     }
@@ -220,9 +176,9 @@ ParseResult parseArgs(int argc, char **argv)
     return r;
 }
 
-}  // namespace
+}   // namespace
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     // 终端编码先修好再输出任何东西：下面所有中文报错都是 UTF-8 字节串，
     // 而 Windows 控制台默认按代码页（中文系统 GBK）解释字节，不修就是乱码。
@@ -233,24 +189,20 @@ int main(int argc, char **argv)
     relayer::console::use_utf8_locale();
 
     const auto parsed = parseArgs(argc, argv);
-    if (!parsed.ok)
-    {
+    if (!parsed.ok) {
         printUsage();
         return (argc == 1) ? kExitOk : kExitUsage;
     }
-    if (parsed.showHelp)
-    {
+    if (parsed.showHelp) {
         printUsage();
         return kExitOk;
     }
 
-    try
-    {
+    try {
         asio::io_context ctx;
 
         relayer::server::Server srv(ctx, parsed.config);
-        if (const auto st = srv.start(); !st.ok())
-        {
+        if (const auto st = srv.start(); !st.ok()) {
             std::fprintf(stderr, "启动失败: %s\n", st.message.c_str());
             return kExitStartup;
         }
@@ -262,36 +214,29 @@ int main(int argc, char **argv)
 
         // 丢帧是测试注入的故障，必须自曝。一个悄悄丢帧的中继比一个直接
         // 崩溃的中继难查得多——排障的人会先怀疑网络。
-        if (!parsed.config.dropDataFrames.empty())
-        {
-            std::printf("警告: 测试模式，将丢弃指定的传输数据帧（共 %zu 个序号）\n",
-                        parsed.config.dropDataFrames.size());
+        if (!parsed.config.dropDataFrames.empty()) {
+            std::printf("警告: 测试模式，将丢弃指定的传输数据帧（共 %zu 个序号）\n", parsed.config.dropDataFrames.size());
             std::fflush(stdout);
         }
 
         // 测试要能拿到真实端口：端口为 0 时打印出来，由测试解析。
         // 这不是"调试输出"，而是与本进程的契约——见 tests/e2e。
-        if (parsed.config.port == 0)
-        {
+        if (parsed.config.port == 0) {
             std::printf("LISTEN_PORT=%u\n", static_cast<unsigned>(srv.port()));
             std::fflush(stdout);
         }
 
         asio::signal_set signals(ctx, SIGINT, SIGTERM);
-        signals.async_wait(
-            [&](const std::error_code &, int sig)
-            {
-                std::printf("\n收到信号 %d，正在关闭……\n", sig);
-                std::fflush(stdout);
-                srv.stop();
-                ctx.stop();
-            });
+        signals.async_wait([&](const std::error_code&, int sig) {
+            std::printf("\n收到信号 %d，正在关闭……\n", sig);
+            std::fflush(stdout);
+            srv.stop();
+            ctx.stop();
+        });
 
         ctx.run();
         return kExitOk;
-    }
-    catch (const std::exception &e)
-    {
+    } catch (const std::exception& e) {
         std::fprintf(stderr, "异常: %s\n", e.what());
         return kExitStartup;
     }

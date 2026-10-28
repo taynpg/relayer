@@ -1,15 +1,14 @@
 #pragma once
 
+#include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/strand.hpp>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 #include <utility>
-
-#include <asio/io_context.hpp>
-#include <asio/steady_timer.hpp>
-#include <asio/strand.hpp>
 
 #include "relayer/common/Status.h"
 #include "relayer/core/auth/Handshake.h"
@@ -35,8 +34,7 @@
 // 但也**不能做阻塞操作**（写文件、同步 DNS、等锁）。传输引擎要落盘的
 // 部分必须走异步接口，或者投递到别的线程池。
 
-namespace relayer::core::session
-{
+namespace relayer::core::session {
 
 // 前置声明，供 Session 的友元声明使用。
 struct SessionAccess;
@@ -55,8 +53,7 @@ using transport::HeartbeatPolicy;
 // 配置
 // ---------------------------------------------------------------------------
 
-struct SessionConfig
-{
+struct SessionConfig {
     Role role = Role::kServer;
 
     // 服务端：认证配置（口令、是否允许不认证）。
@@ -106,8 +103,7 @@ struct SessionConfig
 // 回调
 // ---------------------------------------------------------------------------
 
-struct SessionHandler
-{
+struct SessionHandler {
     // 三个回调都以 `Session &self` 开头。
     //
     // 为什么需要它：服务端同时管着几十上百条连接，回调触发时必须知道
@@ -123,12 +119,12 @@ struct SessionHandler
     //
     // assignedId：服务端分配（或客户端被告知）的身份。这里的 id 由上层
     // 注入——core 不认识"客户端 id 怎么分配"这种业务规则。
-    std::function<void(Session &self, std::string assignedId)> onAuthenticated;
+    std::function<void(Session& self, std::string assignedId)> onAuthenticated;
 
     // 收到一帧业务帧（认证完成之后）。已通过 SessionPolicy 的入站检查，
     // 也已经按 §11.4 做了出站断言**之前**的状态——也就是说 from 是
     // 对端自称的，转发时仍须调用 applyIdentityBinding()。
-    std::function<void(Session &self, const Frame &)> onFrame;
+    std::function<void(Session& self, const Frame&)> onFrame;
 
     // 会话结束。保证只调用一次。
     //
@@ -153,24 +149,23 @@ class Session : public std::enable_shared_from_this<Session>
 {
 public:
     // 客户端：主动建连并启动握手。
-    [[nodiscard]] static std::shared_ptr<Session> connect(asio::io_context &ctx, const std::string &host,
-                                                          std::uint16_t port, SessionConfig config,
-                                                          SessionHandler handler);
+    [[nodiscard]] static std::shared_ptr<Session> connect(asio::io_context& ctx, const std::string& host, std::uint16_t port,
+                                                          SessionConfig config, SessionHandler handler);
 
     // 服务端：接管一个已建立的 socket。
-    static std::shared_ptr<Session> accept(asio::io_context &ctx, asio::ip::tcp::socket socket, SessionConfig config,
+    static std::shared_ptr<Session> accept(asio::io_context& ctx, asio::ip::tcp::socket socket, SessionConfig config,
                                            SessionHandler handler);
 
     ~Session();
 
-    Session(const Session &) = delete;
-    Session &operator=(const Session &) = delete;
+    Session(const Session&) = delete;
+    Session& operator=(const Session&) = delete;
 
     // 发送一帧业务帧。
     //
     // 会先过 checkOutbound()：服务端发出带第三方 from 的帧会被拒。这是
     // 转发路径漏调 bindSenderIdentity() 的兜底断言，不是可选的额外检查。
-    [[nodiscard]] Status send(const Frame &frame);
+    [[nodiscard]] Status send(const Frame& frame);
 
     // 转发一帧：改写身份后发出。这是服务端转发他人帧的**唯一**入口。
     //
@@ -203,8 +198,7 @@ public:
     // 应当由上层显式做）。设置被忽略时返回 false。
     [[nodiscard]] bool setPeerIdAllocator(std::function<std::string()> alloc)
     {
-        if (authenticated_)
-        {
+        if (authenticated_) {
             return false;
         }
         config_.allocatePeerId = std::move(alloc);
@@ -212,7 +206,7 @@ public:
     }
 
     // 握手完成后的身份。未完成时为空。
-    [[nodiscard]] const std::string &assignedId() const noexcept
+    [[nodiscard]] const std::string& assignedId() const noexcept
     {
         return assignedId_;
     }
@@ -281,7 +275,7 @@ public:
     //
     // 直接暴露引用而不是包一层：HeartbeatPolicy 本身是纯逻辑且已有自己的
     // 测试，包一层只会多一份要维护的转发代码。
-    [[nodiscard]] const HeartbeatPolicy &heartbeatPolicy() const noexcept
+    [[nodiscard]] const HeartbeatPolicy& heartbeatPolicy() const noexcept
     {
         return heartbeat_;
     }
@@ -299,10 +293,10 @@ private:
     // 直接调 notifyEstablished()——那等于伪造一次"连接就绪"。
     friend struct SessionAccess;
 
-    Session(asio::io_context &ctx, SessionConfig config, SessionHandler handler);
+    Session(asio::io_context& ctx, SessionConfig config, SessionHandler handler);
 
     void notifyEstablished();
-    void handleInbound(const Frame &frame);
+    void handleInbound(const Frame& frame);
     void handleTransportClosed(Status status);
 
     // 真正写到连接上的唯一出口。send() / forward() 各自做完断言后调它。
@@ -310,12 +304,12 @@ private:
     // 单独拆出来是为了让"计数"和"写出"只有一处实现——否则加第三个发送
     // 入口时很容易漏掉 ++framesOut_，而那类 bug 在日志里表现为"帧数和
     // 实际流量对不上"，很难排查。
-    [[nodiscard]] Status deliver(const Frame &frame);
+    [[nodiscard]] Status deliver(const Frame& frame);
 
     // 把一帧交给握手状态机，并把它吐出来的帧发出去。
     //
     // 返回握手状态机自己的 Status（失败意味着这条连接不能再用了）。
-    [[nodiscard]] Status stepHandshake(const Frame &in);
+    [[nodiscard]] Status stepHandshake(const Frame& in);
 
     // 认证成功后进入业务相位：取消握手超时、通知上层。
     void enterAuthenticated();
@@ -341,7 +335,7 @@ private:
     void finish(Status status, bool closeTransport);
     void sendHeartbeatAnswer();
 
-    asio::io_context &ctx_;
+    asio::io_context& ctx_;
     SessionConfig config_;
     SessionHandler handler_;
 
@@ -357,7 +351,7 @@ private:
     bool finished_ = false;
     bool heartbeatTimerStarted_ = false;
     std::string assignedId_;
-    std::string selfId_;  // 服务端自己的 id，来自配置
+    std::string selfId_;   // 服务端自己的 id，来自配置
 
     // 客户端发过 kClaimId、还在等应答。收到非零 status 时据此判定
     // "是我的声明被拒了"，而不是把一切非零 status 都当成分配失败。
@@ -377,4 +371,4 @@ private:
     std::uint64_t heartbeatTimeouts_ = 0;
 };
 
-}  // namespace relayer::core::session
+}   // namespace relayer::core::session

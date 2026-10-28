@@ -18,12 +18,11 @@
 // **不含**防同机旁路攻击——所以这个取舍是可接受的。如果你的部署场景里
 // 攻击者能在同一台物理机上反复测量解密耗时，请换用 AES-NI 或 bitsliced 实现。
 
-namespace relayer::crypto
-{
+namespace relayer::crypto {
 
-constexpr std::size_t kAesKeySize = 32;    // AES-256
-constexpr std::size_t kGcmNonceSize = 12;  // GCM 标准 nonce 长度（96 位）
-constexpr std::size_t kGcmTagSize = 16;    // 完整 128 位 tag
+constexpr std::size_t kAesKeySize = 32;     // AES-256
+constexpr std::size_t kGcmNonceSize = 12;   // GCM 标准 nonce 长度（96 位）
+constexpr std::size_t kGcmTagSize = 16;     // 完整 128 位 tag
 
 // 加密。
 //
@@ -37,9 +36,9 @@ constexpr std::size_t kGcmTagSize = 16;    // 完整 128 位 tag
 // tag   : 输出 16 字节认证标签
 //
 // cipher 与 plain 允许指向同一块内存（就地加密）。
-void aes256GcmEncrypt(const std::uint8_t key[kAesKeySize], const std::uint8_t nonce[kGcmNonceSize],
-                      const std::uint8_t *aad, std::size_t aadLen, const std::uint8_t *plain, std::size_t len,
-                      std::uint8_t *cipher, std::uint8_t tag[kGcmTagSize]);
+void aes256GcmEncrypt(const std::uint8_t key[kAesKeySize], const std::uint8_t nonce[kGcmNonceSize], const std::uint8_t* aad,
+                      std::size_t aadLen, const std::uint8_t* plain, std::size_t len, std::uint8_t* cipher,
+                      std::uint8_t tag[kGcmTagSize]);
 
 // 解密并校验 tag。
 //
@@ -48,9 +47,9 @@ void aes256GcmEncrypt(const std::uint8_t key[kAesKeySize], const std::uint8_t no
 // 失败不透露失败原因，避免给攻击者提供区分依据）。
 //
 // 返回 false 时 out 的内容未定义（可能是部分解密的明文），调用方**不得**使用。
-bool aes256GcmDecrypt(const std::uint8_t key[kAesKeySize], const std::uint8_t nonce[kGcmNonceSize],
-                      const std::uint8_t *aad, std::size_t aadLen, const std::uint8_t *cipher, std::size_t len,
-                      const std::uint8_t tag[kGcmTagSize], std::uint8_t *out);
+bool aes256GcmDecrypt(const std::uint8_t key[kAesKeySize], const std::uint8_t nonce[kGcmNonceSize], const std::uint8_t* aad,
+                      std::size_t aadLen, const std::uint8_t* cipher, std::size_t len, const std::uint8_t tag[kGcmTagSize],
+                      std::uint8_t* out);
 
 // ---------------------------------------------------------------------------
 // std::string / vector 便捷重载
@@ -64,7 +63,7 @@ bool aes256GcmDecrypt(const std::uint8_t key[kAesKeySize], const std::uint8_t no
 // 对应解封。sealed 需要至少 kGcmTagSize 字节。
 // 失败时返回 false，plain 保持为空。
 [[nodiscard]] bool aes256GcmOpen(const std::uint8_t key[kAesKeySize], const std::uint8_t nonce[kGcmNonceSize],
-                                 std::string_view aad, const std::uint8_t *sealed, std::size_t sealedLen,
-                                 std::vector<std::uint8_t> &plain);
+                                 std::string_view aad, const std::uint8_t* sealed, std::size_t sealedLen,
+                                 std::vector<std::uint8_t>& plain);
 
-}  // namespace relayer::crypto
+}   // namespace relayer::crypto

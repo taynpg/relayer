@@ -12,8 +12,7 @@
 struct InfoDrop;
 
 QT_BEGIN_NAMESPACE
-namespace Ui
-{
+namespace Ui {
 class ExplorerControl;
 }
 QT_END_NAMESPACE
@@ -47,13 +46,12 @@ class ExplorerControl : public QDialog
 
 public:
     // 数据源。与 v1 的 AskType 等价，只是 v2 只有两个。
-    enum class Source
-    {
+    enum class Source {
         Local,
         Remote,
     };
 
-    explicit ExplorerControl(QWidget *parent = nullptr);
+    explicit ExplorerControl(QWidget* parent = nullptr);
 
     // 切到远端：browse 该对端的共享根。同一个控件，UI 不变（v1 语义）。
     //
@@ -61,7 +59,7 @@ public:
     // peer:relDir，跳过去才看得出"到底传到了对方哪个目录"）。不能先
     // setRemotePeer 再 navigateTo——两次列举请求会撞在 Client 的
     // browseActive 上，第二个被拒。
-    void setRemotePeer(const QString &peerId, const QString &peerName, const QString &relPath = QString());
+    void setRemotePeer(const QString& peerId, const QString& peerName, const QString& relPath = QString());
 
     // 切回本地浏览。
     void useLocalSource();
@@ -84,7 +82,7 @@ public:
 
     // 远端列举的结果（MainWindow 从 CoreService 送回来）。
     // ok=false 时 summary 说明原因（未开共享 / 目录不存在 / 会话不可用）。
-    void applyRemoteEntries(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows);
+    void applyRemoteEntries(bool ok, const QString& summary, const QList<relayer::app::RemoteRow>& rows);
 
     // 当前浏览的目录（空 = 尚未进入任何目录）。
     QString currentPath() const
@@ -93,7 +91,7 @@ public:
     }
 
     // 拖出打包 InfoDrop 时报根目录；由 MainWindow 接拖入目标。
-    ExpDropTable *table() const
+    ExpDropTable* table() const
     {
         return table_;
     }
@@ -103,55 +101,54 @@ public:
     // 本控件只把载荷交出去：它不知道自己是左边还是右边、对面是谁、往哪落。
     // 方向由"谁收到了"决定——本地表收到 = 对方是远端 = 下载；远端表收到 =
     // 上传。这个判断只有 MainWindow 做得出来（它同时持有两个面板）。
-    void setOnInfoDropped(std::function<void(const InfoDrop &)> onDropped)
+    void setOnInfoDropped(std::function<void(const InfoDrop&)> onDropped)
     {
         table_->setOnInfoDropped(std::move(onDropped));
     }
 
     // 外部导航入口（配置表"访问本地目录"等）。进入失败经 notice 上报。
-    void navigateTo(const QString &path)
+    void navigateTo(const QString& path)
     {
         enterPath(path);
     }
 
 signals:
     // 目录浏览失败的提示（进入失败、删除失败等）。MainWindow 转发到日志。
-    void notice(const QString &msg);
+    void notice(const QString& msg);
 
     // 远端模式下的列举请求（relPath 相对对端共享根，空 = 根）。
     // 本控件不碰网络：只发请求，结果由 applyRemoteEntries 送回。
-    void remoteListRequested(const QString &peerId, const QString &relPath);
+    void remoteListRequested(const QString& peerId, const QString& relPath);
 
     // 远端模式下"下载到接收目录"（PROTOCOL.md §11.9）。本控件不碰网络：
     // 只把"从谁取、取哪个相对路径"交给 MainWindow。
     // asArchive=true 表示选中的是目录，请对端打包（PROTOCOL.md §11.10）。
-    void remotePullRequested(const QString &peerId, const QString &relPath, bool asArchive);
+    void remotePullRequested(const QString& peerId, const QString& relPath, bool asArchive);
 
     // 本地模式下右键「传输」：把选中项的**本地绝对路径**交给 MainWindow。
     // 本控件不碰网络与任务表；路径怎么变成任务项由 MainWindow 决定
     // （目录要递归展开、文件用"父目录 + 文件名"两种形状）。
-    void localTransferRequested(const QStringList &paths);
+    void localTransferRequested(const QStringList& paths);
 
     // 粗校验 / 时间戳校验（v1 的语义：与**另一个面板当前目录下的同名文件**
     // 比）。本控件不知道自己对面是谁——由 MainWindow 取另一侧路径并决定
     // 哪一边是远端。wantTime=false 比大小，true 比修改时间。
-    void compareRequested(const QString &name, bool wantTime);
+    void compareRequested(const QString& name, bool wantTime);
 
 private:
-    struct FileEntry
-    {
+    struct FileEntry {
         QString name;
         bool isDir = false;
-        qint64 size = 0;        // 字节；目录无意义
-        qint64 modifiedMs = 0;  // 最后修改时间（毫秒）
+        qint64 size = 0;         // 字节；目录无意义
+        qint64 modifiedMs = 0;   // 最后修改时间（毫秒）
     };
 
     void initControl();
     void initSignals();
 
     // 列举 dir 下的条目到 entries；失败返回 false 并发 notice。
-    bool listDir(const QString &dir, QVector<FileEntry> &entries) const;
-    void enterPath(const QString &path);
+    bool listDir(const QString& dir, QVector<FileEntry>& entries) const;
+    void enterPath(const QString& path);
     void onEnter();
     void onHome();
     void onUp();
@@ -162,8 +159,8 @@ private:
     void onResetFilter();
     void updateExtOptions();
     void rebuildView();
-    void setFileItem(const FileEntry &entry, int row);
-    void onTableContextMenu(const QPoint &pos);
+    void setFileItem(const FileEntry& entry, int row);
+    void onTableContextMenu(const QPoint& pos);
 
     // 右键动作（局部操作，成功后重列当前目录）。
     //
@@ -172,10 +169,10 @@ private:
     // "复制全路径"是动作表里的一行内联代码。曾经在这里留过两个空声明，
     // 永远不会实现也永远不会报错——删掉。
     void onRename(int row);
-    void onDelete(const QVector<int> &rows);
+    void onDelete(const QVector<int>& rows);
     void onNewDir();
 
-    static bool lessThan(const FileEntry &a, const FileEntry &b, int column);
+    static bool lessThan(const FileEntry& a, const FileEntry& b, int column);
 
     // 数据源状态。remotePendingPath_ 记"这次请求要去的路径"——远端是异步的，
     // 回来之前 currentPath_ 不能改，否则中途失败会把界面停在一个没进去的目录上。
@@ -190,7 +187,7 @@ private:
     // 把路径写进 cbPath。**不能用 setCurrentText**：远端模式 cbPath 不可编辑，
     // 非可编辑的 QComboBox 只会在已有项里查找，找不到就什么都不做——这正是
     // "点了浏览但控件毫无变化"的根因（路径框停在旧值，表格本来就是空的）。
-    void showPath(const QString &text);
+    void showPath(const QString& text);
 
     // 当前选中的本地绝对路径（去重、保持表格顺序）。远端模式返回空。
     [[nodiscard]] QStringList selectedLocalPaths() const;
@@ -199,18 +196,18 @@ private:
     // （MainWindow）按 source() 判断是哪一种。
     // 状态行。每一次列举都必须留下可见结果（读取中 / 共 N 项 / 失败原因），
     // 否则失败与"没反应"在界面上无法区分。
-    void setStatus(const QString &text, bool error = false);
+    void setStatus(const QString& text, bool error = false);
 
     // 按名字回源数据里找条目。
     // 表格里的大小/时间是**格式化后**的字符串（"1.2 KiB"、"2026-10-23 ..."），
     // 反解析既不可靠也多此一举——名字在同一个目录里唯一，直接回源。
-    [[nodiscard]] const FileEntry *findEntry(const QString &name) const;
+    [[nodiscard]] const FileEntry* findEntry(const QString& name) const;
 
     // 右键「详细信息」：本地/远端共用同一个对话框（v1 也是同一个 Form）。
     void showMetaInfo(int row);
 
-    Ui::ExplorerControl *ui_ = nullptr;
-    ExpDropTable *table_ = nullptr;  // 表格本体由 initControl 动态创建，塞进 .ui 的占位 widget
+    Ui::ExplorerControl* ui_ = nullptr;
+    ExpDropTable* table_ = nullptr;   // 表格本体由 initControl 动态创建，塞进 .ui 的占位 widget
 
     // 源数据与视图状态。
     QVector<FileEntry> entries_;
@@ -218,5 +215,5 @@ private:
     int sortColumn_ = static_cast<int>(ExpColumn::Name);
     Qt::SortOrder sortOrder_ = Qt::AscendingOrder;
     QString filterName_;
-    QStringList filterExts_;  // 小写后缀；含"(无后缀)"特殊标签；空 = 不筛选
+    QStringList filterExts_;   // 小写后缀；含"(无后缀)"特殊标签；空 = 不筛选
 };

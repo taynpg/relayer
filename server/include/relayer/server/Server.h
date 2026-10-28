@@ -1,14 +1,13 @@
 #pragma once
 
+#include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
 #include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
-
-#include <asio/io_context.hpp>
-#include <asio/ip/tcp.hpp>
 
 #include "relayer/core/session/PeerTable.h"
 #include "relayer/core/session/Session.h"
@@ -26,18 +25,16 @@
 // 线程模型：全部在单个 io_context 上，一条连接的帧由它自己的 strand 串行
 // 处理。因此下面的成员都不加锁。
 
-namespace relayer::server
-{
+namespace relayer::server {
 
 // 服务端只用到 core 的会话与在线表这两块。写全限定名会让签名长到读不动，
 // 而 `using` 到命名空间级别是安全的——它不会像 using namespace 那样把
 // 整个 core 的名字灌进来（这两个命名空间里没有重名）。
 namespace session = ::relayer::core::session;
 
-struct ServerConfig
-{
+struct ServerConfig {
     std::string listenAddress = "0.0.0.0";
-    std::uint16_t port = 0;  // 0 = 由系统分配（测试用）
+    std::uint16_t port = 0;   // 0 = 由系统分配（测试用）
 
     // 服务端在协议里的身份（PROTOCOL.md §11.3）。
     std::string serverId = "relayerd";
@@ -68,14 +65,13 @@ struct ServerConfig
 };
 
 // 一次服务端的运行统计。给日志与测试用。
-struct ServerStats
-{
+struct ServerStats {
     std::uint64_t accepted = 0;
-    std::uint64_t rejected = 0;  // 表满 / 重名，直接断开
+    std::uint64_t rejected = 0;   // 表满 / 重名，直接断开
     std::uint64_t authenticated = 0;
     std::uint64_t forwarded = 0;
-    std::uint64_t forwardFailed = 0;  // 目标在线但投递失败（对端写队列满、连接已关闭）
-    std::uint64_t unroutable = 0;     // 目标不在线
+    std::uint64_t forwardFailed = 0;   // 目标在线但投递失败（对端写队列满、连接已关闭）
+    std::uint64_t unroutable = 0;      // 目标不在线
     std::uint64_t localFrames = 0;
 
     // kClaimId 被拒的次数（标识被占用 / 非法 / 撞服务端自己的 id）。
@@ -91,11 +87,11 @@ struct ServerStats
 class Server
 {
 public:
-    Server(asio::io_context &ctx, ServerConfig config);
+    Server(asio::io_context& ctx, ServerConfig config);
     ~Server();
 
-    Server(const Server &) = delete;
-    Server &operator=(const Server &) = delete;
+    Server(const Server&) = delete;
+    Server& operator=(const Server&) = delete;
 
     // 开始监听。返回后端口已确定（config.port 为 0 时可用 port() 取实际值）。
     [[nodiscard]] Status start();
@@ -106,7 +102,7 @@ public:
     // 实际监听的端口。
     [[nodiscard]] std::uint16_t port() const;
 
-    [[nodiscard]] const ServerStats &stats() const noexcept
+    [[nodiscard]] const ServerStats& stats() const noexcept
     {
         return stats_;
     }
@@ -130,13 +126,13 @@ private:
     // 入参是 Session&（回调约定）：Server 需要长期持有的 shared_ptr 由
     // enable_shared_from_this 取。addrText 在 accept 时就能拿到，存下来
     // 是因为注册发生在之后，那时 socket 已经交出去了。
-    void registerPeer(session::Session &self, const std::string &id, const std::string &addrText);
+    void registerPeer(session::Session& self, const std::string& id, const std::string& addrText);
 
-    void onFrame(session::Session &self, const protocol::Frame &frame);
+    void onFrame(session::Session& self, const protocol::Frame& frame);
     void onClosed(std::string id, Status status);
 
     // 处理"发给服务端自己"的帧（问 id、问列表、心跳之外的东西）。
-    void handleLocal(session::Session &self, const protocol::Frame &frame);
+    void handleLocal(session::Session& self, const protocol::Frame& frame);
 
     // 处理 kClaimId（客户端声明自己的标识，PROTOCOL.md §11.7）。
     //
@@ -144,11 +140,11 @@ private:
     // 拒绝只回 kAnswerId(status) 而**不立刻断开**——Connection::doClose
     // 会清空写队列，先发后关等于把拒绝理由吃掉，客户端只能看到"连接断了"。
     // 由客户端收到拒绝后自己断开（本项目的 CLI/GUI 都会）。
-    void handleClaimId(session::Session &self, const protocol::Frame &frame);
+    void handleClaimId(session::Session& self, const protocol::Frame& frame);
 
     [[nodiscard]] std::string allocate();
 
-    asio::io_context &ctx_;
+    asio::io_context& ctx_;
     ServerConfig config_;
 
     asio::ip::tcp::acceptor acceptor_;
@@ -197,4 +193,4 @@ private:
     ServerStats stats_;
 };
 
-}  // namespace relayer::server
+}   // namespace relayer::server

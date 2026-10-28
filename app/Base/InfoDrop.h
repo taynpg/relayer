@@ -21,7 +21,7 @@
 // infoPack/infoUnpack：T 要提供 serialize/deserialize(QDataStream&)。
 // 打包后 seek(0) 是因为 QDataStream 不自动回卷，调用方拿到的必须是从头
 // 开始的完整字节流。
-template <typename T> QByteArray infoPack(const T &obj)
+template <typename T> QByteArray infoPack(const T& obj)
 {
     QByteArray byteArray;
     QDataStream stream(&byteArray, QIODevice::ReadWrite);
@@ -30,7 +30,7 @@ template <typename T> QByteArray infoPack(const T &obj)
     return byteArray;
 }
 
-template <typename T> T infoUnpack(const QByteArray &byteArray)
+template <typename T> T infoUnpack(const QByteArray& byteArray)
 {
     T obj;
     QDataStream stream(byteArray);
@@ -38,24 +38,22 @@ template <typename T> T infoUnpack(const QByteArray &byteArray)
     return obj;
 }
 
-struct InfoDropItem
-{
+struct InfoDropItem {
     QString fileName;
     quint32 type;
-    void serialize(QDataStream &stream) const;
-    void deserialize(QDataStream &stream);
+    void serialize(QDataStream& stream) const;
+    void deserialize(QDataStream& stream);
 };
 
-struct InfoDrop
-{
+struct InfoDrop {
     QString from;
     QString to;
     QVector<InfoDropItem> items;
-    void serialize(QDataStream &stream) const;
-    void deserialize(QDataStream &stream);
+    void serialize(QDataStream& stream) const;
+    void deserialize(QDataStream& stream);
 };
 
-QDataStream &operator<<(QDataStream &stream, const InfoDropItem &item);
-QDataStream &operator>>(QDataStream &stream, InfoDropItem &item);
-QDataStream &operator<<(QDataStream &stream, const InfoDrop &infoDrop);
-QDataStream &operator>>(QDataStream &stream, InfoDrop &infoDrop);
+QDataStream& operator<<(QDataStream& stream, const InfoDropItem& item);
+QDataStream& operator>>(QDataStream& stream, InfoDropItem& item);
+QDataStream& operator<<(QDataStream& stream, const InfoDrop& infoDrop);
+QDataStream& operator>>(QDataStream& stream, InfoDrop& infoDrop);

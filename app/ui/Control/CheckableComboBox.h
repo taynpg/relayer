@@ -14,25 +14,25 @@ class CheckableComboBox : public QComboBox
 {
     Q_OBJECT
 public:
-    explicit CheckableComboBox(QWidget *parent = nullptr);
+    explicit CheckableComboBox(QWidget* parent = nullptr);
 
     // 重建可选项；同名的旧选中状态自动保留
-    void setOptions(const QStringList &options);
+    void setOptions(const QStringList& options);
     QStringList checkedItems() const;
 
 public slots:
     // 按名称设置选中项（不存在的名称忽略），更新显示并发射信号
-    void setCheckedItems(const QStringList &items);
+    void setCheckedItems(const QStringList& items);
 
 signals:
-    void checkedItemsChanged(const QStringList &items);
+    void checkedItemsChanged(const QStringList& items);
 
 protected:
-    bool eventFilter(QObject *obj, QEvent *event) override;
-    void keyPressEvent(QKeyEvent *event) override;
+    bool eventFilter(QObject* obj, QEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
 
 private:
-    void applyChecked(const QStringList &items);
-    void toggleIndex(const QModelIndex &index);
+    void applyChecked(const QStringList& items);
+    void toggleIndex(const QModelIndex& index);
     void updateDisplay();
 };

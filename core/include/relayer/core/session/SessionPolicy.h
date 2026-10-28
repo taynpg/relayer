@@ -31,8 +31,7 @@
 // 四者都刻意做成**独立且有名字的**判定，而不是塞进一个大的 if-else：
 // 每个都有"写反就是漏洞"的具体后果，值得各自被测试点名。
 
-namespace relayer::core::session
-{
+namespace relayer::core::session {
 
 using auth::AuthStatus;
 using auth::ClientPhase;
@@ -47,37 +46,33 @@ using protocol::FrameType;
 // 为什么不分"服务端模式 / 客户端模式"两套策略：两个方向的规则至少三处
 // 不同（心跳谁回、身份绑定谁做、未认证时谁先说话），分两套就会不可避免地
 // 出现"改了一边忘了另一边"。用方向参数化一个策略，差异集中在一处。
-enum class Role
-{
-    kServer,  // 接受连接的一方：负责握手、转发、身份绑定
-    kClient,  // 发起连接的一方：只发自己的业务帧，不转发
+enum class Role {
+    kServer,   // 接受连接的一方：负责握手、转发、身份绑定
+    kClient,   // 发起连接的一方：只发自己的业务帧，不转发
 };
 
 [[nodiscard]] std::string_view toString(Role r) noexcept;
 
 // t0 的取值。服务端自己的 id 由上层配置给出（"服务端在协议里的身份"）。
-struct RouteConfig
-{
-    std::string serverId;  // Role::kServer 时必填
+struct RouteConfig {
+    std::string serverId;   // Role::kServer 时必填
 };
 
 // ---------------------------------------------------------------------------
 // 入站判定
 // ---------------------------------------------------------------------------
 
-enum class InboundAction
-{
-    kAccept,       // 收下：交给上层业务，或交给握手状态机
-    kAnswerHeart,  // 心跳询问，回一个应答（不需要经过业务层）
-    kReject,       // 协议违规：发 abort（若能发）并断开
-    kIgnore,       // 静默丢弃，不断开
+enum class InboundAction {
+    kAccept,        // 收下：交给上层业务，或交给握手状态机
+    kAnswerHeart,   // 心跳询问，回一个应答（不需要经过业务层）
+    kReject,        // 协议违规：发 abort（若能发）并断开
+    kIgnore,        // 静默丢弃，不断开
 };
 
 [[nodiscard]] std::string_view toString(InboundAction a) noexcept;
 
 // 判定结果。reason 只在 kReject / kIgnore 时有内容，用于日志。
-struct InboundDecision
-{
+struct InboundDecision {
     InboundAction action = InboundAction::kReject;
     std::string reason;
 
@@ -100,7 +95,7 @@ struct InboundDecision
 // 唯一的例外是心跳：心跳在握手完成前后都该被应答，因为它检测的是"这条
 // TCP 连接还活着"，与身份无关。让未认证连接也能维持心跳，可以把
 // "TCP 通但认证卡住"和"TCP 断了"区分开——这两种故障的排查方向完全不同。
-[[nodiscard]] InboundDecision checkInbound(Role role, bool established, const Frame &f) noexcept;
+[[nodiscard]] InboundDecision checkInbound(Role role, bool established, const Frame& f) noexcept;
 
 // ---------------------------------------------------------------------------
 // 身份绑定
@@ -127,15 +122,13 @@ struct InboundDecision
 // 就再也测不了"未认证时有没有偷偷绑"这类问题。
 //
 // 返回值是最终写进 f.from 的内容（空串表示没改）。
-[[nodiscard]] std::string_view applyIdentityBinding(Role role, bool established, Frame &f,
-                                                    std::string_view assignedId) noexcept;
+[[nodiscard]] std::string_view applyIdentityBinding(Role role, bool established, Frame& f, std::string_view assignedId) noexcept;
 
 // ---------------------------------------------------------------------------
 // 出站判定
 // ---------------------------------------------------------------------------
 
-struct OutboundDecision
-{
+struct OutboundDecision {
     bool allowed = false;
     std::string reason;
 };
@@ -152,25 +145,23 @@ struct OutboundDecision
 //
 // 客户端的出站不检查身份：它只能代表自己，服务端会在入站侧覆盖。在客户端
 // 再加一道检查只会让"我该填什么 from"变成一个要查文档的问题。
-[[nodiscard]] OutboundDecision checkOutbound(Role role, const Frame &f, std::string_view serverId);
+[[nodiscard]] OutboundDecision checkOutbound(Role role, const Frame& f, std::string_view serverId);
 
 // ---------------------------------------------------------------------------
 // 转发选路
 // ---------------------------------------------------------------------------
 
-enum class RouteAction
-{
-    kForward,      // 转发给 route.to
-    kAcceptLocal,  // 不需要转发，交给本地业务处理
-    kReject,       // 无处可去
+enum class RouteAction {
+    kForward,       // 转发给 route.to
+    kAcceptLocal,   // 不需要转发，交给本地业务处理
+    kReject,        // 无处可去
 };
 
 [[nodiscard]] std::string_view toString(RouteAction a) noexcept;
 
-struct RoutePlan
-{
+struct RoutePlan {
     RouteAction action = RouteAction::kReject;
-    std::string to;  // kForward 时的目标 id
+    std::string to;   // kForward 时的目标 id
     std::string from;
     std::string reason;
 };
@@ -186,7 +177,7 @@ struct RoutePlan
 //
 // 还有一条：`from` 最后**一定**由 identityToBind() 决定，RoutePlan::from
 // 只是把"应该写成谁"算出来，真正落笔仍要走 bindSenderIdentity()。
-[[nodiscard]] RoutePlan planRoute(Role role, bool established, const RouteConfig &config, std::string_view selfId,
-                                  const Frame &f);
+[[nodiscard]] RoutePlan planRoute(Role role, bool established, const RouteConfig& config, std::string_view selfId,
+                                  const Frame& f);
 
-}  // namespace relayer::core::session
+}   // namespace relayer::core::session

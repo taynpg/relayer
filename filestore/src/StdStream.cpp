@@ -11,15 +11,12 @@
 #include <unistd.h>
 #endif
 
-namespace relayer::filestore::detail
-{
-namespace
-{
+namespace relayer::filestore::detail {
+namespace {
 
 ErrorCode mapErrno(int err)
 {
-    switch (classifySysError(err))
-    {
+    switch (classifySysError(err)) {
     case SysError::kNotFound:
         return ErrorCode::kNotFound;
     case SysError::kPermission:
@@ -44,12 +41,12 @@ ErrorCode mapErrno(int err)
     return ErrorCode::kIoError;
 }
 
-Status ioFailure(int err, const char *op, const std::string &path)
+Status ioFailure(int err, const char* op, const std::string& path)
 {
     return Status::Fail(mapErrno(err), std::string(op) + " failed: " + path + " (" + std::strerror(err) + ")");
 }
 
-int seekFile(std::FILE *fp, std::uint64_t offset)
+int seekFile(std::FILE* fp, std::uint64_t offset)
 {
 #ifdef _WIN32
     return _fseeki64(fp, static_cast<__int64>(offset), SEEK_SET);
@@ -58,7 +55,7 @@ int seekFile(std::FILE *fp, std::uint64_t offset)
 #endif
 }
 
-std::int64_t tellFile(std::FILE *fp)
+std::int64_t tellFile(std::FILE* fp)
 {
 #ifdef _WIN32
     return _ftelli64(fp);
@@ -67,39 +64,33 @@ std::int64_t tellFile(std::FILE *fp)
 #endif
 }
 
-}  // namespace
+}   // namespace
 
 // ---------------------------------------------------------------------------
 // StdReadStream
 // ---------------------------------------------------------------------------
 
-StdReadStream::StdReadStream(std::FILE *fp, std::string path)
-    : fp_(fp)
-    , path_(std::move(path))
+StdReadStream::StdReadStream(std::FILE* fp, std::string path) : fp_(fp), path_(std::move(path))
 {
 }
 
 StdReadStream::~StdReadStream()
 {
-    if (fp_ != nullptr)
-    {
+    if (fp_ != nullptr) {
         std::fclose(fp_);
     }
 }
 
-std::size_t StdReadStream::read(void *buf, std::size_t len, Status &st)
+std::size_t StdReadStream::read(void* buf, std::size_t len, Status& st)
 {
     st = Status::Ok();
-    if (len == 0)
-    {
+    if (len == 0) {
         return 0;
     }
     // 单次 fread 的上限用 size_t 就够；调用方按块（通常 64KB~1MB）读
     const std::size_t got = std::fread(buf, 1, len, fp_);
-    if (got < len)
-    {
-        if (std::ferror(fp_) != 0)
-        {
+    if (got < len) {
+        if (std::ferror(fp_) != 0) {
             const int err = errno;
             st = ioFailure(err == 0 ? EIO : err, "read", path_);
             return got;
@@ -111,8 +102,7 @@ std::size_t StdReadStream::read(void *buf, std::size_t len, Status &st)
 
 Status StdReadStream::seek(std::uint64_t offset)
 {
-    if (seekFile(fp_, offset) != 0)
-    {
+    if (seekFile(fp_, offset) != 0) {
         return ioFailure(errno, "seek", path_);
     }
     return Status::Ok();
@@ -128,29 +118,24 @@ std::uint64_t StdReadStream::tell() const
 // StdWriteStream
 // ---------------------------------------------------------------------------
 
-StdWriteStream::StdWriteStream(std::FILE *fp, std::string path)
-    : fp_(fp)
-    , path_(std::move(path))
+StdWriteStream::StdWriteStream(std::FILE* fp, std::string path) : fp_(fp), path_(std::move(path))
 {
 }
 
 StdWriteStream::~StdWriteStream()
 {
-    if (fp_ != nullptr)
-    {
+    if (fp_ != nullptr) {
         std::fclose(fp_);
     }
 }
 
-Status StdWriteStream::write(const void *buf, std::size_t len)
+Status StdWriteStream::write(const void* buf, std::size_t len)
 {
-    if (len == 0)
-    {
+    if (len == 0) {
         return Status::Ok();
     }
     const std::size_t wrote = std::fwrite(buf, 1, len, fp_);
-    if (wrote != len)
-    {
+    if (wrote != len) {
         const int err = errno == 0 ? EIO : errno;
         return ioFailure(err, "write", path_);
     }
@@ -167,15 +152,13 @@ Status StdWriteStream::seek(std::uint64_t offset)
     // 失败意味着之前写的字节可能根本没进文件。
     //
     // 显式 flush 之后，seek 之前的写入错误会在这里暴露，出错位置与原因对得上。
-    if (const auto st = flush(); !st)
-    {
+    if (const auto st = flush(); !st) {
         return st;
     }
 
     // seekFile 自己接收 u64 并处理平台差异（见文件顶部的实现），这里不必
     // 再做类型转换——转一道反而会在 32 位平台上引入截断。
-    if (seekFile(fp_, offset) != 0)
-    {
+    if (seekFile(fp_, offset) != 0) {
         return ioFailure(errno, "fseek", path_);
     }
     return Status::Ok();
@@ -189,8 +172,7 @@ std::uint64_t StdWriteStream::tell() const
 
 Status StdWriteStream::flush()
 {
-    if (std::fflush(fp_) != 0)
-    {
+    if (std::fflush(fp_) != 0) {
         return ioFailure(errno, "fflush", path_);
     }
     return Status::Ok();
@@ -200,18 +182,15 @@ Status StdWriteStream::sync()
 {
     // 先 flush 用户态缓冲，再要求操作系统落盘。
     // Windows 上 _commit 等价于 fsync；POSIX 上 fsync。
-    if (const auto st = flush(); !st)
-    {
+    if (const auto st = flush(); !st) {
         return st;
     }
 #ifdef _WIN32
-    if (_commit(_fileno(fp_)) != 0)
-    {
+    if (_commit(_fileno(fp_)) != 0) {
         return ioFailure(errno, "fsync", path_);
     }
 #else
-    if (::fsync(fileno(fp_)) != 0)
-    {
+    if (::fsync(fileno(fp_)) != 0) {
         return ioFailure(errno, "fsync", path_);
     }
 #endif
@@ -220,43 +199,36 @@ Status StdWriteStream::sync()
 
 Status StdWriteStream::resize(std::uint64_t size)
 {
-    if (const auto st = flush(); !st)
-    {
+    if (const auto st = flush(); !st) {
         return st;
     }
     const std::int64_t rawCurrent = tellFile(fp_);
-    if (rawCurrent < 0)
-    {
+    if (rawCurrent < 0) {
         return ioFailure(errno, "tell", path_);
     }
     const auto current = static_cast<std::uint64_t>(rawCurrent);
-    if (current == size)
-    {
+    if (current == size) {
         return Status::Ok();
     }
 #ifdef _WIN32
     // _chsize_s 同时负责截断与补零扩展，一条 API 覆盖两种情况。
-    if (_chsize_s(_fileno(fp_), static_cast<__int64>(size)) != 0)
-    {
+    if (_chsize_s(_fileno(fp_), static_cast<__int64>(size)) != 0) {
         return ioFailure(errno, "resize", path_);
     }
 #else
-    if (::ftruncate(::fileno(fp_), static_cast<off_t>(size)) != 0)
-    {
+    if (::ftruncate(::fileno(fp_), static_cast<off_t>(size)) != 0) {
         return ioFailure(errno, "resize", path_);
     }
 #endif
-    if (const auto st = flush(); !st)
-    {
+    if (const auto st = flush(); !st) {
         return st;
     }
     // ftruncate/_chsize_s 不改变 C 流的当前位置，但 resize 之后调用方通常
     // 仍会按自己的偏移写入，这里恢复到原位置以免隐式跳变造成困惑。
-    if (seekFile(fp_, current > size ? size : current) != 0)
-    {
+    if (seekFile(fp_, current > size ? size : current) != 0) {
         return ioFailure(errno, "resize-seek", path_);
     }
     return Status::Ok();
 }
 
-}  // namespace relayer::filestore::detail
+}   // namespace relayer::filestore::detail

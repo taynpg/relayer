@@ -1,14 +1,12 @@
 #pragma once
 
+#include <asio/io_context.hpp>
 #include <chrono>
 #include <functional>
 #include <thread>
 #include <utility>
 
-#include <asio/io_context.hpp>
-
-namespace relayer::test
-{
+namespace relayer::test {
 
 // 事件循环推进工具。
 //
@@ -35,7 +33,7 @@ namespace relayer::test
 // 只有真出问题才耗到超时。
 
 // 跑 duration 那么久（上限语义）。用于"确认某件事**没有**发生"。
-inline void pump(asio::io_context &ctx, std::chrono::milliseconds duration)
+inline void pump(asio::io_context& ctx, std::chrono::milliseconds duration)
 {
     ctx.restart();
     ctx.run_for(duration);
@@ -49,22 +47,19 @@ inline void pump(asio::io_context &ctx, std::chrono::milliseconds duration)
 //
 // 每次 run_for 之间让出一下时间片：某些平台上的 IO 完成通知需要一点点
 // 实际时间才会被投递，纯 busy loop 可能一直看不到。
-inline bool pumpUntil(asio::io_context &ctx, const std::function<bool()> &pred,
+inline bool pumpUntil(asio::io_context& ctx, const std::function<bool()>& pred,
                       std::chrono::milliseconds timeout = std::chrono::seconds(5))
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
 
-    for (;;)
-    {
+    for (;;) {
         ctx.restart();
         ctx.run_for(std::chrono::milliseconds(1));
 
-        if (pred())
-        {
+        if (pred()) {
             return true;
         }
-        if (std::chrono::steady_clock::now() >= deadline)
-        {
+        if (std::chrono::steady_clock::now() >= deadline) {
             // 最后再看一眼：超时前那一瞬间可能刚好满足。
             return pred();
         }
@@ -74,10 +69,10 @@ inline bool pumpUntil(asio::io_context &ctx, const std::function<bool()> &pred,
 
 // 推到条件满足，但**不**返回布尔值——用于"必须成功，失败由随后的断言报错"
 // 的场景，让测试代码读起来是一条直线。
-inline void pumpUntilDone(asio::io_context &ctx, const std::function<bool()> &pred,
+inline void pumpUntilDone(asio::io_context& ctx, const std::function<bool()>& pred,
                           std::chrono::milliseconds timeout = std::chrono::seconds(5))
 {
     (void)pumpUntil(ctx, pred, timeout);
 }
 
-}  // namespace relayer::test
+}   // namespace relayer::test

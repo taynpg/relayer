@@ -21,31 +21,30 @@
 //   读：IFileStore 读归档 → XzDecoder → TarReader → IFileStore 写目标
 //   两侧都是"分块 + 显式缓冲区"，没有回调套回调。
 
-namespace relayer::filestore
-{
+namespace relayer::filestore {
 
 class TarXzArchiver final : public IArchive
 {
 public:
     // store 由调用方持有，生命周期必须覆盖本对象。
-    explicit TarXzArchiver(const IFileStore &store);
+    explicit TarXzArchiver(const IFileStore& store);
     ~TarXzArchiver() override;
 
-    TarXzArchiver(const TarXzArchiver &) = delete;
-    TarXzArchiver &operator=(const TarXzArchiver &) = delete;
+    TarXzArchiver(const TarXzArchiver&) = delete;
+    TarXzArchiver& operator=(const TarXzArchiver&) = delete;
 
     [[nodiscard]] ArchiveFormat format() const noexcept override;
 
-    Status create(std::string_view archivePath, const std::vector<ArchiveItem> &items, const ArchiveOptions &options,
-                  std::vector<std::string> &skipped) const override;
+    Status create(std::string_view archivePath, const std::vector<ArchiveItem>& items, const ArchiveOptions& options,
+                  std::vector<std::string>& skipped) const override;
 
-    Status list(std::string_view archivePath, std::vector<ArchiveEntry> &out) const override;
+    Status list(std::string_view archivePath, std::vector<ArchiveEntry>& out) const override;
 
-    Status extract(std::string_view archivePath, std::string_view destRoot, const ArchiveOptions &options,
-                   std::vector<std::string> &extracted, std::vector<std::string> &skipped) const override;
+    Status extract(std::string_view archivePath, std::string_view destRoot, const ArchiveOptions& options,
+                   std::vector<std::string>& extracted, std::vector<std::string>& skipped) const override;
 
 private:
-    const IFileStore &store_;
+    const IFileStore& store_;
 };
 
-}  // namespace relayer::filestore
+}   // namespace relayer::filestore

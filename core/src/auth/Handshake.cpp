@@ -8,8 +8,7 @@
 // 客户端与服务端两个状态机放在 HandshakeClient.cpp / HandshakeServer.cpp，
 // 这样每个文件只讲一件事：这个文件讲"认证用到的纯计算"。
 
-namespace relayer::core::auth
-{
+namespace relayer::core::auth {
 
 // ---------------------------------------------------------------------------
 // 状态码
@@ -17,8 +16,7 @@ namespace relayer::core::auth
 
 std::string_view toString(AuthStatus s) noexcept
 {
-    switch (s)
-    {
+    switch (s) {
     case AuthStatus::kOk:
         return "ok";
     case AuthStatus::kBadProof:
@@ -30,13 +28,12 @@ std::string_view toString(AuthStatus s) noexcept
     case AuthStatus::kInternal:
         return "internal";
     }
-    return "unknown";  // 不可达，但 clang 需要覆盖所有路径
+    return "unknown";   // 不可达，但 clang 需要覆盖所有路径
 }
 
-AuthStatus authStatusFromByte(std::uint8_t raw, bool &ok) noexcept
+AuthStatus authStatusFromByte(std::uint8_t raw, bool& ok) noexcept
 {
-    switch (raw)
-    {
+    switch (raw) {
     case 0:
         ok = true;
         return AuthStatus::kOk;
@@ -60,8 +57,7 @@ AuthStatus authStatusFromByte(std::uint8_t raw, bool &ok) noexcept
 
 Status toStatus(AuthStatus s, std::string_view context)
 {
-    if (s == AuthStatus::kOk)
-    {
+    if (s == AuthStatus::kOk) {
         return Status::Ok();
     }
     std::string msg;
@@ -76,19 +72,18 @@ Status toStatus(AuthStatus s, std::string_view context)
 // 密钥派生与 proof
 // ---------------------------------------------------------------------------
 
-SessionKey deriveKey(std::string_view password, const Salt &salt, std::uint32_t iterations)
+SessionKey deriveKey(std::string_view password, const Salt& salt, std::uint32_t iterations)
 {
     return crypto::pbkdf2HmacSha256(password, salt.data(), salt.size(), iterations);
 }
 
-namespace
-{
+namespace {
 
 // 把 tag || nonceA || nonceB 拼成一段连续内存再交给 HMAC。
 //
 // 为什么先拼接而不是分两次 update：hmacSha256 是一次性接口（见 Sha256.h 的
 // 说明），它内部不做流式。最长 24 + 32 + 32 = 88 字节，栈上放得下。
-Proof computeProof(const SessionKey &key, const Nonce &first, const Nonce &second)
+Proof computeProof(const SessionKey& key, const Nonce& first, const Nonce& second)
 {
     constexpr std::size_t kTagLen = params::kAuthTag.size();
     std::uint8_t msg[kTagLen + 2 * params::kNonceSize];
@@ -100,14 +95,14 @@ Proof computeProof(const SessionKey &key, const Nonce &first, const Nonce &secon
     return crypto::hmacSha256(key.data(), key.size(), msg, sizeof(msg));
 }
 
-}  // namespace
+}   // namespace
 
-Proof computeClientProof(const SessionKey &key, const Nonce &nonceS, const Nonce &nonceC)
+Proof computeClientProof(const SessionKey& key, const Nonce& nonceS, const Nonce& nonceC)
 {
     return computeProof(key, nonceS, nonceC);
 }
 
-Proof computeServerProof(const SessionKey &key, const Nonce &nonceS, const Nonce &nonceC)
+Proof computeServerProof(const SessionKey& key, const Nonce& nonceS, const Nonce& nonceC)
 {
     // 参数顺序故意和前一个相反（§7.4）。
     return computeProof(key, nonceC, nonceS);
@@ -117,33 +112,30 @@ Proof computeServerProof(const SessionKey &key, const Nonce &nonceS, const Nonce
 // NonceCache
 // ---------------------------------------------------------------------------
 
-NonceCache::NonceCache(std::size_t limit)
-    : limit_(limit == 0 ? 1 : limit)  // 0 会导致 checkAndInsert 每写入就淘汰，语义混乱
+NonceCache::NonceCache(std::size_t limit) : limit_(limit == 0 ? 1 : limit)   // 0 会导致 checkAndInsert 每写入就淘汰，语义混乱
 {
 }
 
-bool NonceCache::contains(const Nonce &n) const
+bool NonceCache::contains(const Nonce& n) const
 {
     return std::find(order_.begin(), order_.end(), n) != order_.end();
 }
 
-bool NonceCache::seen(const Nonce &n) const
+bool NonceCache::seen(const Nonce& n) const
 {
     return contains(n);
 }
 
-bool NonceCache::checkAndInsert(const Nonce &nonce)
+bool NonceCache::checkAndInsert(const Nonce& nonce)
 {
-    if (contains(nonce))
-    {
+    if (contains(nonce)) {
         return false;
     }
     order_.push_back(nonce);
     // 超出上限时淘汰最旧的。淘汰后旧 nonce 可以被重放，但攻击者要利用这点，
     // 必须让对方在这么久之后仍然接受同一批字节——正常连接上握手只发生一次，
     // 而 4096 条的容量已经覆盖了单个进程生命周期内的全部连接。
-    while (order_.size() > limit_)
-    {
+    while (order_.size() > limit_) {
         order_.pop_front();
     }
     return true;
@@ -158,19 +150,17 @@ void NonceCache::clear() noexcept
 // 载荷编解码
 // ---------------------------------------------------------------------------
 
-namespace
-{
+namespace {
 
-void appendBytes(std::vector<char> &out, const void *src, std::size_t len)
+void appendBytes(std::vector<char>& out, const void* src, std::size_t len)
 {
-    const auto *p = static_cast<const char *>(src);
+    const auto* p = static_cast<const char*>(src);
     out.insert(out.end(), p, p + len);
 }
 
-bool expectSize(const Frame &f, std::size_t expected, std::string_view what, std::string &err)
+bool expectSize(const Frame& f, std::size_t expected, std::string_view what, std::string& err)
 {
-    if (f.body.size() == expected)
-    {
+    if (f.body.size() == expected) {
         return true;
     }
     err.assign(what);
@@ -181,10 +171,9 @@ bool expectSize(const Frame &f, std::size_t expected, std::string_view what, std
     return false;
 }
 
-bool expectType(const Frame &f, FrameType expected, std::string &err)
+bool expectType(const Frame& f, FrameType expected, std::string& err)
 {
-    if (f.type == expected)
-    {
+    if (f.type == expected) {
         return true;
     }
     err.assign("unexpected frame type: expected ");
@@ -194,9 +183,9 @@ bool expectType(const Frame &f, FrameType expected, std::string &err)
     return false;
 }
 
-}  // namespace
+}   // namespace
 
-std::vector<char> encodeChallenge(const Salt &salt, const Nonce &nonceS)
+std::vector<char> encodeChallenge(const Salt& salt, const Nonce& nonceS)
 {
     std::vector<char> body;
     body.reserve(params::kChallengeSize);
@@ -205,7 +194,7 @@ std::vector<char> encodeChallenge(const Salt &salt, const Nonce &nonceS)
     return body;
 }
 
-std::vector<char> encodeResponse(const Nonce &nonceC, const Proof &proof)
+std::vector<char> encodeResponse(const Nonce& nonceC, const Proof& proof)
 {
     std::vector<char> body;
     body.reserve(params::kResponseSize);
@@ -214,7 +203,7 @@ std::vector<char> encodeResponse(const Nonce &nonceC, const Proof &proof)
     return body;
 }
 
-std::vector<char> encodeResult(AuthStatus status, const Proof &serverProof)
+std::vector<char> encodeResult(AuthStatus status, const Proof& serverProof)
 {
     std::vector<char> body;
     body.reserve(params::kResultSize);
@@ -228,14 +217,12 @@ std::vector<char> encodeAbort(AuthStatus status)
     return std::vector<char>{static_cast<char>(static_cast<std::uint8_t>(status))};
 }
 
-bool decodeChallenge(const Frame &f, Salt &salt, Nonce &nonceS, std::string &err)
+bool decodeChallenge(const Frame& f, Salt& salt, Nonce& nonceS, std::string& err)
 {
-    if (!expectType(f, FrameType::kAuthChallenge, err))
-    {
+    if (!expectType(f, FrameType::kAuthChallenge, err)) {
         return false;
     }
-    if (!expectSize(f, params::kChallengeSize, "challenge", err))
-    {
+    if (!expectSize(f, params::kChallengeSize, "challenge", err)) {
         return false;
     }
     std::memcpy(salt.data(), f.body.data(), salt.size());
@@ -243,14 +230,12 @@ bool decodeChallenge(const Frame &f, Salt &salt, Nonce &nonceS, std::string &err
     return true;
 }
 
-bool decodeResponse(const Frame &f, Nonce &nonceC, Proof &proof, std::string &err)
+bool decodeResponse(const Frame& f, Nonce& nonceC, Proof& proof, std::string& err)
 {
-    if (!expectType(f, FrameType::kAuthResponse, err))
-    {
+    if (!expectType(f, FrameType::kAuthResponse, err)) {
         return false;
     }
-    if (!expectSize(f, params::kResponseSize, "response", err))
-    {
+    if (!expectSize(f, params::kResponseSize, "response", err)) {
         return false;
     }
     std::memcpy(nonceC.data(), f.body.data(), nonceC.size());
@@ -258,21 +243,18 @@ bool decodeResponse(const Frame &f, Nonce &nonceC, Proof &proof, std::string &er
     return true;
 }
 
-bool decodeResult(const Frame &f, AuthStatus &status, Proof &serverProof, std::string &err)
+bool decodeResult(const Frame& f, AuthStatus& status, Proof& serverProof, std::string& err)
 {
-    if (!expectType(f, FrameType::kAuthResult, err))
-    {
+    if (!expectType(f, FrameType::kAuthResult, err)) {
         return false;
     }
-    if (!expectSize(f, params::kResultSize, "result", err))
-    {
+    if (!expectSize(f, params::kResultSize, "result", err)) {
         return false;
     }
     bool ok = false;
     const auto raw = static_cast<std::uint8_t>(f.body[0]);
     status = authStatusFromByte(raw, ok);
-    if (!ok)
-    {
+    if (!ok) {
         err.assign("unknown auth status byte: ");
         err.append(std::to_string(static_cast<unsigned>(raw)));
         return false;
@@ -281,21 +263,18 @@ bool decodeResult(const Frame &f, AuthStatus &status, Proof &serverProof, std::s
     return true;
 }
 
-bool decodeAbort(const Frame &f, AuthStatus &status, std::string &err)
+bool decodeAbort(const Frame& f, AuthStatus& status, std::string& err)
 {
-    if (!expectType(f, FrameType::kAuthAbort, err))
-    {
+    if (!expectType(f, FrameType::kAuthAbort, err)) {
         return false;
     }
-    if (!expectSize(f, params::kAbortSize, "abort", err))
-    {
+    if (!expectSize(f, params::kAbortSize, "abort", err)) {
         return false;
     }
     bool ok = false;
     const auto raw = static_cast<std::uint8_t>(f.body[0]);
     status = authStatusFromByte(raw, ok);
-    if (!ok)
-    {
+    if (!ok) {
         err.assign("unknown auth abort status byte: ");
         err.append(std::to_string(static_cast<unsigned>(raw)));
         return false;
@@ -319,7 +298,7 @@ Frame makeAuthFrame(FrameType type, std::vector<char> body)
     return f;
 }
 
-void bindSenderIdentity(Frame &f, std::string_view authenticatedId)
+void bindSenderIdentity(Frame& f, std::string_view authenticatedId)
 {
     f.from.assign(authenticatedId.data(), authenticatedId.size());
 }
@@ -331,4 +310,4 @@ bool isAllowedBeforeAuth(FrameType t) noexcept
     return protocol::isAuthType(t);
 }
 
-}  // namespace relayer::core::auth
+}   // namespace relayer::core::auth

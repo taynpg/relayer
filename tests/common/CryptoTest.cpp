@@ -1,18 +1,16 @@
 #include <array>
+#include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include <catch2/catch_test_macros.hpp>
 
 #include "relayer/common/crypto/Aes256Gcm.h"
 #include "relayer/common/crypto/Sha256.h"
 
 using namespace relayer::crypto;
 
-namespace
-{
+namespace {
 
 using Bytes = std::vector<std::uint8_t>;
 
@@ -23,25 +21,20 @@ Bytes fromHex(std::string_view hex)
     Bytes out;
     out.reserve(hex.size() / 2);
 
-    const auto nibble = [](char c) -> std::uint8_t
-    {
-        if (c >= '0' && c <= '9')
-        {
+    const auto nibble = [](char c) -> std::uint8_t {
+        if (c >= '0' && c <= '9') {
             return static_cast<std::uint8_t>(c - '0');
         }
-        if (c >= 'a' && c <= 'f')
-        {
+        if (c >= 'a' && c <= 'f') {
             return static_cast<std::uint8_t>(c - 'a' + 10);
         }
-        if (c >= 'A' && c <= 'F')
-        {
+        if (c >= 'A' && c <= 'F') {
             return static_cast<std::uint8_t>(c - 'A' + 10);
         }
         return 0xFF;
     };
 
-    for (std::size_t i = 0; i + 1 < hex.size(); i += 2)
-    {
+    for (std::size_t i = 0; i + 1 < hex.size(); i += 2) {
         const std::uint8_t hi = nibble(hex[i]);
         const std::uint8_t lo = nibble(hex[i + 1]);
         REQUIRE(hi != 0xFF);
@@ -51,30 +44,29 @@ Bytes fromHex(std::string_view hex)
     return out;
 }
 
-std::string toHex(const std::uint8_t *data, std::size_t len)
+std::string toHex(const std::uint8_t* data, std::size_t len)
 {
     static constexpr char digits[] = "0123456789abcdef";
     std::string s;
     s.reserve(len * 2);
-    for (std::size_t i = 0; i < len; ++i)
-    {
+    for (std::size_t i = 0; i < len; ++i) {
         s.push_back(digits[data[i] >> 4]);
         s.push_back(digits[data[i] & 0x0F]);
     }
     return s;
 }
 
-std::string toHex(const Bytes &b)
+std::string toHex(const Bytes& b)
 {
     return toHex(b.data(), b.size());
 }
 
-std::string toHex(const Sha256::Digest &d)
+std::string toHex(const Sha256::Digest& d)
 {
     return toHex(d.data(), d.size());
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // HMAC-SHA256 —— RFC 4231 附录里的官方测试向量
@@ -153,7 +145,7 @@ TEST_CASE("PBKDF2-HMAC-SHA256 与公开参考值一致", "[crypto][pbkdf2][vecto
 
     SECTION("iterations=1")
     {
-        const Bytes salt = fromHex("73616c74");  // "salt"
+        const Bytes salt = fromHex("73616c74");   // "salt"
         const auto got = pbkdf2HmacSha256("password", salt.data(), salt.size(), 1);
         REQUIRE(toHex(got) == "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b");
     }
@@ -203,8 +195,8 @@ TEST_CASE("PBKDF2 对 salt 与口令敏感", "[crypto][pbkdf2][property]")
     const auto k2 = pbkdf2HmacSha256("password", salt2.data(), salt2.size(), 100);
     const auto k3 = pbkdf2HmacSha256("Password", salt1.data(), salt1.size(), 100);
 
-    REQUIRE(k1 != k2);  // salt 变一位，密钥必须完全不同
-    REQUIRE(k1 != k3);  // 口令大小写变一位，同上
+    REQUIRE(k1 != k2);   // salt 变一位，密钥必须完全不同
+    REQUIRE(k1 != k3);   // 口令大小写变一位，同上
 }
 
 // ===========================================================================
@@ -314,18 +306,16 @@ TEST_CASE("AES-256-GCM 带 AAD", "[crypto][gcm][vector][aad]")
 
     // 解密必须同样带上 AAD 才能通过
     Bytes out(plain.size());
-    REQUIRE(aes256GcmDecrypt(key.data(), nonce.data(), aad.data(), aad.size(), cipher.data(), cipher.size(), tag,
-                             out.data()));
+    REQUIRE(aes256GcmDecrypt(key.data(), nonce.data(), aad.data(), aad.size(), cipher.data(), cipher.size(), tag, out.data()));
     REQUIRE(out == plain);
 
     // AAD 改一位 -> 认证失败
     const Bytes wrongAad = fromHex("feedfacedeadbeeffeedfacedeadbeefabaddad3");
-    REQUIRE_FALSE(aes256GcmDecrypt(key.data(), nonce.data(), wrongAad.data(), wrongAad.size(), cipher.data(),
-                                   cipher.size(), tag, out.data()));
+    REQUIRE_FALSE(aes256GcmDecrypt(key.data(), nonce.data(), wrongAad.data(), wrongAad.size(), cipher.data(), cipher.size(), tag,
+                                   out.data()));
 
     // 完全不给 AAD 也应当失败（不能"省略 AAD 就跳过认证"）
-    REQUIRE_FALSE(
-        aes256GcmDecrypt(key.data(), nonce.data(), nullptr, 0, cipher.data(), cipher.size(), tag, out.data()));
+    REQUIRE_FALSE(aes256GcmDecrypt(key.data(), nonce.data(), nullptr, 0, cipher.data(), cipher.size(), tag, out.data()));
 }
 
 TEST_CASE("AES-256-GCM 往返：各种长度", "[crypto][gcm][roundtrip]")
@@ -335,11 +325,9 @@ TEST_CASE("AES-256-GCM 往返：各种长度", "[crypto][gcm][roundtrip]")
 
     // 覆盖 0、1、15、16、17、31、32 这些围绕块边界的长度
     for (const std::size_t len : {std::size_t(0), std::size_t(1), std::size_t(15), std::size_t(16), std::size_t(17),
-                                  std::size_t(31), std::size_t(32), std::size_t(1000), std::size_t(65536)})
-    {
+                                  std::size_t(31), std::size_t(32), std::size_t(1000), std::size_t(65536)}) {
         Bytes plain(len);
-        for (std::size_t i = 0; i < len; ++i)
-        {
+        for (std::size_t i = 0; i < len; ++i) {
             plain[i] = static_cast<std::uint8_t>((i * 31 + 7) & 0xFF);
         }
 
@@ -377,24 +365,21 @@ TEST_CASE("AES-256-GCM 拒绝被篡改的数据", "[crypto][gcm][tamper]")
         std::copy(std::begin(tag), std::end(tag), std::begin(badTag));
         badTag[15] ^= 0x80;
         Bytes out(plain.size());
-        REQUIRE_FALSE(
-            aes256GcmDecrypt(key.data(), nonce.data(), nullptr, 0, cipher.data(), cipher.size(), badTag, out.data()));
+        REQUIRE_FALSE(aes256GcmDecrypt(key.data(), nonce.data(), nullptr, 0, cipher.data(), cipher.size(), badTag, out.data()));
     }
 
     // 3. 换 nonce
     {
         const Bytes badNonce = fromHex("0f0e0d0c0b0a090807060505");
         Bytes out(plain.size());
-        REQUIRE_FALSE(
-            aes256GcmDecrypt(key.data(), badNonce.data(), nullptr, 0, cipher.data(), cipher.size(), tag, out.data()));
+        REQUIRE_FALSE(aes256GcmDecrypt(key.data(), badNonce.data(), nullptr, 0, cipher.data(), cipher.size(), tag, out.data()));
     }
 
     // 4. 换密钥
     {
         const Bytes badKey = fromHex("1123456789abcdeffedcba98765432100123456789abcdeffedcba9876543210");
         Bytes out(plain.size());
-        REQUIRE_FALSE(
-            aes256GcmDecrypt(badKey.data(), nonce.data(), nullptr, 0, cipher.data(), cipher.size(), tag, out.data()));
+        REQUIRE_FALSE(aes256GcmDecrypt(badKey.data(), nonce.data(), nullptr, 0, cipher.data(), cipher.size(), tag, out.data()));
     }
 }
 

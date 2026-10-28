@@ -1,30 +1,28 @@
 #include "relayer/core/protocol/Frame.h"
 
+#include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 #include <string>
 #include <vector>
 
-#include <catch2/catch_test_macros.hpp>
-
 using namespace relayer::protocol;
 
-namespace
-{
+namespace {
 
 using Bytes = std::vector<char>;
 
-Bytes toBytes(const std::string &s)
+Bytes toBytes(const std::string& s)
 {
     return Bytes(s.begin(), s.end());
 }
 
-std::string toString(const Bytes &b)
+std::string toString(const Bytes& b)
 {
     return std::string(b.begin(), b.end());
 }
 
 // 解包辅助：断言必须是 kOk，并返回解出的帧
-Frame mustUnpack(const Bytes &wire, std::size_t &consumed)
+Frame mustUnpack(const Bytes& wire, std::size_t& consumed)
 {
     Frame f;
     const auto r = unpackFrame(wire.data(), wire.size(), f, consumed);
@@ -32,7 +30,7 @@ Frame mustUnpack(const Bytes &wire, std::size_t &consumed)
     return f;
 }
 
-}  // namespace
+}   // namespace
 
 // ===========================================================================
 // 往返
@@ -43,7 +41,7 @@ TEST_CASE("帧往返：字段全部保真", "[protocol][roundtrip]")
     Frame in;
     in.type = FrameType::kAskFileMeta;
     in.flags = kFlagFromReceiver;
-    in.sessionId = -1234567890123LL;  // 负数，确认是按位原样保存而不是当无符号
+    in.sessionId = -1234567890123LL;   // 负数，确认是按位原样保存而不是当无符号
     in.index = 9876543210LL;
     in.from = "client-A";
     in.to = "client-B";
@@ -101,13 +99,11 @@ TEST_CASE("不带 body CRC 时的理论最小帧", "[protocol][roundtrip][edge]"
 TEST_CASE("帧往返：各种 body 长度", "[protocol][roundtrip]")
 {
     for (const std::size_t len : {std::size_t(0), std::size_t(1), std::size_t(2), std::size_t(255), std::size_t(256),
-                                  std::size_t(4096), std::size_t(65535), std::size_t(65536), std::size_t(200000)})
-    {
+                                  std::size_t(4096), std::size_t(65535), std::size_t(65536), std::size_t(200000)}) {
         Frame in;
         in.type = FrameType::kChunkRequestAck;
         in.body.resize(len);
-        for (std::size_t i = 0; i < len; ++i)
-        {
+        for (std::size_t i = 0; i < len; ++i) {
             in.body[i] = static_cast<char>((i * 37 + 11) & 0xFF);
         }
 
@@ -149,19 +145,17 @@ TEST_CASE("帧头字段落在文档规定的位置", "[protocol][layout]")
     // 这条用例把 docs/PROTOCOL.md 里的偏移表钉死在代码里。
     // 任何"重构调整了字段顺序"的改动都会让它失败。
     Frame in;
-    in.type = FrameType::kAskId;  // 100
+    in.type = FrameType::kAskId;   // 100
     in.sessionId = 1;
     in.index = 2;
 
     const Bytes wire = packFrame(in);
 
-    const auto u16 = [&](std::size_t off)
-    {
+    const auto u16 = [&](std::size_t off) {
         return static_cast<std::uint16_t>(static_cast<std::uint8_t>(wire[off]) |
                                           (static_cast<std::uint16_t>(static_cast<std::uint8_t>(wire[off + 1])) << 8));
     };
-    const auto u32 = [&](std::size_t off)
-    {
+    const auto u32 = [&](std::size_t off) {
         return static_cast<std::uint32_t>(static_cast<std::uint8_t>(wire[off])) |
                (static_cast<std::uint32_t>(static_cast<std::uint8_t>(wire[off + 1])) << 8) |
                (static_cast<std::uint32_t>(static_cast<std::uint8_t>(wire[off + 2])) << 16) |
@@ -176,11 +170,11 @@ TEST_CASE("帧头字段落在文档规定的位置", "[protocol][layout]")
     REQUIRE(u32(0) == frame::kMagic);
 
     REQUIRE(u16(4) == frame::kVersion);
-    REQUIRE(u16(6) == static_cast<std::uint16_t>(kFlagBodyCrc));  // 空 body，自动带 CRC
-    REQUIRE(u16(8) == 100);                                       // kAskId
-    REQUIRE(u16(10) == 0);                                        // reserved 必须为 0
-    REQUIRE(u32(28) == wire.size());                              // frameLen
-    REQUIRE(u32(32) == crc32(wire.data(), 32));                   // headerCrc 覆盖前 32 字节
+    REQUIRE(u16(6) == static_cast<std::uint16_t>(kFlagBodyCrc));   // 空 body，自动带 CRC
+    REQUIRE(u16(8) == 100);                                        // kAskId
+    REQUIRE(u16(10) == 0);                                         // reserved 必须为 0
+    REQUIRE(u32(28) == wire.size());                               // frameLen
+    REQUIRE(u32(32) == crc32(wire.data(), 32));                    // headerCrc 覆盖前 32 字节
 }
 
 TEST_CASE("body CRC 标志由长度自动决定", "[protocol][layout][crc]")
@@ -232,8 +226,8 @@ TEST_CASE("body CRC 标志由长度自动决定", "[protocol][layout][crc]")
     {
         Frame f;
         f.type = FrameType::kAskHeart;
-        f.flags = kFlagBodyCrc;      // 谎报
-        f.body.assign(200000, 'a');  // 实际超过阈值
+        f.flags = kFlagBodyCrc;       // 谎报
+        f.body.assign(200000, 'a');   // 实际超过阈值
 
         const Bytes wire = packFrame(f);
         Frame out;
@@ -246,8 +240,8 @@ TEST_CASE("body CRC 标志由长度自动决定", "[protocol][layout][crc]")
     {
         Frame f;
         f.type = FrameType::kAskHeart;
-        f.flags = kFlagNone;     // 谎报
-        f.body.assign(10, 'a');  // 实际需要 CRC
+        f.flags = kFlagNone;      // 谎报
+        f.body.assign(10, 'a');   // 实际需要 CRC
 
         const Bytes wire = packFrame(f);
         Frame out;
@@ -334,19 +328,17 @@ TEST_CASE("半包：任意前缀都不应当解出帧", "[protocol][unpack][part
     const Bytes wire = packFrame(src);
     REQUIRE(wire.size() > frame::kFixedHeaderSize);
 
-    for (std::size_t cut = 0; cut < wire.size(); ++cut)
-    {
+    for (std::size_t cut = 0; cut < wire.size(); ++cut) {
         Frame out;
         std::size_t consumed = 0;
         const auto r = unpackFrame(wire.data(), cut, out, consumed);
 
         // 除了「cut 恰好等于某段垃圾长度」这种退化情况，前缀都应该只是"不够"
-        if (r == UnPackResult::kOk)
-        {
+        if (r == UnPackResult::kOk) {
             FAIL("对 " << cut << " 字节的前缀解出了完整帧");
         }
         REQUIRE(r == UnPackResult::kNeedMoreData);
-        REQUIRE(consumed == 0);  // 从头就是半帧，不应该吞掉任何字节
+        REQUIRE(consumed == 0);   // 从头就是半帧，不应该吞掉任何字节
     }
 }
 
@@ -366,16 +358,14 @@ TEST_CASE("半包：逐字节喂入能拼出完整帧", "[protocol][unpack][part
     Frame got;
     bool done = false;
 
-    for (const char c : wire)
-    {
+    for (const char c : wire) {
         buf.push_back(c);
 
         Frame out;
         std::size_t consumed = 0;
         const auto r = unpackFrame(buf.data(), buf.size(), out, consumed);
 
-        if (r == UnPackResult::kOk)
-        {
+        if (r == UnPackResult::kOk) {
             got = std::move(out);
             done = true;
             REQUIRE(consumed == buf.size());
@@ -404,8 +394,7 @@ TEST_CASE("粘包：一次输入里连续解出多帧", "[protocol][unpack][stic
     std::vector<Frame> sources;
     Bytes stream;
 
-    for (int i = 0; i < 5; ++i)
-    {
+    for (int i = 0; i < 5; ++i) {
         Frame f;
         f.type = FrameType::kAskHeart;
         f.index = i;
@@ -416,8 +405,7 @@ TEST_CASE("粘包：一次输入里连续解出多帧", "[protocol][unpack][stic
     }
 
     std::size_t offset = 0;
-    for (std::size_t i = 0; i < sources.size(); ++i)
-    {
+    for (std::size_t i = 0; i < sources.size(); ++i) {
         Frame out;
         std::size_t consumed = 0;
         const auto r = unpackFrame(stream.data() + offset, stream.size() - offset, out, consumed);
@@ -533,19 +521,17 @@ TEST_CASE("虚假 magic + 非法 frameLen 时跳 1 字节继续找", "[protocol]
     std::size_t offset = 0;
     Frame out;
     bool found = false;
-    while (offset < stream.size())
-    {
+    while (offset < stream.size()) {
         std::size_t consumed = 0;
         const auto r = unpackFrame(stream.data() + offset, stream.size() - offset, out, consumed);
 
-        if (r == UnPackResult::kOk)
-        {
+        if (r == UnPackResult::kOk) {
             found = true;
             REQUIRE(toString(out.body) == "real-frame");
             break;
         }
         REQUIRE(r == UnPackResult::kNeedMoreData);
-        REQUIRE(consumed >= 1);  // 必须前进，否则死循环
+        REQUIRE(consumed >= 1);   // 必须前进，否则死循环
         offset += consumed;
     }
     REQUIRE(found);
@@ -606,8 +592,7 @@ TEST_CASE("版本不符时返回协议错误", "[protocol][unpack][error]")
     wire[4] = static_cast<char>(3);
     wire[5] = static_cast<char>(0);
     const std::uint32_t newCrc = crc32(wire.data(), 32);
-    for (std::size_t i = 0; i < 4; ++i)
-    {
+    for (std::size_t i = 0; i < 4; ++i) {
         wire[32 + i] = static_cast<char>((newCrc >> (8 * i)) & 0xFF);
     }
 
@@ -634,7 +619,7 @@ TEST_CASE("body CRC 不匹配时返回协议错误并跳过整帧", "[protocol][
     const auto r = unpackFrame(wire.data(), wire.size(), out, consumed);
 
     REQUIRE(r == UnPackResult::kProtocolError);
-    REQUIRE(consumed == wire.size());  // 整帧被丢掉
+    REQUIRE(consumed == wire.size());   // 整帧被丢掉
 }
 
 TEST_CASE("未定义的类型号返回协议错误并跳过整帧", "[protocol][unpack][error][type]")
@@ -733,39 +718,31 @@ TEST_CASE("随机字节流不会崩溃且不会被误判成帧", "[protocol][unp
     std::uint32_t seed = 0x12345678u;
     Bytes junk;
     junk.reserve(20000);
-    for (int i = 0; i < 20000; ++i)
-    {
+    for (int i = 0; i < 20000; ++i) {
         seed = seed * 1103515245u + 12345u;
         junk.push_back(static_cast<char>((seed >> 16) & 0xFF));
     }
 
     std::size_t offset = 0;
     int framesFound = 0;
-    while (offset < junk.size())
-    {
+    while (offset < junk.size()) {
         Frame out;
         std::size_t consumed = 0;
         const auto r = unpackFrame(junk.data() + offset, junk.size() - offset, out, consumed);
 
-        if (r == UnPackResult::kOk)
-        {
+        if (r == UnPackResult::kOk) {
             ++framesFound;
             REQUIRE(consumed > 0);
-        }
-        else if (r == UnPackResult::kProtocolError)
-        {
+        } else if (r == UnPackResult::kProtocolError) {
             // 随机数据里凑巧出现完整合法帧的概率极低，走到这里也算合理，
             // 但不能因此卡住：至少要消费掉一些字节。
             REQUIRE(consumed > 0);
-        }
-        else
-        {
+        } else {
             REQUIRE(consumed <= junk.size() - offset);
         }
 
         offset += consumed;
-        if (consumed == 0)
-        {
+        if (consumed == 0) {
             // 剩余数据构成"半个头"，等更多数据即可。测试里没有更多了，退出。
             break;
         }

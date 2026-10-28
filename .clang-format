@@ -1,94 +1,20 @@
-# relayer 代码风格
-#
-# 设计原则：所有规则都能被 clang-format 自动修复。凡是需要"人工判断"的
-# 约定（命名、注释、错误处理）不写在这个文件里，写在 CONTRIBUTING.md。
-#
-# 修改前请注意：本文件一旦变更，全仓库需要重新格式化一次，
-# 否则后续提交会混入大量与功能无关的 diff。
-
-Language: Cpp
-BasedOnStyle: LLVM
-
-# ---- 列宽 ----
-ColumnLimit: 120
-# 120 的依据：现代宽屏 + 三栏 diff 仍可读；过窄会让
-# 日志格式串和错误消息被切得很难看。
-
-# ---- 缩进 ----
+﻿BasedOnStyle: LLVM
 IndentWidth: 4
-TabWidth: 4
-UseTab: Never
+PointerAlignment: Left
 AccessModifierOffset: -4
-# 访问修饰符与类体同列（public:/private: 顶格不缩进）
-
-# ---- 大括号 ----
-BreakBeforeBraces: Allman
-# 函数、类、if/for 的左大括号都换行。与 v1 保持一致，
-# 也让 diff 里"少了一个括号"这类错误更容易被发现。
-
-# ---- 空格 ----
-SpaceBeforeParens: ControlStatements
-SpaceInEmptyBlock: false
-SpaceBeforeRangeBasedForLoopColon: true
-PointerAlignment: Right
-# int* p 而不是 int *p
-
-# ---- 换行 ----
-AllowShortFunctionsOnASingleLine: Empty
-AllowShortIfStatementsOnASingleLine: Never
-AllowShortLoopsOnASingleLine: false
-AllowShortBlocksOnASingleLine: Empty
-# 只有空函数体允许写成一行（单行 getter 例外见 NextLine / 手动）
-
-BreakBeforeBinaryOperators: None
-BreakBeforeTernaryOperators: true
-BreakConstructorInitializers: BeforeComma
-BreakInheritanceList: BeforeComma
-ConstructorInitializerIndentWidth: 4
-ContinuationIndentWidth: 4
-
-BinPackArguments: true
-BinPackParameters: true
-# 参数装箱而非每行一个。函数签名普遍短，一个参数一行反而更难读；
-# 真正长的调用会被 clang-format 自动分行。
-
-AlignAfterOpenBracket: Align
-AlignOperands: AlignAfterOperator
-AlignTrailingComments: true
-
-# ---- 空行 ----
-MaxEmptyLinesToKeep: 1
-EmptyLineBeforeAccessModifier: LogicalBlock
-
-# ---- 头文件 ----
-SortIncludes: CaseSensitive
-IncludeBlocks: Regroup
-# include 分成四组，组内按字典序：
-#   1. 本文件对应的头（自动置顶）
-#   2. C 与标准库
-#   3. 三方库
-#   4. 本项目
-IncludeCategories:
-  # 本文件自身的头
-  - Regex: '^"(stdafx|pch)\.h"$'
-    Priority: 0
-  # C 标准库
-  - Regex: '^<[a-z_]+(\.h)?>$'
-    Priority: 1
-  # C++ 标准库（无扩展名、全小写，或以下划线开头的实现细节）
-  - Regex: '^<[a-z_0-9]+>$'
-    Priority: 2
-  # 三方库
-  - Regex: '^<(asio|cereal|fmt|spdlog|nlohmann|catch2|miniz|lzma)/'
-    Priority: 3
-  # 本项目（relayer/... 或同目录相对引用）
-  - Regex: '^"'
-    Priority: 4
-
-# ---- 其它 ----
-DerivePointerAlignment: false
-Standard: c++17
 ReflowComments: true
-# 注释也要换行，避免出现超宽注释
-SpacesBeforeTrailingComments: 2
-QualifierAlignment: Leave
+SpacesBeforeTrailingComments: 3
+AllowShortFunctionsOnASingleLine: None
+AllowShortEnumsOnASingleLine: false
+BreakBeforeBraces: Custom
+BraceWrapping:
+    AfterFunction: true
+    AfterClass: true
+TabWidth: 4
+ColumnLimit: 130
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<.*>'
+    Priority: 1
+  - Regex: '^".*"'
+    Priority: 2

@@ -2,8 +2,7 @@
 
 #include <QDialog>
 
-namespace Ui
-{
+namespace Ui {
 class Setting;
 }
 
@@ -27,11 +26,11 @@ class Setting : public QDialog
     Q_OBJECT
 
 public:
-    explicit Setting(QWidget *parent = nullptr);
+    explicit Setting(QWidget* parent = nullptr);
     ~Setting() override;
 
-    Setting(const Setting &) = delete;
-    Setting &operator=(const Setting &) = delete;
+    Setting(const Setting&) = delete;
+    Setting& operator=(const Setting&) = delete;
 
 private slots:
     void onRetryModeChanged();
@@ -40,5 +39,5 @@ private slots:
 private:
     void loadSettings();
 
-    Ui::Setting *ui_;
+    Ui::Setting* ui_;
 };

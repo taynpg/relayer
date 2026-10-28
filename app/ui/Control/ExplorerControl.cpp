@@ -25,11 +25,10 @@
 #include "ui/FileMetaInfo.h"
 #include "ui_ExplorerControl.h"
 
-namespace
-{
+namespace {
 // 远端路径一律用 `a/b`（协议里也是这个形式），不套用本地平台规则：
 // 对端可能是另一个系统，本地规则未必适用。
-QString joinRel(const QString &base, const QString &name)
+QString joinRel(const QString& base, const QString& name)
 {
     return base.isEmpty() ? name : base + QLatin1Char('/') + name;
 }
@@ -41,19 +40,16 @@ QString joinRel(const QString &base, const QString &name)
 // 分隔符语义：Windows 上反斜杠也是分隔符，而 Unix 允许文件名含它。
 // 不按平台区分的话，要么 Windows 上会把名字拆成两段（可能走到共享根之外），
 // 要么 Unix 上点不进一个合法目录。
-bool isPathLikeName(const QString &name)
+bool isPathLikeName(const QString& name)
 {
-    if (name.isEmpty() || name == QLatin1String(".") || name == QLatin1String(".."))
-    {
+    if (name.isEmpty() || name == QLatin1String(".") || name == QLatin1String("..")) {
         return true;
     }
-    if (name.contains(QLatin1Char('/')))
-    {
+    if (name.contains(QLatin1Char('/'))) {
         return true;
     }
 #ifdef Q_OS_WIN
-    if (name.contains(QLatin1Char('\\')))
-    {
+    if (name.contains(QLatin1Char('\\'))) {
         return true;
     }
 #endif
@@ -65,30 +61,25 @@ bool isPathLikeName(const QString &name)
 // 上限 512 MiB：这是**在 GUI 线程同步算**的（见下面菜单项），超过这个
 // 体积的等待会让人以为程序挂了。真要算更大的文件，用 relayer-cli 或系统
 // 工具的 certutil/sha256sum。
-QString fileSha256(const QString &path)
+QString fileSha256(const QString& path)
 {
     constexpr qint64 kLimit = 512LL * 1024 * 1024;
     QFile file(path);
-    if (!file.open(QIODevice::ReadOnly))
-    {
+    if (!file.open(QIODevice::ReadOnly)) {
         return QString();
     }
-    if (file.size() > kLimit)
-    {
+    if (file.size() > kLimit) {
         return QStringLiteral("too-large");
     }
 
     relayer::crypto::Sha256 hash;
     QByteArray buffer(1 << 20, Qt::Uninitialized);
-    while (true)
-    {
+    while (true) {
         const qint64 n = file.read(buffer.data(), buffer.size());
-        if (n < 0)
-        {
+        if (n < 0) {
             return QString();
         }
-        if (n == 0)
-        {
+        if (n == 0) {
             break;
         }
         hash.update(buffer.constData(), static_cast<std::size_t>(n));
@@ -96,14 +87,14 @@ QString fileSha256(const QString &path)
     return QString::fromStdString(relayer::crypto::Sha256::hex(hash.digest()));
 }
 
-QString parentRel(const QString &path)
+QString parentRel(const QString& path)
 {
     const auto slash = path.lastIndexOf(QLatin1Char('/'));
     return slash < 0 ? QString() : path.left(slash);
 }
 
 // 后缀筛选里代表"无后缀文件"的特殊标签。
-constexpr const char *kNoExtLabel = "(无后缀)";
+constexpr const char* kNoExtLabel = "(无后缀)";
 
 QString typeText(bool isDir)
 {
@@ -113,25 +104,21 @@ QString typeText(bool isDir)
 QString sizeText(qint64 bytes)
 {
     // 与 MainWindow::humanBytes 同规则；目录不显示大小。
-    if (bytes <= 0)
-    {
+    if (bytes <= 0) {
         return QStringLiteral("0.0 B");
     }
-    const char *units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
+    const char* units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
     double v = static_cast<double>(bytes);
     int i = 0;
-    while (v >= 1024.0 && i < 4)
-    {
+    while (v >= 1024.0 && i < 4) {
         v /= 1024.0;
         ++i;
     }
     return QString::number(v, 'f', 1) + QLatin1String(units[i]);
 }
-}  // namespace
+}   // namespace
 
-ExplorerControl::ExplorerControl(QWidget *parent)
-    : QDialog(parent)
-    , ui_(new Ui::ExplorerControl)
+ExplorerControl::ExplorerControl(QWidget* parent) : QDialog(parent), ui_(new Ui::ExplorerControl)
 {
     ui_->setupUi(this);
     initControl();
@@ -163,7 +150,7 @@ void ExplorerControl::initControl()
     table_->horizontalHeader()->setSortIndicatorShown(true);
 
     // 表格塞进 .ui 预留的占位区域。
-    auto *layout = new QHBoxLayout(ui_->widget);
+    auto* layout = new QHBoxLayout(ui_->widget);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(table_);
 
@@ -176,19 +163,18 @@ void ExplorerControl::initSignals()
     connect(ui_->btnHome, &QPushButton::clicked, this, &ExplorerControl::onHome);
     connect(ui_->btnUp, &QPushButton::clicked, this, &ExplorerControl::onUp);
     connect(table_, &QTableWidget::itemDoubleClicked, this,
-            [this](QTableWidgetItem *item) { onDoubleClick(item ? item->row() : -1); });
+            [this](QTableWidgetItem* item) { onDoubleClick(item ? item->row() : -1); });
     connect(table_, &QTableWidget::customContextMenuRequested, this, &ExplorerControl::onTableContextMenu);
     connect(table_->horizontalHeader(), &QHeaderView::sectionClicked, this, &ExplorerControl::onHeaderClicked);
 
     // 名称筛选 200ms 防抖：大目录下避免每次按键都全量重建。
-    auto *filterTimer = new QTimer(this);
+    auto* filterTimer = new QTimer(this);
     filterTimer->setSingleShot(true);
     filterTimer->setInterval(200);
     connect(filterTimer, &QTimer::timeout, this, &ExplorerControl::onFilterChanged);
     connect(ui_->edSearch, &QLineEdit::textChanged, filterTimer, qOverload<>(&QTimer::start));
     // 后缀是点击式多选，无需防抖。
-    connect(ui_->cbExt, &CheckableComboBox::checkedItemsChanged, this,
-            [this](const QStringList &) { onFilterChanged(); });
+    connect(ui_->cbExt, &CheckableComboBox::checkedItemsChanged, this, [this](const QStringList&) { onFilterChanged(); });
     connect(ui_->btnFilter, &QPushButton::toggled, this, &ExplorerControl::onToggleFilter);
     connect(ui_->btnResetFilter, &QPushButton::clicked, this, &ExplorerControl::onResetFilter);
 
@@ -196,14 +182,13 @@ void ExplorerControl::initSignals()
     ui_->filterWidget->setVisible(ui_->btnFilter->isChecked());
 }
 
-bool ExplorerControl::listDir(const QString &dir, QVector<FileEntry> &entries) const
+bool ExplorerControl::listDir(const QString& dir, QVector<FileEntry>& entries) const
 {
     const QFileInfoList items =
         QDir(dir).entryInfoList(QDir::AllDirs | QDir::Files | QDir::NoDotAndDotDot | QDir::NoSymLinks, QDir::Unsorted);
     entries.clear();
     entries.reserve(items.size());
-    for (const QFileInfo &fi : items)
-    {
+    for (const QFileInfo& fi : items) {
         FileEntry e;
         e.name = fi.fileName();
         e.isDir = fi.isDir();
@@ -214,12 +199,10 @@ bool ExplorerControl::listDir(const QString &dir, QVector<FileEntry> &entries) c
     return true;
 }
 
-void ExplorerControl::enterPath(const QString &path)
+void ExplorerControl::enterPath(const QString& path)
 {
-    if (source_ == Source::Remote)
-    {
-        if (peerId_.isEmpty())
-        {
+    if (source_ == Source::Remote) {
+        if (peerId_.isEmpty()) {
             // 常驻的面板还没选对端：不发请求，保持空表（displayPath 已经
             // 显示"<未选择对端>"）。
             entries_.clear();
@@ -234,22 +217,19 @@ void ExplorerControl::enterPath(const QString &path)
         // 对不存在的项是静默空操作，界面会看起来毫无反应。
         showPath(QStringLiteral("%1:/%2").arg(peerId_, rel));
         table_->setRowCount(0);
-        setStatus(QStringLiteral("正在读取 %1 …（对端离线时约 10 秒后超时）")
-                      .arg(rel.isEmpty() ? QStringLiteral("<共享根>") : rel));
-        emit notice(
-            QStringLiteral("[浏览] 读取 %1:%2 …").arg(peerId_, rel.isEmpty() ? QStringLiteral("<共享根>") : rel));
+        setStatus(
+            QStringLiteral("正在读取 %1 …（对端离线时约 10 秒后超时）").arg(rel.isEmpty() ? QStringLiteral("<共享根>") : rel));
+        emit notice(QStringLiteral("[浏览] 读取 %1:%2 …").arg(peerId_, rel.isEmpty() ? QStringLiteral("<共享根>") : rel));
         emit remoteListRequested(peerId_, rel);
         return;
     }
 
     const QString cleaned = QDir::cleanPath(path);
-    if (cleaned.isEmpty())
-    {
+    if (cleaned.isEmpty()) {
         return;
     }
     QVector<FileEntry> items;
-    if (!listDir(cleaned, items))
-    {
+    if (!listDir(cleaned, items)) {
         emit notice(QStringLiteral("无法访问目录：%1").arg(cleaned));
         return;
     }
@@ -262,10 +242,8 @@ void ExplorerControl::enterPath(const QString &path)
     // 本地面板也给状态：两栏并排时，一边有字数统计、一边空白会让人以为
     // 另一边没在工作。
     int dirs = 0;
-    for (const auto &e : items)
-    {
-        if (e.isDir)
-        {
+    for (const auto& e : items) {
+        if (e.isDir) {
             ++dirs;
         }
     }
@@ -274,8 +252,7 @@ void ExplorerControl::enterPath(const QString &path)
 
 void ExplorerControl::onEnter()
 {
-    if (source_ == Source::Remote)
-    {
+    if (source_ == Source::Remote) {
         // 远端路径不可手输：它相对对端共享根，手敲绝对路径没有意义。
         // 导航靠双击、上一级与"根目录"按钮。
         return;
@@ -285,8 +262,7 @@ void ExplorerControl::onEnter()
 
 void ExplorerControl::onHome()
 {
-    if (source_ == Source::Remote)
-    {
+    if (source_ == Source::Remote) {
         // 远端模式下这个按钮是"回到共享根"（按钮文字在 setRemotePeer 里改）。
         enterPath(QString());
         return;
@@ -296,8 +272,7 @@ void ExplorerControl::onHome()
     const QString home = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
     ui_->cbPath->clear();
     ui_->cbPath->addItem(home);
-    for (const QFileInfo &drive : QDir::drives())
-    {
+    for (const QFileInfo& drive : QDir::drives()) {
         ui_->cbPath->addItem(drive.absoluteFilePath());
     }
     ui_->cbPath->setCurrentText(home);
@@ -306,43 +281,35 @@ void ExplorerControl::onHome()
 
 void ExplorerControl::onUp()
 {
-    if (source_ == Source::Remote)
-    {
-        if (currentPath_.isEmpty())
-        {
-            return;  // 已在根
+    if (source_ == Source::Remote) {
+        if (currentPath_.isEmpty()) {
+            return;   // 已在根
         }
         enterPath(parentRel(currentPath_));
         return;
     }
-    if (currentPath_.isEmpty())
-    {
+    if (currentPath_.isEmpty()) {
         return;
     }
     QDir dir(currentPath_);
-    if (dir.cdUp())
-    {
+    if (dir.cdUp()) {
         enterPath(dir.absolutePath());
     }
 }
 
 void ExplorerControl::onDoubleClick(int row)
 {
-    if (row < 0)
-    {
+    if (row < 0) {
         return;
     }
-    auto *typeItem = table_->item(row, toInt(ExpColumn::Type));
-    auto *nameItem = table_->item(row, toInt(ExpColumn::Name));
-    if (!typeItem || !nameItem || typeItem->text() != QStringLiteral("Dir"))
-    {
-        return;  // 只有目录可进入；文件的"打开"在右键菜单里
+    auto* typeItem = table_->item(row, toInt(ExpColumn::Type));
+    auto* nameItem = table_->item(row, toInt(ExpColumn::Name));
+    if (!typeItem || !nameItem || typeItem->text() != QStringLiteral("Dir")) {
+        return;   // 只有目录可进入；文件的"打开"在右键菜单里
     }
-    if (source_ == Source::Remote)
-    {
+    if (source_ == Source::Remote) {
         const QString name = nameItem->text();
-        if (isPathLikeName(name))
-        {
+        if (isPathLikeName(name)) {
             // 拒绝进入而不是"尽力拼一下"：拼出来的路径可能指向共享根之外，
             // 服务端会再拒一次，但客户端不该把这种请求发出去。
             emit notice(QStringLiteral("[浏览] 条目名不是单段，拒绝进入：%1").arg(name));
@@ -356,31 +323,27 @@ void ExplorerControl::onDoubleClick(int row)
 
 QStringList ExplorerControl::selectedLocalPaths() const
 {
-    if (source_ != Source::Local)
-    {
-        return {};  // 远端条目的"路径"相对共享根，不是本地路径
+    if (source_ != Source::Local) {
+        return {};   // 远端条目的"路径"相对共享根，不是本地路径
     }
     QSet<int> rowSet;
-    for (auto *it : table_->selectedItems())
-    {
+    for (auto* it : table_->selectedItems()) {
         rowSet.insert(it->row());
     }
     QVector<int> rows(rowSet.cbegin(), rowSet.cend());
-    std::sort(rows.begin(), rows.end());  // 保持表格顺序，任务表按它排队
+    std::sort(rows.begin(), rows.end());   // 保持表格顺序，任务表按它排队
 
     QStringList out;
     out.reserve(rows.size());
-    for (int r : rows)
-    {
-        if (auto *item = table_->item(r, toInt(ExpColumn::Name)))
-        {
+    for (int r : rows) {
+        if (auto* item = table_->item(r, toInt(ExpColumn::Name))) {
             out << QDir(currentPath_).filePath(item->text());
         }
     }
     return out;
 }
 
-void ExplorerControl::showPath(const QString &text)
+void ExplorerControl::showPath(const QString& text)
 {
     // 远端模式 cbPath 不可编辑：setCurrentText 在非可编辑的 QComboBox 上
     // 只查已有项，查不到就静默忽略。改成"清空 + 加一项 + 选中"。
@@ -389,7 +352,7 @@ void ExplorerControl::showPath(const QString &text)
     ui_->cbPath->setCurrentIndex(0);
 }
 
-void ExplorerControl::setStatus(const QString &text, bool error)
+void ExplorerControl::setStatus(const QString& text, bool error)
 {
     ui_->lblStatus->setText(text);
     ui_->lblStatus->setStyleSheet(error ? QStringLiteral("color: #c0392b;") : QString());
@@ -397,18 +360,16 @@ void ExplorerControl::setStatus(const QString &text, bool error)
 
 QString ExplorerControl::displayPath() const
 {
-    if (source_ == Source::Local)
-    {
+    if (source_ == Source::Local) {
         return currentPath_;
     }
-    if (peerId_.isEmpty())
-    {
+    if (peerId_.isEmpty()) {
         return QStringLiteral("<未选择对端>");
     }
     return QStringLiteral("%1:/%2").arg(peerId_, currentPath_);
 }
 
-void ExplorerControl::setRemotePeer(const QString &peerId, const QString &peerName, const QString &relPath)
+void ExplorerControl::setRemotePeer(const QString& peerId, const QString& peerName, const QString& relPath)
 {
     source_ = Source::Remote;
     peerId_ = peerId;
@@ -430,8 +391,7 @@ void ExplorerControl::setRemotePeer(const QString &peerId, const QString &peerNa
     showPath(displayPath());
     rebuildView();
 
-    if (peerId_.isEmpty())
-    {
+    if (peerId_.isEmpty()) {
         // 远端面板常驻显示（v1 是本地/远端各占一半），未选对端时也要有
         // 明确状态，否则看起来像坏了。
         showPath(QStringLiteral("<未选择对端>"));
@@ -459,14 +419,12 @@ void ExplorerControl::useLocalSource()
     onHome();
 }
 
-void ExplorerControl::applyRemoteEntries(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows)
+void ExplorerControl::applyRemoteEntries(bool ok, const QString& summary, const QList<relayer::app::RemoteRow>& rows)
 {
-    if (source_ != Source::Remote)
-    {
-        return;  // 用户已经切回本地，迟到的应答丢掉
+    if (source_ != Source::Remote) {
+        return;   // 用户已经切回本地，迟到的应答丢掉
     }
-    if (!ok)
-    {
+    if (!ok) {
         // 失败时不要停在"没进去的目录"上：路径保持原样，表格清空并说明原因。
         entries_.clear();
         rebuildView();
@@ -479,8 +437,7 @@ void ExplorerControl::applyRemoteEntries(bool ok, const QString &summary, const 
     currentPath_ = remotePendingPath_;
     entries_.clear();
     entries_.reserve(rows.size());
-    for (const auto &r : rows)
-    {
+    for (const auto& r : rows) {
         FileEntry e;
         e.name = r.name;
         e.isDir = r.isDir;
@@ -493,35 +450,28 @@ void ExplorerControl::applyRemoteEntries(bool ok, const QString &summary, const 
     rebuildView();
 
     int dirs = 0;
-    for (const auto &e : entries_)
-    {
-        if (e.isDir)
-        {
+    for (const auto& e : entries_) {
+        if (e.isDir) {
             ++dirs;
         }
     }
-    setStatus(
-        QStringLiteral("%1 项（%2 个目录，%3 个文件）").arg(entries_.size()).arg(dirs).arg(entries_.size() - dirs));
+    setStatus(QStringLiteral("%1 项（%2 个目录，%3 个文件）").arg(entries_.size()).arg(dirs).arg(entries_.size() - dirs));
     emit notice(QStringLiteral("[浏览] %1 共 %2 项").arg(displayPath()).arg(entries_.size()));
 }
 
 void ExplorerControl::onHeaderClicked(int index)
 {
     // 第 0 列是图标，不参与排序。
-    if (index <= 0)
-    {
+    if (index <= 0) {
         return;
     }
-    if (index == sortColumn_)
-    {
+    if (index == sortColumn_) {
         sortOrder_ = (sortOrder_ == Qt::AscendingOrder) ? Qt::DescendingOrder : Qt::AscendingOrder;
-    }
-    else
-    {
+    } else {
         sortColumn_ = index;
         // 时间/大小默认降序（文件管理器习惯：最新的/最大的在前）。
-        sortOrder_ = (index == toInt(ExpColumn::Modified) || index == toInt(ExpColumn::Size)) ? Qt::DescendingOrder
-                                                                                              : Qt::AscendingOrder;
+        sortOrder_ =
+            (index == toInt(ExpColumn::Modified) || index == toInt(ExpColumn::Size)) ? Qt::DescendingOrder : Qt::AscendingOrder;
     }
     rebuildView();
 }
@@ -549,25 +499,19 @@ void ExplorerControl::updateExtOptions()
 {
     QStringList exts;
     bool hasNoExt = false;
-    for (const FileEntry &e : entries_)
-    {
-        if (e.isDir)
-        {
+    for (const FileEntry& e : entries_) {
+        if (e.isDir) {
             continue;
         }
         const QString ext = QFileInfo(e.name).suffix().toLower();
-        if (ext.isEmpty())
-        {
+        if (ext.isEmpty()) {
             hasNoExt = true;
-        }
-        else if (!exts.contains(ext))
-        {
+        } else if (!exts.contains(ext)) {
             exts.append(ext);
         }
     }
     exts.sort();
-    if (hasNoExt)
-    {
+    if (hasNoExt) {
         exts.prepend(QLatin1String(kNoExtLabel));
     }
     // setOptions 自动保留同名旧勾选：跨目录导航时"只看某类文件"得以延续。
@@ -577,25 +521,20 @@ void ExplorerControl::updateExtOptions()
 void ExplorerControl::rebuildView()
 {
     // 1) 过滤；目录与文件分两组（目录恒置顶，与资源管理器一致）。
-    QVector<const FileEntry *> dirs;
-    QVector<const FileEntry *> files;
-    for (const FileEntry &e : entries_)
-    {
-        if (!filterName_.isEmpty() && !e.name.contains(filterName_, Qt::CaseInsensitive))
-        {
+    QVector<const FileEntry*> dirs;
+    QVector<const FileEntry*> files;
+    for (const FileEntry& e : entries_) {
+        if (!filterName_.isEmpty() && !e.name.contains(filterName_, Qt::CaseInsensitive)) {
             continue;
         }
-        if (!filterExts_.isEmpty())
-        {
+        if (!filterExts_.isEmpty()) {
             // 选了后缀后只显示匹配的文件，目录一律隐藏。
-            if (e.isDir)
-            {
+            if (e.isDir) {
                 continue;
             }
             const QString rawExt = QFileInfo(e.name).suffix().toLower();
             const QString key = rawExt.isEmpty() ? QLatin1String(kNoExtLabel) : rawExt;
-            if (!filterExts_.contains(key))
-            {
+            if (!filterExts_.contains(key)) {
                 continue;
             }
         }
@@ -604,11 +543,10 @@ void ExplorerControl::rebuildView()
 
     // 2) 各组内独立排序，再按方向翻转（保持目录置顶）。
     const int col = sortColumn_;
-    auto cmp = [col](const FileEntry *a, const FileEntry *b) { return lessThan(*a, *b, col); };
+    auto cmp = [col](const FileEntry* a, const FileEntry* b) { return lessThan(*a, *b, col); };
     std::stable_sort(dirs.begin(), dirs.end(), cmp);
     std::stable_sort(files.begin(), files.end(), cmp);
-    if (sortOrder_ == Qt::DescendingOrder)
-    {
+    if (sortOrder_ == Qt::DescendingOrder) {
         std::reverse(dirs.begin(), dirs.end());
         std::reverse(files.begin(), files.end());
     }
@@ -619,15 +557,12 @@ void ExplorerControl::rebuildView()
     table_->clearContents();
     table_->setRowCount(0);
     int row = 0;
-    for (const auto *group : {&dirs, &files})
-    {
-        for (const FileEntry *e : *group)
-        {
+    for (const auto* group : {&dirs, &files}) {
+        for (const FileEntry* e : *group) {
             table_->insertRow(row);
             setFileItem(*e, row);
             ++row;
-            if (row % 50 == 0)
-            {
+            if (row % 50 == 0) {
                 QGuiApplication::processEvents();
             }
         }
@@ -638,70 +573,64 @@ void ExplorerControl::rebuildView()
     table_->setUpdatesEnabled(true);
 }
 
-bool ExplorerControl::lessThan(const FileEntry &a, const FileEntry &b, int column)
+bool ExplorerControl::lessThan(const FileEntry& a, const FileEntry& b, int column)
 {
     // 主键比较；并列时以名称（不区分大小写）兜底，保证严格弱序。
-    switch (column)
-    {
+    switch (column) {
     case static_cast<int>(ExpColumn::Modified):
-        if (a.modifiedMs != b.modifiedMs)
-        {
+        if (a.modifiedMs != b.modifiedMs) {
             return a.modifiedMs < b.modifiedMs;
         }
         break;
     case static_cast<int>(ExpColumn::Type):
-        if (a.isDir != b.isDir)
-        {
-            return b.isDir;  // 目录排前
+        if (a.isDir != b.isDir) {
+            return b.isDir;   // 目录排前
         }
         break;
     case static_cast<int>(ExpColumn::Size):
-        if (a.size != b.size)
-        {
+        if (a.size != b.size) {
             return a.size < b.size;
         }
         break;
-    default:  // 名称
+    default:   // 名称
         break;
     }
     return a.name.toLower() < b.name.toLower();
 }
 
-void ExplorerControl::setFileItem(const FileEntry &entry, int row)
+void ExplorerControl::setFileItem(const FileEntry& entry, int row)
 {
     static const QIcon dirIcon = QApplication::style()->standardIcon(QStyle::SP_DirIcon);
     static const QIcon fileIcon = QApplication::style()->standardIcon(QStyle::SP_FileIcon);
 
-    auto *iconItem = new QTableWidgetItem();
+    auto* iconItem = new QTableWidgetItem();
     iconItem->setIcon(entry.isDir ? dirIcon : fileIcon);
     iconItem->setTextAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
     iconItem->setFlags(iconItem->flags() & ~Qt::ItemIsEditable);
     table_->setItem(row, toInt(ExpColumn::Icon), iconItem);
 
-    auto *nameItem = new QTableWidgetItem(entry.name);
+    auto* nameItem = new QTableWidgetItem(entry.name);
     nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
     table_->setItem(row, toInt(ExpColumn::Name), nameItem);
 
-    auto *timeItem = new QTableWidgetItem(
-        QDateTime::fromMSecsSinceEpoch(entry.modifiedMs).toString(QStringLiteral("yyyy-MM-dd hh:mm:ss")));
+    auto* timeItem =
+        new QTableWidgetItem(QDateTime::fromMSecsSinceEpoch(entry.modifiedMs).toString(QStringLiteral("yyyy-MM-dd hh:mm:ss")));
     timeItem->setFlags(timeItem->flags() & ~Qt::ItemIsEditable);
     table_->setItem(row, toInt(ExpColumn::Modified), timeItem);
 
-    auto *typeItem = new QTableWidgetItem(typeText(entry.isDir));
+    auto* typeItem = new QTableWidgetItem(typeText(entry.isDir));
     typeItem->setFlags(typeItem->flags() & ~Qt::ItemIsEditable);
     table_->setItem(row, toInt(ExpColumn::Type), typeItem);
 
-    auto *sizeItem = new QTableWidgetItem(entry.isDir ? QString() : sizeText(entry.size));
+    auto* sizeItem = new QTableWidgetItem(entry.isDir ? QString() : sizeText(entry.size));
     sizeItem->setFlags(sizeItem->flags() & ~Qt::ItemIsEditable);
     table_->setItem(row, toInt(ExpColumn::Size), sizeItem);
 }
 
-const ExplorerControl::FileEntry *ExplorerControl::findEntry(const QString &name) const
+const ExplorerControl::FileEntry* ExplorerControl::findEntry(const QString& name) const
 {
-    for (const auto &e : entries_)
-    {
-        if (e.name == name)
-        {
+    for (const auto& e : entries_) {
+        if (e.name == name) {
             return &e;
         }
     }
@@ -710,12 +639,11 @@ const ExplorerControl::FileEntry *ExplorerControl::findEntry(const QString &name
 
 void ExplorerControl::showMetaInfo(int row)
 {
-    if (row < 0 || row >= table_->rowCount())
-    {
+    if (row < 0 || row >= table_->rowCount()) {
         return;
     }
     const QString name = table_->item(row, toInt(ExpColumn::Name))->text();
-    const FileEntry *entry = findEntry(name);
+    const FileEntry* entry = findEntry(name);
     const bool isDir =
         entry != nullptr ? entry->isDir : table_->item(row, toInt(ExpColumn::Type))->text() == QStringLiteral("Dir");
 
@@ -727,14 +655,13 @@ void ExplorerControl::showMetaInfo(int row)
     dlg.exec();
 }
 
-void ExplorerControl::onTableContextMenu(const QPoint &pos)
+void ExplorerControl::onTableContextMenu(const QPoint& pos)
 {
     // 动作表注册式写法（清单 #5）：{显示条件, 文字, 回调}，不再写
     // 十个 if (selectAction == xxx) 的平铺比较。
-    const QList<QTableWidgetItem *> selected = table_->selectedItems();
+    const QList<QTableWidgetItem*> selected = table_->selectedItems();
     QSet<int> rowSet;
-    for (auto *it : selected)
-    {
+    for (auto* it : selected) {
         rowSet.insert(it->row());
     }
     const QVector<int> rows(rowSet.cbegin(), rowSet.cend());
@@ -743,8 +670,7 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
         singleRow ? QDir(currentPath_).filePath(table_->item(rows[0], toInt(ExpColumn::Name))->text()) : QString();
 
     QMenu menu(this);
-    if (source_ == Source::Remote)
-    {
+    if (source_ == Source::Remote) {
         // 远端只读：本地那套（打开/复制路径/重命名/删除/新建）全不适用。
         // 能做的只有两件——把文件**拿过来**（§11.9）和刷新。
         const QString name = singleRow ? table_->item(rows[0], toInt(ExpColumn::Name))->text() : QString();
@@ -754,48 +680,38 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
         // 文件走 §11.9（原样发），目录走 §11.10（对端打包成 tar.xz）。
         // 分两项而不是一项自适应：两者的结果不一样——目录拿到的是一个包，
         // 用户需要知道这件事，否则会以为文件没解压。
-        if (isFile)
-        {
-            auto *pull = menu.addAction(QStringLiteral("下载到接收目录"));
+        if (isFile) {
+            auto* pull = menu.addAction(QStringLiteral("下载到接收目录"));
             pull->setEnabled(!isPathLikeName(name));
             pull->setToolTip(QStringLiteral("文件会落到本机的接收目录"));
-            connect(pull, &QAction::triggered, this,
-                    [this, peer, name]()
-                    {
-                        const QString rel = joinRel(currentPath_, name);
-                        emit remotePullRequested(peer, rel, false);
-                        setStatus(QStringLiteral("已请求取回 %1 …").arg(rel));
-                    });
-        }
-        else
-        {
-            auto *pullDir = menu.addAction(QStringLiteral("下载目录（打包为 tar.xz）"));
+            connect(pull, &QAction::triggered, this, [this, peer, name]() {
+                const QString rel = joinRel(currentPath_, name);
+                emit remotePullRequested(peer, rel, false);
+                setStatus(QStringLiteral("已请求取回 %1 …").arg(rel));
+            });
+        } else {
+            auto* pullDir = menu.addAction(QStringLiteral("下载目录（打包为 tar.xz）"));
             pullDir->setEnabled(singleRow && !isPathLikeName(name));
             pullDir->setToolTip(QStringLiteral("对端会把它压缩成一个 .tar.xz 发过来，\n"
                                                "落到接收目录；本版不自动解包"));
-            connect(pullDir, &QAction::triggered, this,
-                    [this, peer, name]()
-                    {
-                        const QString rel = joinRel(currentPath_, name);
-                        emit remotePullRequested(peer, rel, true);
-                        setStatus(QStringLiteral("已请求打包 %1（对方压缩中，可能要几秒）…").arg(rel));
-                    });
+            connect(pullDir, &QAction::triggered, this, [this, peer, name]() {
+                const QString rel = joinRel(currentPath_, name);
+                emit remotePullRequested(peer, rel, true);
+                setStatus(QStringLiteral("已请求打包 %1（对方压缩中，可能要几秒）…").arg(rel));
+            });
         }
 
-        connect(menu.addAction(QStringLiteral("刷新")), &QAction::triggered, this,
-                [this]() { enterPath(currentPath_); });
+        connect(menu.addAction(QStringLiteral("刷新")), &QAction::triggered, this, [this]() { enterPath(currentPath_); });
         // 详细信息在远端同样有意义：名字、大小、修改时间都是 §11.8 回来的，
         // 只是没有本地路径（对话框里显示 `peer:/rel` 并标注"（远端）"）。
-        if (singleRow)
-        {
+        if (singleRow) {
             connect(menu.addAction(QStringLiteral("详细信息")), &QAction::triggered, this,
                     [this, rows]() { showMetaInfo(rows[0]); });
         }
         menu.exec(table_->viewport()->mapToGlobal(pos));
         return;
     }
-    const struct
-    {
+    const struct {
         bool visible;
         QString label;
         std::function<void()> run;
@@ -806,13 +722,11 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
          [this]() { emit localTransferRequested(selectedLocalPaths()); }},
         {true, QStringLiteral("新建文件夹"), [this]() { onNewDir(); }},
         {singleRow, QStringLiteral("打开"),
-         [this, selectedPath, rows]()
-         {
+         [this, selectedPath, rows]() {
              const bool isDir = table_->item(rows[0], toInt(ExpColumn::Type))->text() == QStringLiteral("Dir");
              QDesktopServices::openUrl(QUrl::fromLocalFile(isDir ? selectedPath : currentPath_));
          }},
-        {singleRow, QStringLiteral("复制全路径"),
-         [this, selectedPath]() { QApplication::clipboard()->setText(selectedPath); }},
+        {singleRow, QStringLiteral("复制全路径"), [this, selectedPath]() { QApplication::clipboard()->setText(selectedPath); }},
         // v1 的「详细信息」：名字/类型/大小/修改时间 + 三个复制按钮。
         // 数据直接取自 entries_，不重新 stat——显示的必须是"表格里那一条"，
         // 而不是"现在磁盘上那一条"（两者可能不同，用户会困惑）。
@@ -823,52 +737,43 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
         // 所以解压时用 unpackArchive(path, false) 解到父目录；取回目录的包
         // 是无顶层的，那个走 true。两种形状不能混。
         {!rows.isEmpty(), QStringLiteral("压缩为 tar.xz…"),
-         [this]()
-         {
+         [this]() {
              const QStringList paths = selectedLocalPaths();
-             if (paths.isEmpty())
-             {
+             if (paths.isEmpty()) {
                  return;
              }
              QString suggested = QStringLiteral("archive.tar.xz");
-             if (paths.size() == 1)
-             {
+             if (paths.size() == 1) {
                  suggested = QFileInfo(paths.first()).fileName() + QStringLiteral(".tar.xz");
              }
-             const QString out =
-                 QFileDialog::getSaveFileName(this, QStringLiteral("压缩为"), QDir(currentPath()).filePath(suggested),
-                                              QStringLiteral("tar.xz (*.tar.xz)"));
-             if (out.isEmpty())
-             {
+             const QString out = QFileDialog::getSaveFileName(
+                 this, QStringLiteral("压缩为"), QDir(currentPath()).filePath(suggested), QStringLiteral("tar.xz (*.tar.xz)"));
+             if (out.isEmpty()) {
                  return;
              }
              setStatus(QStringLiteral("正在压缩 %1 项 …").arg(paths.size()));
              QCoreApplication::processEvents();
              std::vector<std::string> sources;
              sources.reserve(static_cast<std::size_t>(paths.size()));
-             for (const auto &p : paths)
-             {
+             for (const auto& p : paths) {
                  sources.push_back(p.toStdString());
              }
              std::string err;
-             if (!relayer::cli::Client::createArchive(sources, out.toStdString(), err))
-             {
+             if (!relayer::cli::Client::createArchive(sources, out.toStdString(), err)) {
                  setStatus(QStringLiteral("压缩失败：%1").arg(QString::fromStdString(err)), true);
                  return;
              }
              setStatus(QStringLiteral("已压缩为 %1").arg(QFileInfo(out).fileName()));
              emit notice(QStringLiteral("[压缩] %1（%2 项）").arg(out).arg(paths.size()));
-             enterPath(currentPath_);  // 刷新，让新包出现
+             enterPath(currentPath_);   // 刷新，让新包出现
          }},
         {singleRow && selectedPath.endsWith(QStringLiteral(".tar.xz"), Qt::CaseInsensitive), QStringLiteral("解压缩"),
-         [this, selectedPath]()
-         {
+         [this, selectedPath]() {
              setStatus(QStringLiteral("正在解压 %1 …").arg(QFileInfo(selectedPath).fileName()));
              QCoreApplication::processEvents();
              // false：手动压缩的包有顶层目录，解到父目录即可，再套一层会变成 a/a/。
              const auto dir = relayer::cli::Client::unpackArchive(selectedPath.toStdString(), false);
-             if (dir.empty())
-             {
+             if (dir.empty()) {
                  setStatus(QStringLiteral("解压失败（包可能损坏）"), true);
                  return;
              }
@@ -884,21 +789,17 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
         {singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir"),
          QStringLiteral("时间戳校验（比修改时间）"),
          [this, rows]() { emit compareRequested(table_->item(rows[0], toInt(ExpColumn::Name))->text(), true); }},
-        {singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir"),
-         QStringLiteral("SHA256"),
-         [this, selectedPath]()
-         {
+        {singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir"), QStringLiteral("SHA256"),
+         [this, selectedPath]() {
              setStatus(QStringLiteral("正在计算 SHA-256 …"));
              // 让状态行先画出来再开始算，否则界面会静默卡住几秒。
              QCoreApplication::processEvents();
              const QString hex = fileSha256(selectedPath);
-             if (hex.isEmpty())
-             {
+             if (hex.isEmpty()) {
                  setStatus(QStringLiteral("SHA-256 计算失败（文件打不开）"), true);
                  return;
              }
-             if (hex == QStringLiteral("too-large"))
-             {
+             if (hex == QStringLiteral("too-large")) {
                  setStatus(QStringLiteral("文件超过 512 MiB，请用 relayer-cli 或系统工具计算"), true);
                  return;
              }
@@ -909,10 +810,8 @@ void ExplorerControl::onTableContextMenu(const QPoint &pos)
         {singleRow, QStringLiteral("重命名"), [this, rows]() { onRename(rows[0]); }},
         {!rows.isEmpty(), QStringLiteral("删除"), [this, rows]() { onDelete(rows); }},
     };
-    for (const auto &a : actions)
-    {
-        if (!a.visible)
-        {
+    for (const auto& a : actions) {
+        if (!a.visible) {
             continue;
         }
         connect(menu.addAction(a.label), &QAction::triggered, this, a.run);
@@ -924,63 +823,51 @@ void ExplorerControl::onRename(int row)
 {
     const QString oldName = table_->item(row, toInt(ExpColumn::Name))->text();
     bool ok = false;
-    const QString newName = QInputDialog::getText(this, QStringLiteral("重命名"), QStringLiteral("请输入新文件名"),
-                                                  QLineEdit::Normal, oldName, &ok)
-                                .trimmed();
-    if (!ok || newName.isEmpty() || newName == oldName)
-    {
+    const QString newName =
+        QInputDialog::getText(this, QStringLiteral("重命名"), QStringLiteral("请输入新文件名"), QLineEdit::Normal, oldName, &ok)
+            .trimmed();
+    if (!ok || newName.isEmpty() || newName == oldName) {
         return;
     }
     const QDir dir(currentPath_);
-    if (!QFile::rename(dir.filePath(oldName), dir.filePath(newName)))
-    {
+    if (!QFile::rename(dir.filePath(oldName), dir.filePath(newName))) {
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("重命名失败（目标名已存在？权限不足？）"));
         return;
     }
-    enterPath(currentPath_);  // 重列：简单且正确，不做手术式更新
+    enterPath(currentPath_);   // 重列：简单且正确，不做手术式更新
 }
 
-void ExplorerControl::onDelete(const QVector<int> &rows)
+void ExplorerControl::onDelete(const QVector<int>& rows)
 {
-    if (rows.isEmpty())
-    {
+    if (rows.isEmpty()) {
         return;
     }
     QStringList names;
-    for (int row : rows)
-    {
+    for (int row : rows) {
         names << table_->item(row, toInt(ExpColumn::Name))->text();
     }
-    const auto choice =
-        QMessageBox::question(this, QStringLiteral("确认"),
-                              QStringLiteral("删除选中的 %1 项？目录将连同内容一起删除，不可恢复。").arg(names.size()),
-                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if (choice != QMessageBox::Yes)
-    {
+    const auto choice = QMessageBox::question(
+        this, QStringLiteral("确认"), QStringLiteral("删除选中的 %1 项？目录将连同内容一起删除，不可恢复。").arg(names.size()),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (choice != QMessageBox::Yes) {
         return;
     }
     const QDir dir(currentPath_);
     QStringList failed;
-    for (const QString &name : names)
-    {
+    for (const QString& name : names) {
         const QString path = dir.filePath(name);
         const QFileInfo fi(path);
         bool ok = false;
-        if (fi.isDir())
-        {
+        if (fi.isDir()) {
             ok = QDir(path).removeRecursively();
-        }
-        else
-        {
+        } else {
             ok = QFile::remove(path);
         }
-        if (!ok)
-        {
+        if (!ok) {
             failed << name;
         }
     }
-    if (!failed.isEmpty())
-    {
+    if (!failed.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("提示"),
                              QStringLiteral("%1 个项目删除失败（可能被占用或权限不足）：%2")
                                  .arg(failed.size())
@@ -995,13 +882,11 @@ void ExplorerControl::onNewDir()
     const QString name = QInputDialog::getText(this, QStringLiteral("新建文件夹"), QStringLiteral("请输入文件夹名"),
                                                QLineEdit::Normal, QString(), &ok)
                              .trimmed();
-    if (!ok || name.isEmpty())
-    {
+    if (!ok || name.isEmpty()) {
         return;
     }
     const QDir dir(currentPath_);
-    if (!dir.mkdir(name))
-    {
+    if (!dir.mkdir(name)) {
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("新建失败（同名已存在？权限不足？）"));
         return;
     }

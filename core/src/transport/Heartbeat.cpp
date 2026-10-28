@@ -1,12 +1,10 @@
 #include "relayer/core/transport/Heartbeat.h"
 
-namespace relayer::core::transport
-{
+namespace relayer::core::transport {
 
 std::string_view toString(HeartbeatAction a) noexcept
 {
-    switch (a)
-    {
+    switch (a) {
     case HeartbeatAction::kNone:
         return "none";
     case HeartbeatAction::kSendPing:
@@ -44,10 +42,8 @@ HeartbeatAction HeartbeatPolicy::check(heartbeat::TimePoint now) noexcept
     // 必须先于"该不该发新 ping"判断。写反的话，已经超时的连接上会继续
     // 发新的 ping（因为"空闲超过 20 秒"的条件一直成立），把问题掩盖成
     // "一直在重试"，而永远不会断开。
-    if (pingOutstanding_)
-    {
-        if (now - lastPingSent_ >= heartbeat::kPingTimeout)
-        {
+    if (pingOutstanding_) {
+        if (now - lastPingSent_ >= heartbeat::kPingTimeout) {
             ++timeoutsDetected_;
             // 不在这里清 pingOutstanding_：超时是终态，调用方会断开连接。
             // 清掉它会让后续的 check() 又走回"该发 ping"分支。
@@ -60,8 +56,7 @@ HeartbeatAction HeartbeatPolicy::check(heartbeat::TimePoint now) noexcept
     }
 
     // --- 第二步：空闲够久了，该探一下 ---
-    if (now - lastReceived_ >= heartbeat::kIdleBeforePing)
-    {
+    if (now - lastReceived_ >= heartbeat::kIdleBeforePing) {
         lastPingSent_ = now;
         pingOutstanding_ = true;
         ++pingsSent_;
@@ -71,4 +66,4 @@ HeartbeatAction HeartbeatPolicy::check(heartbeat::TimePoint now) noexcept
     return HeartbeatAction::kNone;
 }
 
-}  // namespace relayer::core::transport
+}   // namespace relayer::core::transport

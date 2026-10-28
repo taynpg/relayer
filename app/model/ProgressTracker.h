@@ -4,8 +4,7 @@
 #include <chrono>
 #include <cstdint>
 
-namespace relayer::app
-{
+namespace relayer::app {
 
 // 字节数的人读格式（B/KiB/MiB/GiB/TiB）。原先在 MainWindow 与
 // RelayTaskControl 各有一份相同实现，收拢到这里。
@@ -36,4 +35,4 @@ private:
     std::chrono::steady_clock::time_point started_{};
 };
 
-}  // namespace relayer::app
+}   // namespace relayer::app

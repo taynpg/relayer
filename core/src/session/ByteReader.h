@@ -11,37 +11,34 @@
 #include <string>
 #include <vector>
 
-namespace relayer::core::session::detail
-{
+namespace relayer::core::session::detail {
 
-inline void putU8(std::vector<char> &out, std::uint8_t v)
+inline void putU8(std::vector<char>& out, std::uint8_t v)
 {
     out.push_back(static_cast<char>(v));
 }
 
-inline void putU16(std::vector<char> &out, std::uint16_t v)
+inline void putU16(std::vector<char>& out, std::uint16_t v)
 {
     out.push_back(static_cast<char>(v & 0xFF));
     out.push_back(static_cast<char>((v >> 8) & 0xFF));
 }
 
-inline void putU32(std::vector<char> &out, std::uint32_t v)
+inline void putU32(std::vector<char>& out, std::uint32_t v)
 {
-    for (int i = 0; i < 4; ++i)
-    {
+    for (int i = 0; i < 4; ++i) {
         out.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
     }
 }
 
-inline void putU64(std::vector<char> &out, std::uint64_t v)
+inline void putU64(std::vector<char>& out, std::uint64_t v)
 {
-    for (int i = 0; i < 8; ++i)
-    {
+    for (int i = 0; i < 8; ++i) {
         out.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
     }
 }
 
-inline void putI64(std::vector<char> &out, std::int64_t v)
+inline void putI64(std::vector<char>& out, std::int64_t v)
 {
     putU64(out, static_cast<std::uint64_t>(v));
 }
@@ -53,15 +50,13 @@ inline void putI64(std::vector<char> &out, std::int64_t v)
 class Reader
 {
 public:
-    explicit Reader(const std::vector<char> &b) noexcept
-        : buf_(b)
+    explicit Reader(const std::vector<char>& b) noexcept : buf_(b)
     {
     }
 
     std::uint8_t u8()
     {
-        if (!ok_ || pos_ + 1 > buf_.size())
-        {
+        if (!ok_ || pos_ + 1 > buf_.size()) {
             ok_ = false;
             return 0;
         }
@@ -78,8 +73,7 @@ public:
     std::uint32_t u32()
     {
         std::uint32_t v = 0;
-        for (int i = 0; i < 4; ++i)
-        {
+        for (int i = 0; i < 4; ++i) {
             v |= static_cast<std::uint32_t>(u8()) << (8 * i);
         }
         return v;
@@ -88,8 +82,7 @@ public:
     std::uint64_t u64()
     {
         std::uint64_t v = 0;
-        for (int i = 0; i < 8; ++i)
-        {
+        for (int i = 0; i < 8; ++i) {
             v |= static_cast<std::uint64_t>(u8()) << (8 * i);
         }
         return v;
@@ -102,8 +95,7 @@ public:
 
     std::string str(std::size_t len)
     {
-        if (!ok_ || pos_ + len > buf_.size())
-        {
+        if (!ok_ || pos_ + len > buf_.size()) {
             ok_ = false;
             return {};
         }
@@ -126,9 +118,9 @@ public:
     }
 
 private:
-    const std::vector<char> &buf_;
+    const std::vector<char>& buf_;
     std::size_t pos_ = 0;
     bool ok_ = true;
 };
 
-}  // namespace relayer::core::session::detail
+}   // namespace relayer::core::session::detail

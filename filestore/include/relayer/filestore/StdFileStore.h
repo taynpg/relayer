@@ -6,8 +6,7 @@
 #include "relayer/filestore/IFileStore.h"
 #include "relayer/filestore/PathPolicy.h"
 
-namespace relayer::filestore
-{
+namespace relayer::filestore {
 
 // 基于 C++17 标准库的默认实现。
 //
@@ -38,10 +37,10 @@ public:
     [[nodiscard]] FileStat stat(std::string_view path) const override;
     [[nodiscard]] Status probeWritable(std::string_view path) const override;
 
-    std::unique_ptr<IReadStream> openRead(std::string_view path, Status &st) const override;
-    std::unique_ptr<IWriteStream> openWrite(std::string_view path, bool truncate, Status &st) const override;
+    std::unique_ptr<IReadStream> openRead(std::string_view path, Status& st) const override;
+    std::unique_ptr<IWriteStream> openWrite(std::string_view path, bool truncate, Status& st) const override;
 
-    Status list(std::string_view dir, bool recursive, std::vector<DirEntry> &out) const override;
+    Status list(std::string_view dir, bool recursive, std::vector<DirEntry>& out) const override;
     Status mkdirs(std::string_view dir) const override;
 
     Status remove(std::string_view path) const override;
@@ -54,4 +53,4 @@ private:
     PathPolicy policy_;
 };
 
-}  // namespace relayer::filestore
+}   // namespace relayer::filestore

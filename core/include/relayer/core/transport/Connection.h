@@ -1,5 +1,9 @@
 #pragma once
 
+#include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/strand.hpp>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -7,11 +11,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-
-#include <asio/io_context.hpp>
-#include <asio/ip/tcp.hpp>
-#include <asio/steady_timer.hpp>
-#include <asio/strand.hpp>
 
 #include "relayer/common/Status.h"
 #include "relayer/core/protocol/Frame.h"
@@ -37,17 +36,15 @@
 // 4. **本层不认识认证，也不认识业务**。它只负责"收发帧"和"连接生死"。
 //    握手与转发都在上层——这样 transport 可以被单独测试，不需要密码学。
 
-namespace relayer::core::transport
-{
+namespace relayer::core::transport {
 
 // 连接的生命周期状态。与 transfer 的 State 不是一回事：
 // 那个是"传输会话"的状态，这个是"TCP 连接"的状态。
-enum class ConnectionState
-{
-    kConnecting,  // 正在建连
-    kOpen,        // 已连接，可收发
-    kClosing,     // 已请求关闭，等回调返回
-    kClosed,      // 完全关闭
+enum class ConnectionState {
+    kConnecting,   // 正在建连
+    kOpen,         // 已连接，可收发
+    kClosing,      // 已请求关闭，等回调返回
+    kClosed,       // 完全关闭
 };
 
 [[nodiscard]] std::string_view toString(ConnectionState s) noexcept;
@@ -57,8 +54,7 @@ enum class ConnectionState
 // 所有回调都在该连接的 strand 上执行，因此实现里**不需要加锁**。
 // 但也因此**不要在回调里做阻塞操作**（读文件、等锁、同步 DNS）——
 // 那会卡住整个 strand，让这条连接上的所有事件全部停摆。
-struct ConnectionHandler
-{
+struct ConnectionHandler {
     // 连接可用（已连上 / 已接受）。在 strand 上调用，**先于任何 onFrame**。
     //
     // 为什么必须有这条回调：客户端不能靠"send 第一帧"来启动会话。
@@ -72,7 +68,7 @@ struct ConnectionHandler
     std::function<void()> onEstablished;
 
     // 收到一帧。frame 在下一次回调之前一直有效。
-    std::function<void(const protocol::Frame &)> onFrame;
+    std::function<void(const protocol::Frame&)> onFrame;
 
     // 连接关闭。error 为空表示正常关闭（对端先关或本地主动关）。
     //
@@ -82,8 +78,7 @@ struct ConnectionHandler
 };
 
 // 每连接的配置
-struct ConnectionOptions
-{
+struct ConnectionOptions {
     // 单次读的字节数。4KB 是经验值：小于 MTU×N 会导致系统调用过多，
     // 太大会让"半帧到达"的延迟变大。协议帧本身可以是 32MB，靠 FrameReader
     // 累积，不依赖这个值。
@@ -124,9 +119,8 @@ public:
     // 连接成功会走 handler.onEstablished，失败会走 handler.onClosed（带错误）。
     // 上层只需要处理一种"结束"路径，不用同时维护"连接失败"和"连接断开"
     // 两套逻辑。
-    [[nodiscard]] static std::shared_ptr<Connection> connect(asio::io_context &ctx, const std::string &host,
-                                                             std::uint16_t port, ConnectionHandler handler,
-                                                             ConnectionOptions options = {});
+    [[nodiscard]] static std::shared_ptr<Connection> connect(asio::io_context& ctx, const std::string& host, std::uint16_t port,
+                                                             ConnectionHandler handler, ConnectionOptions options = {});
 
     // 接受一个已建立的 socket（服务端用，由 acceptor 交出）。
     //
@@ -137,15 +131,15 @@ public:
     // onEstablished 与连接实际可用的时机对齐：adopt 不做 I/O，返回前就该算
     // "已连上"，所以这条回调是投递到 strand 上执行，而不是在 adopt 里同步调。
     // 同步调会让调用方在自己的构造函数里就被回调，此时对象还没构造完。
-    static std::shared_ptr<Connection> adopt(asio::io_context &ctx, asio::ip::tcp::socket socket,
-                                             ConnectionHandler handler, ConnectionOptions options = {});
+    static std::shared_ptr<Connection> adopt(asio::io_context& ctx, asio::ip::tcp::socket socket, ConnectionHandler handler,
+                                             ConnectionOptions options = {});
 
     // 析构里**不做 I/O**，只保证不再有任何回调访问 this。
     // 实际关闭由 close() 完成。
     ~Connection();
 
-    Connection(const Connection &) = delete;
-    Connection &operator=(const Connection &) = delete;
+    Connection(const Connection&) = delete;
+    Connection& operator=(const Connection&) = delete;
 
     // 发送一帧。
     //
@@ -155,7 +149,7 @@ public:
     // 两帧前缀的畸形帧）。
     //
     // 返回失败表示连接已不可用（或帧本身非法）。
-    [[nodiscard]] Status send(const protocol::Frame &frame);
+    [[nodiscard]] Status send(const protocol::Frame& frame);
 
     // 请求关闭。
     //
@@ -172,7 +166,7 @@ public:
     }
 
     // 对端地址，用于日志。"host:port" 形式。
-    [[nodiscard]] const std::string &peer() const noexcept
+    [[nodiscard]] const std::string& peer() const noexcept
     {
         return peer_;
     }
@@ -192,8 +186,7 @@ public:
     }
 
 private:
-    Connection(asio::io_context &ctx, asio::ip::tcp::socket socket, ConnectionHandler handler,
-               ConnectionOptions options);
+    Connection(asio::io_context& ctx, asio::ip::tcp::socket socket, ConnectionHandler handler, ConnectionOptions options);
 
     void startRead();
     void startWrite();
@@ -247,4 +240,4 @@ private:
     bool closedNotified_ = false;
 };
 
-}  // namespace relayer::core::transport
+}   // namespace relayer::core::transport

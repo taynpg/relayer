@@ -19,16 +19,12 @@ using relayer::app::settings::kConnectorLast;
 using relayer::app::settings::kConnectorNoAuth;
 using relayer::app::settings::kConnectorRecent;
 
-namespace
-{
+namespace {
 constexpr int kColId = 0;
 constexpr int kColAddress = 1;
-}  // namespace
+}   // namespace
 
-ConnectorControl::ConnectorControl(QWidget *parent)
-    : QDialog(parent)
-    , ui_(new Ui::ConnectorControl)
-    , core_(nullptr)
+ConnectorControl::ConnectorControl(QWidget* parent) : QDialog(parent), ui_(new Ui::ConnectorControl), core_(nullptr)
 {
     ui_->setupUi(this);
     setMaximumWidth(350);
@@ -45,7 +41,7 @@ ConnectorControl::~ConnectorControl()
 
 void ConnectorControl::initTable()
 {
-    QTableWidget *table = ui_->tableClients;
+    QTableWidget* table = ui_->tableClients;
     table->setColumnCount(2);
     table->setHorizontalHeaderLabels({QStringLiteral("ID"), QStringLiteral("地址")});
     table->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -64,12 +60,10 @@ void ConnectorControl::initButtons()
 {
     // btnLock（"设定"）打开设置对话框（v1 同名按钮的行为）。模态 exec
     // 没问题：设置是纯配置操作，不占传输通道，也不会跑几分钟。
-    connect(ui_->btnLock, &QPushButton::clicked, this,
-            [this]()
-            {
-                Setting dlg(this);
-                dlg.exec();
-            });
+    connect(ui_->btnLock, &QPushButton::clicked, this, [this]() {
+        Setting dlg(this);
+        dlg.exec();
+    });
 
     connect(ui_->btnConnect, &QPushButton::clicked, this, &ConnectorControl::onConnectClicked);
     connect(ui_->btnDisconnect, &QPushButton::clicked, this, &ConnectorControl::onDisconnectClicked);
@@ -94,14 +88,10 @@ void ConnectorControl::updateConnectionButtons()
     // true，等于永远点不动——那才是真问题。
     ui_->btnDisconnect->setEnabled(connected_);
 
-    if (connected_)
-    {
+    if (connected_) {
         ui_->btnConnect->setToolTip(
-            QStringLiteral("已连接（id=%1）。刷新对端列表请用「刷新」；要换中继地址请先「断开」")
-                .arg(ui_->lineEdit->text()));
-    }
-    else
-    {
+            QStringLiteral("已连接（id=%1）。刷新对端列表请用「刷新」；要换中继地址请先「断开」").arg(ui_->lineEdit->text()));
+    } else {
         ui_->btnConnect->setToolTip(QString());
     }
 }
@@ -118,20 +108,16 @@ void ConnectorControl::initAuth()
     // 本机标识：持久化，因为它的全部价值就是"跨重启保持同一个名字"
     // （对照表按 id 固定投递，见 docs/DESIGN.md §3.2）。空 = 让中继分配。
     ui_->edMyId->setText(settings.value(relayer::app::settings::kConnectorMyId).toString());
-    connect(ui_->edMyId, &QLineEdit::editingFinished, this,
-            [this]()
-            {
-                QSettings s;
-                s.setValue(relayer::app::settings::kConnectorMyId, ui_->edMyId->text().trimmed());
-            });
+    connect(ui_->edMyId, &QLineEdit::editingFinished, this, [this]() {
+        QSettings s;
+        s.setValue(relayer::app::settings::kConnectorMyId, ui_->edMyId->text().trimmed());
+    });
 
-    connect(ui_->ckNoAuth, &QCheckBox::toggled, this,
-            [this](bool checked)
-            {
-                ui_->edPassword->setEnabled(!checked);
-                QSettings s;
-                s.setValue(relayer::app::settings::kConnectorNoAuth, checked);
-            });
+    connect(ui_->ckNoAuth, &QCheckBox::toggled, this, [this](bool checked) {
+        ui_->edPassword->setEnabled(!checked);
+        QSettings s;
+        s.setValue(relayer::app::settings::kConnectorNoAuth, checked);
+    });
 }
 
 void ConnectorControl::loadIpHistory()
@@ -140,21 +126,19 @@ void ConnectorControl::loadIpHistory()
     ui_->cbIp->clear();
     const QStringList history = settings.value(kConnectorRecent).toStringList();
     ui_->cbIp->addItems(history);
-    if (!history.isEmpty())
-    {
+    if (!history.isEmpty()) {
         ui_->cbIp->setCurrentText(settings.value(kConnectorLast).toString());
     }
     ui_->cbIp->setEditable(true);
 }
 
-void ConnectorControl::saveIpHistory(const QString &ipPort)
+void ConnectorControl::saveIpHistory(const QString& ipPort)
 {
     QSettings settings;
     QStringList history = settings.value("connector/recent").toStringList();
     history.removeAll(ipPort);
     history.prepend(ipPort);
-    while (history.size() > 10)
-    {
+    while (history.size() > 10) {
         history.removeLast();
     }
     settings.setValue(kConnectorRecent, history);
@@ -165,18 +149,16 @@ void ConnectorControl::saveIpHistory(const QString &ipPort)
 // v1 的 parseIpPort 只认 IPv4。中继地址还可能是域名与 IPv6，所以 v2
 // 放宽为 "host:port"——host 不含冒号即可（IPv6 字面量需写方括号，暂不支持，
 // 报错文案里说明）。端口校验是硬性的，host 只做非空与无冒号检查。
-bool ConnectorControl::parseHostPort(const QString &text, QString &host, quint16 &port) const
+bool ConnectorControl::parseHostPort(const QString& text, QString& host, quint16& port) const
 {
     static const QRegularExpression re(QStringLiteral("^\\s*([^:\\s]+)\\s*:\\s*(\\d{1,5})\\s*$"));
     const auto m = re.match(text);
-    if (!m.hasMatch())
-    {
+    if (!m.hasMatch()) {
         return false;
     }
     bool ok = false;
     const int n = m.captured(2).toInt(&ok);
-    if (!ok || n <= 0 || n > 65535)
-    {
+    if (!ok || n <= 0 || n > 65535) {
         return false;
     }
     host = m.captured(1);
@@ -189,10 +171,8 @@ void ConnectorControl::onConnectClicked()
     const QString text = ui_->cbIp->currentText().trimmed();
     QString host;
     quint16 port = 0;
-    if (!parseHostPort(text, host, port))
-    {
-        QMessageBox::warning(this, QStringLiteral("提示"),
-                             QStringLiteral("地址格式应为 主机:端口，例如 127.0.0.1:9527"));
+    if (!parseHostPort(text, host, port)) {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("地址格式应为 主机:端口，例如 127.0.0.1:9527"));
         return;
     }
 
@@ -201,8 +181,7 @@ void ConnectorControl::onConnectClicked()
     // 口令等于把钥匙贴在锁上。
     const bool noAuth = ui_->ckNoAuth->isChecked();
     const QString password = ui_->edPassword->text();
-    if (!noAuth && password.isEmpty())
-    {
+    if (!noAuth && password.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("提示"),
                              QStringLiteral("请填写认证口令；若中继以 --allow-no-auth 启动，请勾选「无认证」"));
         return;
@@ -240,8 +219,7 @@ void ConnectorControl::clearPeerView()
 
 void ConnectorControl::onDisconnectClicked()
 {
-    if (!connected_)
-    {
+    if (!connected_) {
         return;
     }
     // 先落本地状态再发信号：MainWindow 关会话之后 operationFinished 会回来，
@@ -271,15 +249,14 @@ void ConnectorControl::onBusyChanged(bool busy)
     updateConnectionButtons();
 }
 
-void ConnectorControl::onAssignedIdChanged(const QString &id)
+void ConnectorControl::onAssignedIdChanged(const QString& id)
 {
     ui_->lineEdit->setText(id);
     ui_->lineEdit->setStyleSheet(QStringLiteral("color: black;"));
 
     // 空 id 是"认证刚过、服务端还没分配"的中间态（ClientConfig::onIdAssigned
     // 的契约：可能先给空串）。只有拿到真 id 才算连接成功。
-    if (!id.isEmpty())
-    {
+    if (!id.isEmpty()) {
         connected_ = true;
         updateConnectionButtons();
     }
@@ -290,36 +267,32 @@ void ConnectorControl::onOperationFinished(bool ok)
     // 任何一种"会话结束"（用户断开、中继挂了、认证被拒、一次性操作收尾）
     // 都会走到这里：常驻会话已经不在，【连接】恢复可用。
     Q_UNUSED(ok);
-    if (connected_)
-    {
+    if (connected_) {
         connected_ = false;
         updateConnectionButtons();
     }
 }
 
-void ConnectorControl::onPeerListReceived(const QList<PeerRow> &rows)
+void ConnectorControl::onPeerListReceived(const QList<PeerRow>& rows)
 {
     onlineIds_.clear();
-    for (const auto &r : rows)
-    {
+    for (const auto& r : rows) {
         onlineIds_.append(r.id);
     }
 
-    QTableWidget *table = ui_->tableClients;
+    QTableWidget* table = ui_->tableClients;
     table->clearContents();
     table->setRowCount(static_cast<int>(rows.size()));
-    for (int r = 0; r < rows.size(); ++r)
-    {
-        auto *idItem = new QTableWidgetItem(rows[r].id);
+    for (int r = 0; r < rows.size(); ++r) {
+        auto* idItem = new QTableWidgetItem(rows[r].id);
         idItem->setFlags(idItem->flags() & ~Qt::ItemIsEditable);
-        auto *addrItem = new QTableWidgetItem(rows[r].address);
+        auto* addrItem = new QTableWidgetItem(rows[r].address);
         addrItem->setFlags(addrItem->flags() & ~Qt::ItemIsEditable);
 
         // 自己标红（同 v1）：发的文件"发给自己"是合法用法（本机自测，
         // 服务端会把帧绕回本连接，见 PROTOCOL.md §11.3.1），但容易
         // 误操作——真正要发给别人时选中自己不会报错，只会安静地传回本机。
-        if (rows[r].id == ui_->lineEdit->text())
-        {
+        if (rows[r].id == ui_->lineEdit->text()) {
             idItem->setForeground(Qt::red);
             addrItem->setForeground(Qt::red);
         }
@@ -328,11 +301,10 @@ void ConnectorControl::onPeerListReceived(const QList<PeerRow> &rows)
     }
 }
 
-void ConnectorControl::setCurrentPeer(const QString &id, const QString &address)
+void ConnectorControl::setCurrentPeer(const QString& id, const QString& address)
 {
     currentPeerId_ = id;
-    if (id.isEmpty())
-    {
+    if (id.isEmpty()) {
         ui_->edCurrentClient->clear();
         return;
     }
@@ -340,11 +312,10 @@ void ConnectorControl::setCurrentPeer(const QString &id, const QString &address)
     ui_->edCurrentClient->setText(address.isEmpty() ? id : QStringLiteral("%1（%2）").arg(id, address));
 }
 
-void ConnectorControl::onTableContextMenu(const QPoint &pos)
+void ConnectorControl::onTableContextMenu(const QPoint& pos)
 {
-    auto *item = ui_->tableClients->itemAt(pos);
-    if (!item)
-    {
+    auto* item = ui_->tableClients->itemAt(pos);
+    if (!item) {
         return;
     }
     const int row = item->row();
@@ -354,8 +325,7 @@ void ConnectorControl::onTableContextMenu(const QPoint &pos)
     QMenu menu(this);
 
     // 动作表：{文字, 回调}。选中即执行，不需要 exec 返回值比较。
-    const struct
-    {
+    const struct {
         QString label;
         std::function<void()> run;
     } actions[] = {
@@ -364,18 +334,16 @@ void ConnectorControl::onTableContextMenu(const QPoint &pos)
         {QStringLiteral("浏览此对端的目录"), [this, id, address]() { emit browsePeerRequested(id, address); }},
     };
 
-    for (const auto &a : actions)
-    {
+    for (const auto& a : actions) {
         connect(menu.addAction(a.label), &QAction::triggered, this, a.run);
     }
     menu.exec(ui_->tableClients->viewport()->mapToGlobal(pos));
 }
 
-void ConnectorControl::attachCoreService(relayer::app::CoreService *core)
+void ConnectorControl::attachCoreService(relayer::app::CoreService* core)
 {
     core_ = core;
-    if (!core)
-    {
+    if (!core) {
         return;
     }
     connect(core, &relayer::app::CoreService::busyChanged, this, &ConnectorControl::onBusyChanged);

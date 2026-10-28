@@ -13,8 +13,7 @@ class QLabel;
 class QPushButton;
 class QTableWidget;
 
-namespace relayer::app
-{
+namespace relayer::app {
 
 // 任务表单（E3.5）：v1 Form/RelayTask 对话框的嵌入版。
 //
@@ -37,11 +36,11 @@ class RelayTaskControl : public QDialog
     Q_OBJECT
 
 public:
-    explicit RelayTaskControl(QWidget *parent = nullptr);
+    explicit RelayTaskControl(QWidget* parent = nullptr);
 
     // 注入 CoreService 并接线（与 ConnectorControl::attachCoreService
     // 同一约定：构造顺序不敏感，依赖显式可见）。
-    void attachCoreService(relayer::app::CoreService *core);
+    void attachCoreService(relayer::app::CoreService* core);
 
     bool isRunning() const noexcept
     {
@@ -55,15 +54,15 @@ public slots:
     // defaultPeerId 是连接面板右键选定的"当前通信对象"：对端列留空的行
     // 默认发给它（不额外验证——选它本身就是用户的授权）；填了对端的行
     // 才按填的 id 发送。两者都空时该行标"已跳过"。
-    void startTasks(const relayer::app::RelayTaskItems &items, const relayer::app::ConnInfo &conn,
-                    const QString &defaultPeerId = QString());
+    void startTasks(const relayer::app::RelayTaskItems& items, const relayer::app::ConnInfo& conn,
+                    const QString& defaultPeerId = QString());
 
     // 停止批次：当前项硬取消，剩余等待项标"已取消"。批次结束照常发
     // batchFinished（ok=false）。
     void stopBatch();
 
 signals:
-    void logMessage(const QString &msg);
+    void logMessage(const QString& msg);
 
     // 批次结束（无论成败）。MainWindow 靠它恢复自动接收——批次进行中
     // 传输通道让给任务，接收不能抢。
@@ -72,10 +71,10 @@ signals:
 private slots:
     // 单个文件的发送结论（CoreService::sendFinished）。批次逐行推进靠它。
     // 并发发送里某一项的结论。taskId = 行号 + 1（0 保留给单文件发送）。
-    void onSendTaskFinished(qint64 taskId, bool ok, const QString &summary, const QString &detail);
+    void onSendTaskFinished(qint64 taskId, bool ok, const QString& summary, const QString& detail);
     // 会话级结论（CoreService::operationFinished）：中继断开/认证失败等，
     // 当前项不会再有 sendFinished，批次就此中止。
-    void onSessionEnded(bool ok, const QString &summary, const QString &detail);
+    void onSessionEnded(bool ok, const QString& summary, const QString& detail);
     void onSendTaskProgress(qint64 taskId, quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond);
     void onRetryFailed();
     void onStopClicked();
@@ -84,22 +83,20 @@ private slots:
 public:
     // 行状态。公开是因为 .cpp 的匿名命名空间辅助函数（状态文本/颜色）
     // 要按它分派。
-    enum Status
-    {
-        kWait,       // 等待
-        kTransing,   // 传输中
-        kDone,       // 完成
-        kFailed,     // 失败
-        kSkipped,    // 跳过（未指定对端且未选定通信对象 / 连接断开后剩余）
-        kCancelled,  // 已取消
+    enum Status {
+        kWait,        // 等待
+        kTransing,    // 传输中
+        kDone,        // 完成
+        kFailed,      // 失败
+        kSkipped,     // 跳过（未指定对端且未选定通信对象 / 连接断开后剩余）
+        kCancelled,   // 已取消
     };
 
-    struct Row
-    {
-        QString name;       // 文件名（不含路径）
-        QString localPath;  // 完整本地路径
-        QString peerId;     // 目标对端
-        QString relDir;     // 对端接收根目录之下的相对路径（含文件名）
+    struct Row {
+        QString name;        // 文件名（不含路径）
+        QString localPath;   // 完整本地路径
+        QString peerId;      // 目标对端
+        QString relDir;      // 对端接收根目录之下的相对路径（含文件名）
         quint64 size = 0;
         Status status = kWait;
     };
@@ -114,13 +111,13 @@ public:
     void updateButtons();
     void updateSummary();
 
-    QTableWidget *table_ = nullptr;
-    QPushButton *btnStop_ = nullptr;
-    QPushButton *btnRetryFailed_ = nullptr;
-    QPushButton *btnClear_ = nullptr;
-    QLabel *summaryLabel_ = nullptr;
+    QTableWidget* table_ = nullptr;
+    QPushButton* btnStop_ = nullptr;
+    QPushButton* btnRetryFailed_ = nullptr;
+    QPushButton* btnClear_ = nullptr;
+    QLabel* summaryLabel_ = nullptr;
 
-    relayer::app::CoreService *core_ = nullptr;
+    relayer::app::CoreService* core_ = nullptr;
     relayer::app::ConnInfo conn_;
 
     QList<Row> rows_;
@@ -140,4 +137,4 @@ public:
     bool stopping_ = false;
 };
 
-}  // namespace relayer::app
+}   // namespace relayer::app

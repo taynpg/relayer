@@ -35,15 +35,13 @@
 // 关键点：**读盘不占 strand**。一次 256 KiB 的 read 在慢盘上也要几毫秒，
 // 而 strand 串行执行——占着它会把心跳、收帧、超时判定全部卡住（见 WorkerPool.h）。
 
-namespace relayer::core::transfer
-{
+namespace relayer::core::transfer {
 
 // 一块读出来的数据，连同它的块号。
 //
 // chunkIndex 必须跟着缓冲区走：读盘是异步的，完成顺序和提交顺序无关。
 // 只传 buffer 的话，完成回调里根本不知道这是第几块——而这个信息猜不出来。
-struct ReadChunk
-{
+struct ReadChunk {
     std::uint32_t chunkIndex = 0;
     std::vector<char> data;
 };
@@ -54,8 +52,7 @@ struct ReadChunk
 class TransferSender
 {
 public:
-    struct Config
-    {
+    struct Config {
         // 在飞数据的字节配额。窗口的块数由它在 open() 时换算：
         // windowChunks = max(1, windowBytes / chunkSize)。
         //
@@ -86,13 +83,13 @@ public:
     //
     // 分成两个重载而不是 `Config config = {}`：后者在 GCC 上对"带默认成员
     // 初始化器的聚合类型"会推导失败（could not convert from init-list）。
-    TransferSender(filestore::IFileStore &store, WorkerPool &pool);
-    TransferSender(filestore::IFileStore &store, WorkerPool &pool, Config config);
+    TransferSender(filestore::IFileStore& store, WorkerPool& pool);
+    TransferSender(filestore::IFileStore& store, WorkerPool& pool, Config config);
 
     ~TransferSender();
 
-    TransferSender(const TransferSender &) = delete;
-    TransferSender &operator=(const TransferSender &) = delete;
+    TransferSender(const TransferSender&) = delete;
+    TransferSender& operator=(const TransferSender&) = delete;
 
     // 打开源文件并计算块数。
     //
@@ -114,7 +111,7 @@ public:
     // 该等的时候用 hasWork() 判断。
     //
     // 读完的块进入内部队列，由 takeReadyChunks() 取走。
-    std::uint32_t pump(const PostFn &post);
+    std::uint32_t pump(const PostFn& post);
 
     // 取走已读好、还没交给上层的块。
     //
@@ -133,7 +130,7 @@ public:
     [[nodiscard]] bool hasWork() const;
 
     // 收到 ACK。
-    void applyAck(const ChunkAck &ack);
+    void applyAck(const ChunkAck& ack);
 
     // 所有**在飞**的块号（升序）。用于"过一遍重传定时器"。
     //
@@ -146,7 +143,7 @@ public:
     //
     // 时间判定在上层：SendWindow 刻意不认识时间，而"多久算超时"取决于
     // 链路质量，那是上层才知道的事。
-    std::uint32_t markRetransmit(const std::vector<std::uint32_t> &chunks);
+    std::uint32_t markRetransmit(const std::vector<std::uint32_t>& chunks);
 
     // 取消：把所有在读和在飞的块归还窗口，清空就绪队列。取消后不可复用。
     void cancelAll();
@@ -169,9 +166,8 @@ public:
 
     // ---- 完成握手需要的信息 ----
 
-    struct DigestResult
-    {
-        std::string merkleRootHex;  // 空表示失败
+    struct DigestResult {
+        std::string merkleRootHex;   // 空表示失败
         std::string sha256Hex;
         Status status;
     };
@@ -192,8 +188,8 @@ private:
     // 读盘失败时，把这一块从 reading_ 摘掉并归还窗口。
     void onChunkReadyInternalFailure(std::uint32_t chunkIndex);
 
-    filestore::IFileStore &store_;
-    WorkerPool &pool_;
+    filestore::IFileStore& store_;
+    WorkerPool& pool_;
     Config config_;
 
     std::string sourcePath_;
@@ -230,4 +226,4 @@ private:
     bool opened_ = false;
 };
 
-}  // namespace relayer::core::transfer
+}   // namespace relayer::core::transfer

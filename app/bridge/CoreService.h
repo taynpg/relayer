@@ -3,13 +3,12 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <asio/io_context.hpp>
 #include <atomic>
 #include <map>
 #include <memory>
 #include <string>
 #include <thread>
-
-#include <asio/io_context.hpp>
 
 #include "relayer/cli/Client.h"
 
@@ -30,19 +29,16 @@
 //   - 不实现"同时跑多个操作"。CLI 门面是一次一操作的，v1 的多任务并行是
 //     阶段 F 的功能，到时候每任务一个 Client 实例即可，现在不预造。
 
-namespace relayer::app
-{
+namespace relayer::app {
 
 // 在线对端的 Qt 侧视图（PeerEntry 的 QString 版，供表格直接用）。
-struct PeerRow
-{
+struct PeerRow {
     QString id;
     QString address;
 };
 
 // 远端目录列举的一条（core::session::RemoteEntry 的 QString 版）。
-struct RemoteRow
-{
+struct RemoteRow {
     QString name;
     bool isDir = false;
     quint64 size = 0;
@@ -51,8 +47,7 @@ struct RemoteRow
 
 // 一次连接所需的全部参数。收拢成结构体而不是继续给每个方法加参数：
 // sendFile 已经 6 个参数，且这三项在所有操作里总是一起出现。
-struct ConnInfo
-{
+struct ConnInfo {
     QString host;
     quint16 port = 0;
     QString password;
@@ -76,11 +71,11 @@ class CoreService : public QObject
     Q_OBJECT
 
 public:
-    explicit CoreService(QObject *parent = nullptr);
+    explicit CoreService(QObject* parent = nullptr);
     ~CoreService() override;
 
-    CoreService(const CoreService &) = delete;
-    CoreService &operator=(const CoreService &) = delete;
+    CoreService(const CoreService&) = delete;
+    CoreService& operator=(const CoreService&) = delete;
 
     bool busy() const noexcept
     {
@@ -115,8 +110,8 @@ public:
     //
     // 常驻会话活着时在**那条连接上**发（不新建连接、不换本机 id、
     // 不打断接收）；会话不在时回落到一次性连接。
-    bool sendFile(const QString &localPath, const QString &remoteName, const QString &toPeerId,
-                  const relayer::app::ConnInfo &conn);
+    bool sendFile(const QString& localPath, const QString& remoteName, const QString& toPeerId,
+                  const relayer::app::ConnInfo& conn);
 
     // 批量发送里的一路（阶段 F 的多任务并行）。
     //
@@ -130,8 +125,8 @@ public:
     //
     // taskId 由调用方给（RelayTaskControl 用行号），进度与结论都带着它回来。
     // 同一个 taskId 不允许重复提交。
-    bool sendFileTask(qint64 taskId, const QString &localPath, const QString &remoteName, const QString &toPeerId,
-                      const relayer::app::ConnInfo &conn);
+    bool sendFileTask(qint64 taskId, const QString& localPath, const QString& remoteName, const QString& toPeerId,
+                      const relayer::app::ConnInfo& conn);
 
     // 取消某一路并发发送（停止批次时用）。结论仍会经 sendTaskFinished 回来
     // ——"取消"不是一个静默动作，界面要能据此把该行标成"已取消"而不是
@@ -145,21 +140,21 @@ public:
     }
 
     // 挂起等待别人发文件，落到 targetDir 目录。
-    void startReceive(const QString &targetDir, const relayer::app::ConnInfo &conn);
+    void startReceive(const QString& targetDir, const relayer::app::ConnInfo& conn);
 
     // 拉一次在线列表，结果从 peerListReceived 发出。返回值语义同 sendFile。
-    bool listPeers(const relayer::app::ConnInfo &conn);
+    bool listPeers(const relayer::app::ConnInfo& conn);
 
     // 刷新在线列表：常驻接收会话活着时在**那条连接上**问（不换 id、不
     // 打断接收），否则回落到 listPeers 的临时连接探测。返回 false =
     // 传输中无法刷新，调用方负责提示。
-    bool refreshPeers(const relayer::app::ConnInfo &conn);
+    bool refreshPeers(const relayer::app::ConnInfo& conn);
 
     // 在常驻会话上问一次远端目录（PROTOCOL.md §11.8）。
     //
     // 返回 false = 没有可用的常驻会话（没连接、或正在传输）。**不回落成
     // 新连接**：那会顶掉接收会话、换掉本机 id，是文档里反复警告的回归。
-    bool browsePeerOnSession(const QString &peerId, const QString &relPath);
+    bool browsePeerOnSession(const QString& peerId, const QString& relPath);
 
     // 在常驻会话上请对端把某个文件发过来（PROTOCOL.md §11.9）。
     // relPath 相对对端共享根。文件会落到本机的接收目录——落点由本机配置
@@ -170,8 +165,7 @@ public:
     // intoDir 非空 = 这一次收到的东西落到那里，收完**自动恢复**成全局接收
     // 目录（对照表的行级下载：每行有自己的本地目录，不能一次下载就把整个
     // 会话的落点永久改掉）。空 = 用全局接收目录。
-    bool pullFileFromPeer(const QString &peerId, const QString &relPath, bool asArchive,
-                          const QString &intoDir = QString());
+    bool pullFileFromPeer(const QString& peerId, const QString& relPath, bool asArchive, const QString& intoDir = QString());
 
     // 中止当前操作（硬停：不发 cancel 帧，与 CLI 的 abort 同语义）。
     void cancelCurrent();
@@ -181,15 +175,15 @@ signals:
     void busyChanged(bool busy);
 
     // 自己被分配的身份。可能多次发出（见 ClientConfig::onIdAssigned 注释）。
-    void assignedIdChanged(const QString &id);
+    void assignedIdChanged(const QString& id);
 
     // 常驻接收收完一个文件。操作本身不结束（busy 不翻转），会话继续
     // 等下一个文件——id 因此保持稳定，发送方的对端表不会过期。
-    void fileReceived(const QString &targetPath);
+    void fileReceived(const QString& targetPath);
 
     // 常驻接收下某一次接收失败（连接还活着，会话原地重建继续等）。
     // 与 fileReceived 对称：busy 不翻转、id 不变，GUI 只需要记日志。
-    void receiveFailed(const QString &message);
+    void receiveFailed(const QString& message);
 
     // 传输进度。bytesPerSecond 是瞬时速率，可能为 0（尚未有两次采样）。
     void progressChanged(quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond);
@@ -198,32 +192,32 @@ signals:
     // "这次进度是谁的"必须能区分——只有一组进度数字的界面在多路并发下
     // 会把 B 的进度画到 C 那一行上。
     void sendTaskProgress(qint64 taskId, quint64 bytesDone, quint64 bytesTotal, double bytesPerSecond);
-    void sendTaskFinished(qint64 taskId, bool ok, const QString &summary, const QString &technicalDetail);
+    void sendTaskFinished(qint64 taskId, bool ok, const QString& summary, const QString& technicalDetail);
 
     // 一次操作的最终结论。发出后 busy 变 false，之后不会再有该操作的信号。
     // technicalDetail 失败时可能非空（Status 的 message）。
-    void operationFinished(bool ok, const QString &summary, const QString &technicalDetail);
+    void operationFinished(bool ok, const QString& summary, const QString& technicalDetail);
 
     // 一次**发送**的结论（每个文件一次）。与 operationFinished 的区别是
     // 语义层级：operationFinished 表达"会话/操作结束"（busy 翻转、可能要
     // 重连换 id），sendFinished 只表达"这个文件发完了"，常驻会话照旧
     // 活着——GUI 的接收状态机绝不能被它推动。
-    void sendFinished(bool ok, const QString &summary, const QString &technicalDetail);
+    void sendFinished(bool ok, const QString& summary, const QString& technicalDetail);
 
     // list 的结果。与 operationFinished 同批到达（先列表后结论）。
-    void peerListReceived(const QList<relayer::app::PeerRow> &rows);
+    void peerListReceived(const QList<relayer::app::PeerRow>& rows);
 
     // 远端列举的结果（browsePeerOnSession 的回程）。一次请求一次信号，
     // 会话不结束。
-    void remoteBrowseFinished(bool ok, const QString &summary, const QList<relayer::app::RemoteRow> &rows);
+    void remoteBrowseFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteRow>& rows);
 
     // 取回请求的结论（收到对端应答时触发，**不是**文件传完）。
     // ok=true 只表示"对方接受了"，文件随后由接收路径报告落点。
-    void remotePullFinished(bool ok, const QString &summary);
+    void remotePullFinished(bool ok, const QString& summary);
 
     // 目录取回的包已自动解开（PROTOCOL.md §11.10.6 的补完）。
     // ok=false 时包会**保留**在接收目录，detail 说明原因。
-    void archiveExtracted(bool ok, const QString &dir, const QString &detail);
+    void archiveExtracted(bool ok, const QString& dir, const QString& detail);
 
 private:
     void startIoThread();
@@ -238,7 +232,7 @@ private:
 
     // ClientConfig 组装。回调里 emit 的都是 Qt 信号——从 io 线程 emit
     // 跨线程信号是安全的（AutoConnection 退化为 QueuedConnection）。
-    cli::ClientConfig makeConfig(const relayer::app::ConnInfo &conn);
+    cli::ClientConfig makeConfig(const relayer::app::ConnInfo& conn);
 
     // 最近一次建 Client 用的连接参数指纹（host:port:认证方式:口令）。
     // 只在 GUI 线程读写（makeConfig 与 refreshPeers 的调用方都在 GUI
@@ -248,24 +242,23 @@ private:
     QString activeConnKey_;
 
     // 一次操作的公共收尾（io 线程，onDone 回调里调）。
-    void finishOperation(const cli::Outcome &o, bool withPeerList);
+    void finishOperation(const cli::Outcome& o, bool withPeerList);
 
     // 会话内发送的结论（io 线程，Client 的 sendOnSession 回调里调）。
-    void onSendFinished(const cli::Outcome &o);
+    void onSendFinished(const cli::Outcome& o);
 
     // 一次性连接上的发送收尾：发 sendFinished 并翻转 busy（io 线程）。
-    void finishSendOperation(const cli::Outcome &o);
+    void finishSendOperation(const cli::Outcome& o);
 
     // 常驻会话 + 表单参数一致 + 当前没有发送在跑 → 可以搭车发送。
-    bool canSendOnSession(const relayer::app::ConnInfo &conn) const;
+    bool canSendOnSession(const relayer::app::ConnInfo& conn) const;
 
     // 并发的发送任务：taskId → Client。**只在 io 线程读写**。
     //
     // 每个任务一个 Client（也就是一条连接）。它不碰 client_、也不碰 busy_：
     // busy_ 表示"常驻会话的占用"，而并发发送不该阻止自动接收挂起——否则
     // "我在发给 B" 期间别人就无法发给我，这正是并行要解决的问题之一。
-    struct SendJob
-    {
+    struct SendJob {
         qint64 taskId = 0;
         std::shared_ptr<cli::Client> client;
     };
@@ -307,7 +300,7 @@ private:
     // 释放发生在两处：下一次操作时替换（post 进 io 线程执行，不在回调栈上）、
     // 以及 CoreService 析构（此时 io 线程已 join）。
     std::shared_ptr<cli::Client> client_;
-    std::string lastId_;  // 去重：同一个 id 不重复发 assignedIdChanged
+    std::string lastId_;   // 去重：同一个 id 不重复发 assignedIdChanged
 
     // 只属于 io 线程：被抢占接收的下一个 onDone 不发信号（见
     // runOrAfterReceive）。
@@ -329,7 +322,7 @@ private:
     std::atomic<bool> lastConnectionLost_{false};
 };
 
-}  // namespace relayer::app
+}   // namespace relayer::app
 
 Q_DECLARE_METATYPE(relayer::app::PeerRow)
 Q_DECLARE_METATYPE(relayer::app::RemoteRow)

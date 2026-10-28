@@ -1,12 +1,10 @@
 #include "relayer/common/Status.h"
 
-namespace relayer
-{
+namespace relayer {
 
 std::string_view toString(ErrorCode code) noexcept
 {
-    switch (code)
-    {
+    switch (code) {
     case ErrorCode::kOk:
         return "ok";
 
@@ -54,4 +52,4 @@ std::string_view toString(ErrorCode code) noexcept
     return "unrecognized";
 }
 
-}  // namespace relayer
+}   // namespace relayer

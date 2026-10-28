@@ -16,10 +16,9 @@
 #include "relayer/filestore/detail/XzCodec.h"
 
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <string>
 #include <vector>
-
-#include <catch2/catch_test_macros.hpp>
 
 #include "relayer/filestore/IFileStore.h"
 
@@ -28,13 +27,12 @@ using relayer::filestore::Status;
 using relayer::filestore::XzDecoder;
 using relayer::filestore::XzEncoder;
 
-namespace
-{
+namespace {
 
 // 把一个 string 压缩成字节串。
 // 注意要先一直 write 再 finish，然后反复 read 直到 drained——
 // 这是本 API 的既定用法，测试里也照这个顺序写，顺带验证用法本身。
-std::string compress(const std::string &input, int level = 6)
+std::string compress(const std::string& input, int level = 6)
 {
     XzEncoder enc(level);
     Status st = enc.write(input.data(), input.size());
@@ -44,17 +42,14 @@ std::string compress(const std::string &input, int level = 6)
 
     std::string out;
     std::vector<char> buf(4096);
-    for (;;)
-    {
+    for (;;) {
         const std::size_t n = enc.read(buf.data(), buf.size(), st);
         REQUIRE(st);
         out.append(buf.data(), n);
-        if (enc.drained())
-        {
+        if (enc.drained()) {
             break;
         }
-        if (n == 0)
-        {
+        if (n == 0) {
             // 没产出也没结束：说明编码器卡住了，属于实现 bug
             FAIL("encoder stalled before draining");
         }
@@ -63,7 +58,7 @@ std::string compress(const std::string &input, int level = 6)
 }
 
 // 解压一个完整的 xz 流。输入不完整时用 REQUIRE 直接判失败。
-std::string decompress(const std::string &input)
+std::string decompress(const std::string& input)
 {
     XzDecoder dec;
     Status st = dec.write(input.data(), input.size());
@@ -73,13 +68,11 @@ std::string decompress(const std::string &input)
 
     std::string out;
     std::vector<char> buf(4096);
-    for (;;)
-    {
+    for (;;) {
         const std::size_t n = dec.read(buf.data(), buf.size(), st);
-        REQUIRE(st);  // 完整输入不该出错
+        REQUIRE(st);   // 完整输入不该出错
         out.append(buf.data(), n);
-        if (n == 0)
-        {
+        if (n == 0) {
             REQUIRE(dec.finished());
             break;
         }
@@ -89,19 +82,16 @@ std::string decompress(const std::string &input)
 
 // 反复 read 直到结束，返回是否报过错。
 // 这是"截断检测"的标准姿势：必须跑到 read 返回 0，不能提前 break。
-bool drainReportsError(XzDecoder &dec)
+bool drainReportsError(XzDecoder& dec)
 {
     std::vector<char> buf(4096);
-    for (int guard = 0; guard < 100000; ++guard)
-    {
+    for (int guard = 0; guard < 100000; ++guard) {
         Status st;
         const std::size_t n = dec.read(buf.data(), buf.size(), st);
-        if (!st)
-        {
+        if (!st) {
             return true;
         }
-        if (n == 0)
-        {
+        if (n == 0) {
             return false;
         }
     }
@@ -109,7 +99,7 @@ bool drainReportsError(XzDecoder &dec)
     return false;
 }
 
-}  // namespace
+}   // namespace
 
 TEST_CASE("xz 往返：各种长度", "[xz][roundtrip]")
 {
@@ -119,12 +109,10 @@ TEST_CASE("xz 往返：各种长度", "[xz][roundtrip]")
     //   4095/4096/4097 → 正好跨内部缓冲边界
     //   100000 → 明显大于缓冲
     const std::vector<std::size_t> sizes{0, 1, 2, 100, 4095, 4096, 4097, 65535, 65536, 65537, 100000};
-    for (const auto size : sizes)
-    {
+    for (const auto size : sizes) {
         std::string input;
         input.reserve(size);
-        for (std::size_t i = 0; i < size; ++i)
-        {
+        for (std::size_t i = 0; i < size; ++i) {
             // 用可压缩但非常规的序列，避免"全 0 恰好压缩成 2 字节"这种特例
             input.push_back(static_cast<char>((i * 37 + 11) & 0xFF));
         }
@@ -143,11 +131,9 @@ TEST_CASE("xz 往返：全零与高重复内容", "[xz][roundtrip]")
     const std::string zeros(200000, '\0');
     REQUIRE(decompress(compress(zeros)) == zeros);
 
-    const std::string repeated = []
-    {
+    const std::string repeated = [] {
         std::string s;
-        for (int i = 0; i < 5000; ++i)
-        {
+        for (int i = 0; i < 5000; ++i) {
             s += "relayer ";
         }
         return s;
@@ -160,8 +146,7 @@ TEST_CASE("xz 往返：随机二进制", "[xz][roundtrip]")
     // 不可压缩的随机数据：压缩后体积略增。验证不会因为"压缩没效果"出错。
     std::vector<char> raw(50000);
     std::uint32_t state = 0x12345678;
-    for (auto &c : raw)
-    {
+    for (auto& c : raw) {
         state = state * 1664525u + 1013904223u;
         c = static_cast<char>((state >> 16) & 0xFF);
     }
@@ -173,8 +158,7 @@ TEST_CASE("xz 往返：随机二进制", "[xz][roundtrip]")
 TEST_CASE("xz 各级别都能往返", "[xz][roundtrip][level]")
 {
     const std::string input = "the quick brown fox jumps over the lazy dog";
-    for (int level = 0; level <= 9; ++level)
-    {
+    for (int level = 0; level <= 9; ++level) {
         INFO("level = " << level);
         REQUIRE(decompress(compress(input, level)) == input);
     }
@@ -241,11 +225,10 @@ TEST_CASE("xz 没调 finish 就不该报截断", "[xz][streaming]")
     REQUIRE(dec.write(packed.data(), packed.size() / 2));
 
     std::vector<char> buf(64);
-    for (int i = 0; i < 50; ++i)
-    {
+    for (int i = 0; i < 50; ++i) {
         Status st;
         dec.read(buf.data(), buf.size(), st);
-        REQUIRE(st);  // 一半输入 → 读到某处就没数据了，但不是错误
+        REQUIRE(st);   // 一半输入 → 读到某处就没数据了，但不是错误
     }
     REQUIRE_FALSE(dec.finished());
 }
@@ -255,8 +238,7 @@ TEST_CASE("xz 分小块喂入能解出完整内容", "[xz][streaming]")
     // 调用方可能按网络包大小（远小于 64KB）分块喂数据。
     // 如果实现只处理"一次喂完"的情形，分块时就会出错。
     std::string input;
-    for (int i = 0; i < 5000; ++i)
-    {
+    for (int i = 0; i < 5000; ++i) {
         input.push_back(static_cast<char>('a' + (i % 26)));
     }
     const std::string packed = compress(input);
@@ -265,32 +247,27 @@ TEST_CASE("xz 分小块喂入能解出完整内容", "[xz][streaming]")
     std::string out;
     std::vector<char> buf(16);
     // 每次只喂 7 个字节，制造大量"输入耗尽但要继续读"的情形
-    for (std::size_t off = 0; off < packed.size(); off += 7)
-    {
+    for (std::size_t off = 0; off < packed.size(); off += 7) {
         const std::size_t n = std::min<std::size_t>(7, packed.size() - off);
         REQUIRE(dec.write(packed.data() + off, n));
-        for (;;)
-        {
+        for (;;) {
             Status st;
             const std::size_t got = dec.read(buf.data(), buf.size(), st);
             REQUIRE(st);
             out.append(buf.data(), got);
-            if (got == 0)
-            {
-                break;  // 当前输入吃完了，回去再喂
+            if (got == 0) {
+                break;   // 当前输入吃完了，回去再喂
             }
         }
     }
     REQUIRE(dec.finish());
     // finish 之后把最后的尾巴取完
-    for (;;)
-    {
+    for (;;) {
         Status st;
         const std::size_t got = dec.read(buf.data(), buf.size(), st);
         REQUIRE(st);
         out.append(buf.data(), got);
-        if (got == 0)
-        {
+        if (got == 0) {
             break;
         }
     }

@@ -29,11 +29,9 @@
 //   数据"是正常的。所以超时判定看的是**对端是否还有任何生命迹象**，
 //   而不是"有没有业务数据"——心跳帧本身就是生命迹象。
 
-namespace relayer::core::transport
-{
+namespace relayer::core::transport {
 
-namespace heartbeat
-{
+namespace heartbeat {
 using Clock = std::chrono::steady_clock;
 using TimePoint = Clock::time_point;
 
@@ -59,14 +57,13 @@ inline constexpr std::chrono::seconds kPingTimeout{10};
 //
 // 1 秒的粒度相对于 20 秒的超时是充分的。
 inline constexpr std::chrono::milliseconds kTickInterval{1000};
-}  // namespace heartbeat
+}   // namespace heartbeat
 
 // 一次检查的结论。
-enum class HeartbeatAction
-{
-    kNone,      // 什么都不用做
-    kSendPing,  // 该发心跳了（发完 pingSentAt 会被记录）
-    kTimedOut,  // 对端失去响应，应当断开
+enum class HeartbeatAction {
+    kNone,       // 什么都不用做
+    kSendPing,   // 该发心跳了（发完 pingSentAt 会被记录）
+    kTimedOut,   // 对端失去响应，应当断开
 };
 
 [[nodiscard]] std::string_view toString(HeartbeatAction a) noexcept;
@@ -126,4 +123,4 @@ private:
     std::uint64_t timeoutsDetected_ = 0;
 };
 
-}  // namespace relayer::core::transport
+}   // namespace relayer::core::transport

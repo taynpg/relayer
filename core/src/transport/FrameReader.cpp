@@ -3,11 +3,9 @@
 #include <algorithm>
 #include <cstdint>
 
-namespace relayer::core::transport
-{
+namespace relayer::core::transport {
 
-namespace
-{
+namespace {
 
 // 小端读 u32。Frame.cpp 里有同名实现，但它在匿名 namespace 里、不对外——
 // 协议层刻意只暴露 unpackFrame 这一个入口，不让"直接摸帧头"变成公共 API。
@@ -15,7 +13,7 @@ namespace
 //
 // 偏移量与 Frame.cpp 必须一致：magic 在 0，帧长在 28。改协议布局时这两处
 // 会一起被 header_crc 测试抓到（那组测试会真的 pack 一帧再 unpack）。
-inline std::uint32_t readU32LE(const char *p) noexcept
+inline std::uint32_t readU32LE(const char* p) noexcept
 {
     return static_cast<std::uint32_t>(static_cast<unsigned char>(p[0])) |
            (static_cast<std::uint32_t>(static_cast<unsigned char>(p[1])) << 8) |
@@ -26,16 +24,14 @@ inline std::uint32_t readU32LE(const char *p) noexcept
 constexpr std::size_t kMagicOffset = 0;
 constexpr std::size_t kFrameLenOffset = 28;
 
-}  // namespace
+}   // namespace
 
-Status FrameReader::append(const char *data, std::size_t len)
+Status FrameReader::append(const char* data, std::size_t len)
 {
-    if (len == 0)
-    {
+    if (len == 0) {
         return Status::Ok();
     }
-    if (data == nullptr)
-    {
+    if (data == nullptr) {
         // 长度非 0 却给了空指针，是调用方的编程错误，不是对端的错。
         // 用 kUnknown 而不是 kProtocol：不能把自己的 bug 记成"对方协议坏了"。
         return Status::Fail(ErrorCode::kUnknown, "FrameReader::append: null data with non-zero length");
@@ -43,8 +39,7 @@ Status FrameReader::append(const char *data, std::size_t len)
 
     // 先检查上限再插入：如果直接插进去再判断，超大输入已经占用了内存，
     // 检查就失去意义了。
-    if (buffer_.size() + len > kMaxBufferedBytes)
-    {
+    if (buffer_.size() + len > kMaxBufferedBytes) {
         return Status::Fail(ErrorCode::kProtocol, "frame reader buffer overflow: peer is not sending valid frames");
     }
 
@@ -52,12 +47,12 @@ Status FrameReader::append(const char *data, std::size_t len)
     return Status::Ok();
 }
 
-Status FrameReader::append(const std::vector<char> &data)
+Status FrameReader::append(const std::vector<char>& data)
 {
     return append(data.data(), data.size());
 }
 
-bool FrameReader::next(protocol::Frame &frame, Status &status)
+bool FrameReader::next(protocol::Frame& frame, Status& status)
 {
     status = Status::Ok();
 
@@ -70,8 +65,7 @@ bool FrameReader::next(protocol::Frame &frame, Status &status)
     // 它正好发完最后一帧），这一帧就永远卡在缓冲里。
     //
     // 循环的终止条件很明确：consumed == 0 的 kNeedMoreData 表示真的缺字节。
-    while (!buffer_.empty())
-    {
+    while (!buffer_.empty()) {
         // ------------------------------------------------------------------
         // 第一步：只看固定头，判断整帧还要等多少字节。
         //
@@ -91,8 +85,7 @@ bool FrameReader::next(protocol::Frame &frame, Status &status)
         const std::size_t avail = buffer_.size();
 
         // 不足一个固定头：连帧长都读不出来，等下一次 append。
-        if (avail < protocol::frame::kFixedHeaderSize)
-        {
+        if (avail < protocol::frame::kFixedHeaderSize) {
             return false;
         }
 
@@ -100,8 +93,7 @@ bool FrameReader::next(protocol::Frame &frame, Status &status)
         char head[protocol::frame::kFixedHeaderSize];
         {
             std::size_t i = 0;
-            for (auto it = buffer_.begin(); i < sizeof(head); ++it, ++i)
-            {
+            for (auto it = buffer_.begin(); i < sizeof(head); ++it, ++i) {
                 head[i] = *it;
             }
         }
@@ -111,33 +103,26 @@ bool FrameReader::next(protocol::Frame &frame, Status &status)
         //
         // 这里仍然只在 36 字节的栈缓冲上判断，不碰主缓冲。
         std::size_t skip = 0;
-        while (skip + 4 <= sizeof(head) &&
-               readU32LE(head + skip + kMagicOffset) != protocol::frame::kMagic)
-        {
+        while (skip + 4 <= sizeof(head) && readU32LE(head + skip + kMagicOffset) != protocol::frame::kMagic) {
             ++skip;
         }
 
-        if (skip + 4 > sizeof(head))
-        {
+        if (skip + 4 > sizeof(head)) {
             // 整个头里都没有 magic。留最后 3 字节（可能是半个 magic），
             // 其余全部当垃圾丢掉。
             skip = (avail > 3) ? (avail - 3) : 0;
-            if (skip > 0)
-            {
+            if (skip > 0) {
                 garbageBytes_ += skip;
-                for (std::size_t i = 0; i < skip; ++i)
-                {
+                for (std::size_t i = 0; i < skip; ++i) {
                     buffer_.pop_front();
                 }
             }
             return false;
         }
 
-        if (skip > 0)
-        {
+        if (skip > 0) {
             garbageBytes_ += skip;
-            for (std::size_t i = 0; i < skip; ++i)
-            {
+            for (std::size_t i = 0; i < skip; ++i) {
                 buffer_.pop_front();
             }
             // 丢掉垃圾之后缓冲可能已经不足一个固定头了，重新判断。
@@ -152,8 +137,7 @@ bool FrameReader::next(protocol::Frame &frame, Status &status)
         // 不做这一步的后果是灾难性的：body 里出现 'RFM1' 相当常见（压缩数据、
         // 随机二进制都会有），把它当成帧头就会按一个荒谬的长度去等，白等到
         // 缓冲上限然后断连。跳过 1 字节是最便宜的正确做法。
-        if (frameLen < protocol::frame::kMinFrameSize || frameLen > protocol::frame::kMaxFrameSize)
-        {
+        if (frameLen < protocol::frame::kMinFrameSize || frameLen > protocol::frame::kMaxFrameSize) {
             garbageBytes_ += 1;
             buffer_.pop_front();
             continue;
@@ -163,8 +147,7 @@ bool FrameReader::next(protocol::Frame &frame, Status &status)
         //
         // 这是本次修的关键一行。早先的实现走到这里时已经把整个缓冲拷过一遍了，
         // 而大帧恰恰会在这里反复命中——每来 4KB 就白白拷一次几百 KB 到几 MB。
-        if (avail < frameLen)
-        {
+        if (avail < frameLen) {
             return false;
         }
 
@@ -175,8 +158,7 @@ bool FrameReader::next(protocol::Frame &frame, Status &status)
         contiguous.reserve(frameLen);
         {
             std::size_t i = 0;
-            for (auto it = buffer_.begin(); i < frameLen; ++it, ++i)
-            {
+            for (auto it = buffer_.begin(); i < frameLen; ++it, ++i) {
                 contiguous.push_back(*it);
             }
         }
@@ -184,25 +166,21 @@ bool FrameReader::next(protocol::Frame &frame, Status &status)
         std::size_t consumed = 0;
         const auto result = protocol::unpackFrame(contiguous.data(), contiguous.size(), frame, consumed);
 
-        switch (result)
-        {
+        switch (result) {
         case protocol::UnPackResult::kOk:
-            for (std::size_t i = 0; i < consumed; ++i)
-            {
+            for (std::size_t i = 0; i < consumed; ++i) {
                 buffer_.pop_front();
             }
             ++framesRead_;
             return true;
 
         case protocol::UnPackResult::kNeedMoreData:
-            if (consumed > 0)
-            {
+            if (consumed > 0) {
                 // 头看起来对、但 unpackFrame 进一步校验（头部 CRC、路由字段）
                 // 否掉了它，于是只跳过 consumed 字节继续找。这与上面的帧长
                 // 检查是两层过滤：前者便宜但粗，后者完整但需要整帧。
                 garbageBytes_ += consumed;
-                for (std::size_t i = 0; i < consumed; ++i)
-                {
+                for (std::size_t i = 0; i < consumed; ++i) {
                     buffer_.pop_front();
                 }
                 continue;
@@ -228,4 +206,4 @@ void FrameReader::clear() noexcept
     buffer_.clear();
 }
 
-}  // namespace relayer::core::transport
+}   // namespace relayer::core::transport

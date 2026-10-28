@@ -6,36 +6,29 @@
 
 #include "relayer/core/transfer/MerkleTree.h"
 
-namespace relayer::core::transfer
-{
+namespace relayer::core::transfer {
 
-namespace
-{
+namespace {
 
 // 残片后缀。单独一个常量而不是各处拼字符串：上层要判断"这个文件是不是
 // 未完成的残片"时得用同一个值。
-constexpr const char *kPartSuffix = ".relaypart";
+constexpr const char* kPartSuffix = ".relaypart";
 
-}  // namespace
+}   // namespace
 
-TransferReceiver::TransferReceiver(filestore::IFileStore &store, WorkerPool &pool)
-    : TransferReceiver(store, pool, Config{})
+TransferReceiver::TransferReceiver(filestore::IFileStore& store, WorkerPool& pool) : TransferReceiver(store, pool, Config{})
 {
 }
 
-TransferReceiver::TransferReceiver(filestore::IFileStore &store, WorkerPool &pool, Config config)
-    : store_(store)
-    , pool_(pool)
-    , config_(config)
+TransferReceiver::TransferReceiver(filestore::IFileStore& store, WorkerPool& pool, Config config)
+    : store_(store), pool_(pool), config_(config)
 {
     // 上限为 0 会让 acceptChunk 恒返回 kBusy——传输一动不动，且不报错。
     // 这里夹到至少 1，与 TransferSender 对 windowChunks 的处理一致。
-    if (config_.maxBufferedChunks == 0)
-    {
+    if (config_.maxBufferedChunks == 0) {
         config_.maxBufferedChunks = 1;
     }
-    if (config_.maxWriteInFlight == 0)
-    {
+    if (config_.maxWriteInFlight == 0) {
         config_.maxWriteInFlight = 1;
     }
 }
@@ -48,31 +41,26 @@ TransferReceiver::~TransferReceiver()
     //
     // 只等已开始的。排队中的由 WorkerPool::stop() 丢弃，符合"取消时不该
     // 再写盘"的语义。
-    for (;;)
-    {
+    for (;;) {
         const auto n = runningTasks_.load(std::memory_order_acquire);
-        if (n == 0)
-        {
+        if (n == 0) {
             break;
         }
         std::this_thread::yield();
     }
 }
 
-Status TransferReceiver::open(const TransferDesc &desc, std::string_view targetPath, std::uint32_t &resumeFrom)
+Status TransferReceiver::open(const TransferDesc& desc, std::string_view targetPath, std::uint32_t& resumeFrom)
 {
-    if (opened_)
-    {
+    if (opened_) {
         return Status::Fail(ErrorCode::kUnknown, "receiver already open");
     }
 
-    if (auto st = validateDesc(desc); !st.ok())
-    {
+    if (auto st = validateDesc(desc); !st.ok()) {
         return st;
     }
 
-    if (targetPath.empty())
-    {
+    if (targetPath.empty()) {
         return Status::Fail(ErrorCode::kInvalidPath, "empty target path");
     }
 
@@ -102,8 +90,7 @@ Status TransferReceiver::open(const TransferDesc &desc, std::string_view targetP
     // 调用方要覆盖时应当先删目标 —— 那是一个显式的、能写进日志和 UI 的
     // 动作，而不是传输过程里的副作用。
     const auto targetStat = store_.stat(targetPath_);
-    if (targetStat.exists && !targetStat.isDir)
-    {
+    if (targetStat.exists && !targetStat.isDir) {
         return Status::Fail(ErrorCode::kAlreadyExists, "target already exists: " + targetPath_);
     }
 
@@ -112,22 +99,17 @@ Status TransferReceiver::open(const TransferDesc &desc, std::string_view targetP
     // 注意这里用 stat 而不是"直接 openWrite 试试"：openWrite(truncate=false)
     // 在文件不存在时会失败，而那个失败和"权限不足"混在一起，分不清。
     const auto partStat = store_.stat(partPath_);
-    if (!partStat.exists)
-    {
+    if (!partStat.exists) {
         Status st;
         // truncate=true 建新文件；写完立刻关掉，这一步只是占位。
         auto out = store_.openWrite(partPath_, true, st);
-        if (!out)
-        {
+        if (!out) {
             return st.ok() ? Status::Fail(ErrorCode::kIoError, "create part file failed: " + partPath_) : st;
         }
-        if (auto fs = out->flush(); !fs.ok())
-        {
+        if (auto fs = out->flush(); !fs.ok()) {
             return fs;
         }
-    }
-    else if (partStat.isDir)
-    {
+    } else if (partStat.isDir) {
         // 同名的目录挡在残片路径上。不处理的话后面每次 openWrite 都失败，
         // 报的还是 kIsADirectory——但错误位置离根因很远。
         return Status::Fail(ErrorCode::kIsADirectory, "part path is a directory: " + partPath_);
@@ -145,8 +127,7 @@ Status TransferReceiver::open(const TransferDesc &desc, std::string_view targetP
         std::lock_guard<std::mutex> lock(writeMu_);
         Status openSt;
         writeStream_ = store_.openWrite(partPath_, false, openSt);
-        if (!writeStream_)
-        {
+        if (!writeStream_) {
             // 回滚 opened_：不然后续无法重试，而且析构时看起来像"开过"。
             opened_ = false;
             return openSt.ok() ? Status::Fail(ErrorCode::kIoError, "reopen part file failed: " + partPath_) : openSt;
@@ -160,13 +141,10 @@ void TransferReceiver::closeWriteStream() noexcept
 {
     // 这里可能抛（析构函数里 vector 释放、FILE 关闭失败等），但调用点都在
     // "已经要收尾了"的路上，异常逃出去会让上层看到一个与根因无关的崩溃。
-    try
-    {
+    try {
         std::lock_guard<std::mutex> lock(writeMu_);
         writeStream_.reset();
-    }
-    catch (...)
-    {
+    } catch (...) {
         // 关闭失败不影响后续：finalize 会重读残片，abort 会删文件。
     }
 }
@@ -174,8 +152,7 @@ void TransferReceiver::closeWriteStream() noexcept
 std::uint32_t TransferReceiver::scanResumePoint() const
 {
     const auto st = store_.stat(partPath_);
-    if (!st.exists || st.size == 0)
-    {
+    if (!st.exists || st.size == 0) {
         return 0;
     }
 
@@ -189,13 +166,11 @@ std::uint32_t TransferReceiver::scanResumePoint() const
 
     // 已经够整个文件长了：说明残片比目标还大，那它不可能是这次的产物
     // （块大小或文件改过）。直接从头来，别在垃圾上续传。
-    if (aligned >= totalSize_)
-    {
+    if (aligned >= totalSize_) {
         return 0;
     }
 
-    if (aligned != st.size)
-    {
+    if (aligned != st.size) {
         // 截断失败不致命：多传一块总比传错强。上层会在最终校验时发现
         // 长度不符。这里静默继续，让"截断不了"变成"多传一块"。
         (void)store_.resize(partPath_, aligned);
@@ -222,12 +197,12 @@ std::uint64_t TransferReceiver::totalSize() const noexcept
     return totalSize_;
 }
 
-const std::string &TransferReceiver::partPath() const noexcept
+const std::string& TransferReceiver::partPath() const noexcept
 {
     return partPath_;
 }
 
-const std::string &TransferReceiver::targetPath() const noexcept
+const std::string& TransferReceiver::targetPath() const noexcept
 {
     return targetPath_;
 }
@@ -245,8 +220,7 @@ std::uint32_t TransferReceiver::lengthOf(std::uint32_t chunkIndex) const noexcep
 bool TransferReceiver::hasChunk(std::uint32_t chunkIndex) const
 {
     std::lock_guard<std::mutex> lock(mu_);
-    if (chunkIndex >= written_.size())
-    {
+    if (chunkIndex >= written_.size()) {
         return false;
     }
     return written_[chunkIndex];
@@ -262,27 +236,23 @@ bool TransferReceiver::hasCapacity() const
     return inFlight_ < config_.maxBufferedChunks && inFlight_ < config_.maxWriteInFlight;
 }
 
-Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void *data, std::size_t len, const PostFn &post)
+Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void* data, std::size_t len, const PostFn& post)
 {
-    if (!opened_)
-    {
+    if (!opened_) {
         return Status::Fail(ErrorCode::kUnknown, "acceptChunk before open");
     }
 
     {
         std::lock_guard<std::mutex> lock(mu_);
-        if (aborted_)
-        {
+        if (aborted_) {
             return Status::Fail(ErrorCode::kCancelled, "receiver aborted");
         }
-        if (!writeError_.ok())
-        {
+        if (!writeError_.ok()) {
             return writeError_;
         }
     }
 
-    if (chunkIndex >= totalChunks_)
-    {
+    if (chunkIndex >= totalChunks_) {
         return Status::Fail(ErrorCode::kProtocol, "chunk index out of range: " + std::to_string(chunkIndex));
     }
 
@@ -290,10 +260,9 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void *data,
     // 与描述不符，少给的表示它对最后一块的处理不对——两者都会让最终根
     // 对不上，但"对不上"远不如"当场指出哪一块不对"好查。
     const auto want = lengthOf(chunkIndex);
-    if (len != want)
-    {
-        return Status::Fail(ErrorCode::kProtocol, "chunk " + std::to_string(chunkIndex) + " length " +
-                                                      std::to_string(len) + " != expected " + std::to_string(want));
+    if (len != want) {
+        return Status::Fail(ErrorCode::kProtocol, "chunk " + std::to_string(chunkIndex) + " length " + std::to_string(len) +
+                                                      " != expected " + std::to_string(want));
     }
 
     {
@@ -301,21 +270,17 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void *data,
 
         // 已落盘的重传块直接丢弃。这是重传场景下的**正常路径**：
         // 对端没收到我们的 ACK 就会重发，我们的回应就是"再 ACK 一次"。
-        if (written_[chunkIndex])
-        {
+        if (written_[chunkIndex]) {
             return Status::Fail(ErrorCode::kAlreadyExists, "chunk " + std::to_string(chunkIndex) + " already written");
         }
 
         // 已在写：同样丢弃。同时收到同一块两次说明对端把"重传"和"新发"
         // 搞混了，或者我们自己的 ACK 丢了。两种情况都不该写两遍。
-        if (received_[chunkIndex])
-        {
-            return Status::Fail(ErrorCode::kAlreadyExists,
-                                "chunk " + std::to_string(chunkIndex) + " already in flight");
+        if (received_[chunkIndex]) {
+            return Status::Fail(ErrorCode::kAlreadyExists, "chunk " + std::to_string(chunkIndex) + " already in flight");
         }
 
-        if (inFlight_ >= config_.maxBufferedChunks || inFlight_ >= config_.maxWriteInFlight)
-        {
+        if (inFlight_ >= config_.maxBufferedChunks || inFlight_ >= config_.maxWriteInFlight) {
             return Status::Fail(ErrorCode::kBusy, "receiver buffer full, pause reading");
         }
 
@@ -332,97 +297,79 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void *data,
     // resize + memcpy 是这里最直接的写法：一次分配 + 一次拷贝，
     // 中间不经过临时 string。
     chunk.data.resize(want);
-    if (want != 0)
-    {
+    if (want != 0) {
         std::memcpy(chunk.data.data(), data, want);
     }
 
     runningTasks_.fetch_add(1, std::memory_order_acq_rel);
 
-    const auto accepted = pool_.submit(
-        [this, c = std::move(chunk), post]() mutable
+    const auto accepted = pool_.submit([this, c = std::move(chunk), post]() mutable {
+        struct RunningGuard {
+            std::atomic<std::uint32_t>& n;
+            ~RunningGuard()
+            {
+                n.fetch_sub(1, std::memory_order_acq_rel);
+            }
+        } guard{runningTasks_};
+
+        const auto idx = c.chunkIndex;
+
+        auto fail = [this, idx, &post](Status st) {
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                if (writeError_.ok()) {
+                    writeError_ = st;   // 留一份，writeError() 给上层查
+                }
+            }
+            if (post) {
+                // 传的是这一次的具体错误，不是 writeError_ ——后者可能是
+                // 更早一次失败留下来的旧值，用来描述"这一块怎么了"会误导。
+                post([this, idx, e = std::move(st)]() mutable { onChunkWriteFailed(idx, std::move(e)); });
+            }
+        };
+
+        // 整段 seek/write/flush/sync 必须在同一把锁里：流的读写位置是
+        // 流内状态，两个线程交错 seek 会把这一块写到别的块的偏移上。
+        //
+        // 这不再是"每块重新 open"——那样每次还要多付一次 CreateFile
+        // 的代价（实测 9ms/块），正是它让 256 KiB 分块看起来比 4 MiB
+        // 慢三倍。见 writeStream_ 的说明。
+        Status ws;
         {
-            struct RunningGuard
-            {
-                std::atomic<std::uint32_t> &n;
-                ~RunningGuard()
-                {
-                    n.fetch_sub(1, std::memory_order_acq_rel);
-                }
-            } guard{runningTasks_};
-
-            const auto idx = c.chunkIndex;
-
-            auto fail = [this, idx, &post](Status st)
-            {
-                {
-                    std::lock_guard<std::mutex> lock(mu_);
-                    if (writeError_.ok())
-                    {
-                        writeError_ = st;  // 留一份，writeError() 给上层查
-                    }
-                }
-                if (post)
-                {
-                    // 传的是这一次的具体错误，不是 writeError_ ——后者可能是
-                    // 更早一次失败留下来的旧值，用来描述"这一块怎么了"会误导。
-                    post([this, idx, e = std::move(st)]() mutable { onChunkWriteFailed(idx, std::move(e)); });
-                }
-            };
-
-            // 整段 seek/write/flush/sync 必须在同一把锁里：流的读写位置是
-            // 流内状态，两个线程交错 seek 会把这一块写到别的块的偏移上。
+            std::lock_guard<std::mutex> lock(writeMu_);
+            if (!writeStream_) {
+                // 流已经被 finalize / abort 关掉了，而这一块还没写完。
+                // 正常收尾顺序不该出现；如实报错，别静默丢块。
+                ws = Status::Fail(ErrorCode::kIoError, "part file closed before chunk write: " + partPath_);
+            } else if (auto st = writeStream_->seek(offsetOf(idx)); !st.ok()) {
+                ws = std::move(st);
+            } else if (auto stw = writeStream_->write(c.data.data(), c.data.size()); !stw.ok()) {
+                ws = std::move(stw);
+            }
+            // flush 是**必须**的，sync 是可选的。
             //
-            // 这不再是"每块重新 open"——那样每次还要多付一次 CreateFile
-            // 的代价（实测 9ms/块），正是它让 256 KiB 分块看起来比 4 MiB
-            // 慢三倍。见 writeStream_ 的说明。
-            Status ws;
-            {
-                std::lock_guard<std::mutex> lock(writeMu_);
-                if (!writeStream_)
-                {
-                    // 流已经被 finalize / abort 关掉了，而这一块还没写完。
-                    // 正常收尾顺序不该出现；如实报错，别静默丢块。
-                    ws = Status::Fail(ErrorCode::kIoError, "part file closed before chunk write: " + partPath_);
-                }
-                else if (auto st = writeStream_->seek(offsetOf(idx)); !st.ok())
-                {
-                    ws = std::move(st);
-                }
-                else if (auto stw = writeStream_->write(c.data.data(), c.data.size()); !stw.ok())
-                {
-                    ws = std::move(stw);
-                }
-                // flush 是**必须**的，sync 是可选的。
-                //
-                // 必须 flush 的理由不在"数据安全"，而在 flush 会把用户态
-                // 缓冲交给操作系统——不做这一步，write 成功只意味着"进了
-                // 本进程的缓冲区"。而下一行就要告诉对端"这块我收好了"。
-                // ACK 的语义是"已经到文件里了"，不是"已经到我的内存里了"。
-                else if (auto stf = writeStream_->flush(); !stf.ok())
-                {
-                    ws = std::move(stf);
-                }
-                else if (config_.syncOnWrite)
-                {
-                    ws = writeStream_->sync();
-                }
+            // 必须 flush 的理由不在"数据安全"，而在 flush 会把用户态
+            // 缓冲交给操作系统——不做这一步，write 成功只意味着"进了
+            // 本进程的缓冲区"。而下一行就要告诉对端"这块我收好了"。
+            // ACK 的语义是"已经到文件里了"，不是"已经到我的内存里了"。
+            else if (auto stf = writeStream_->flush(); !stf.ok()) {
+                ws = std::move(stf);
+            } else if (config_.syncOnWrite) {
+                ws = writeStream_->sync();
             }
+        }
 
-            if (!ws.ok())
-            {
-                fail(std::move(ws));
-                return;
-            }
+        if (!ws.ok()) {
+            fail(std::move(ws));
+            return;
+        }
 
-            if (post)
-            {
-                post([this, cc = std::move(c)]() mutable { onChunkWritten(std::move(cc)); });
-            }
-        });
+        if (post) {
+            post([this, cc = std::move(c)]() mutable { onChunkWritten(std::move(cc)); });
+        }
+    });
 
-    if (!accepted)
-    {
+    if (!accepted) {
         // 队列满：任务不会执行，计数与位图都要还回去。
         runningTasks_.fetch_sub(1, std::memory_order_acq_rel);
 
@@ -442,8 +389,7 @@ void TransferReceiver::onChunkWritten(ReceivedChunk chunk)
 {
     std::lock_guard<std::mutex> lock(mu_);
 
-    if (chunk.chunkIndex < written_.size())
-    {
+    if (chunk.chunkIndex < written_.size()) {
         // written_ 是"可以告诉了对方"的唯一依据。received_ 保持 true：
         // 下次对端重传这一块时，acceptChunk 靠它判重（走到 written_ 那条
         // 分支也一样，两条都返回 kAlreadyExists，留着不影响正确性，
@@ -451,8 +397,7 @@ void TransferReceiver::onChunkWritten(ReceivedChunk chunk)
         written_[chunk.chunkIndex] = true;
     }
 
-    if (inFlight_ > 0)
-    {
+    if (inFlight_ > 0) {
         --inFlight_;
     }
 }
@@ -467,18 +412,15 @@ void TransferReceiver::onChunkWriteFailed(std::uint32_t chunkIndex, Status error
         // 不清的话这一块会被判为"在写"，对端重传时返回 kAlreadyExists，
         // 于是永远没有人写它——而发送方会因为收不到 ACK 一直重传，
         // 表现为"卡住不动且不报错"。
-        if (chunkIndex < received_.size() && !(chunkIndex < written_.size() && written_[chunkIndex]))
-        {
+        if (chunkIndex < received_.size() && !(chunkIndex < written_.size() && written_[chunkIndex])) {
             received_[chunkIndex] = false;
         }
 
-        if (inFlight_ > 0)
-        {
+        if (inFlight_ > 0) {
             --inFlight_;
         }
 
-        if (writeError_.ok())
-        {
+        if (writeError_.ok()) {
             writeError_ = std::move(error);
         }
     }
@@ -493,8 +435,7 @@ ChunkAck TransferReceiver::buildCurrentAck() const
 bool TransferReceiver::allChunksReceived() const
 {
     std::lock_guard<std::mutex> lock(mu_);
-    if (totalChunks_ == 0)
-    {
+    if (totalChunks_ == 0) {
         // 空文件：协议上算"全部收到"。chunkCountFor 对 0 字节返回 0 块，
         // 而空文件的 Merkle 根是 SHA256("")，finalize 会照常走一遍。
         return true;
@@ -527,8 +468,7 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
 {
     FinalizeResult out;
 
-    if (!opened_)
-    {
+    if (!opened_) {
         out.status = CompleteStatus::kShapeMismatch;
         out.error = Status::Fail(ErrorCode::kUnknown, "finalize before open");
         return out;
@@ -536,8 +476,7 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
 
     // 还有块在写：现在读残片会读到半截数据，算出来的根必然不对，而那个
     // "根不对"会把排查引向"数据传错了"——完全错误的方向。
-    if (hasPendingWrites())
-    {
+    if (hasPendingWrites()) {
         out.status = CompleteStatus::kWriteFailed;
         out.error = Status::Fail(ErrorCode::kBusy, "finalize while writes are still in flight");
         return out;
@@ -550,8 +489,7 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
     //   2. 下面要重读残片算根，写句柄留着只是多一份可能不一致的状态。
     closeWriteStream();
 
-    if (auto st = writeError(); !st.ok())
-    {
+    if (auto st = writeError(); !st.ok()) {
         out.status = CompleteStatus::kWriteFailed;
         out.error = std::move(st);
         return out;
@@ -560,17 +498,15 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
     // 形状自检：残片长度必须正好等于声明的总长。不等就是缺块或多块，
     // 这时候算根没有意义（MerkleBuilder 也会因为最后一块长度不对而拒绝）。
     const auto st = store_.stat(partPath_);
-    if (!st.exists)
-    {
+    if (!st.exists) {
         out.status = CompleteStatus::kWriteFailed;
         out.error = Status::Fail(ErrorCode::kNotFound, "part file disappeared: " + partPath_);
         return out;
     }
-    if (st.size != totalSize_)
-    {
+    if (st.size != totalSize_) {
         out.status = CompleteStatus::kShapeMismatch;
-        out.error = Status::Fail(ErrorCode::kIoError, "part file size " + std::to_string(st.size) + " != declared " +
-                                                          std::to_string(totalSize_));
+        out.error = Status::Fail(ErrorCode::kIoError,
+                                 "part file size " + std::to_string(st.size) + " != declared " + std::to_string(totalSize_));
         return out;
     }
 
@@ -579,11 +515,9 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
     // 代价换来"内存占用与文件大小无关"。
     Status readStatus;
     auto in = store_.openRead(partPath_, readStatus);
-    if (!in)
-    {
+    if (!in) {
         out.status = CompleteStatus::kWriteFailed;
-        out.error =
-            readStatus.ok() ? Status::Fail(ErrorCode::kIoError, "open part file for verify failed") : readStatus;
+        out.error = readStatus.ok() ? Status::Fail(ErrorCode::kIoError, "open part file for verify failed") : readStatus;
         return out;
     }
 
@@ -591,23 +525,19 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
     std::vector<char> buf(chunkSize_);
     std::uint64_t remaining = totalSize_;
 
-    while (remaining > 0)
-    {
+    while (remaining > 0) {
         const auto want = static_cast<std::size_t>(std::min<std::uint64_t>(remaining, buf.size()));
 
         std::size_t got = 0;
-        while (got < want)
-        {
+        while (got < want) {
             Status rs;
             const auto n = in->read(buf.data() + got, want - got, rs);
-            if (!rs.ok())
-            {
+            if (!rs.ok()) {
                 out.status = CompleteStatus::kWriteFailed;
                 out.error = std::move(rs);
                 return out;
             }
-            if (n == 0)
-            {
+            if (n == 0) {
                 // 上面已经比过长度了，走到这里说明文件在比对之后变短了
                 // （另一个进程在动它）。当作写失败，让上层重来。
                 out.status = CompleteStatus::kWriteFailed;
@@ -617,8 +547,7 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
             got += n;
         }
 
-        if (auto bs = builder.addChunk(buf.data(), want); !bs.ok())
-        {
+        if (auto bs = builder.addChunk(buf.data(), want); !bs.ok()) {
             out.status = CompleteStatus::kShapeMismatch;
             out.error = std::move(bs);
             return out;
@@ -639,8 +568,7 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
 
     // 根比对。大小写不敏感：十六进制在描述里规定是小写，但对方实现
     // 若给了大写，拒绝它没有意义——那是同一份内容。
-    if (out.actualRootHex != expectedRootHex)
-    {
+    if (out.actualRootHex != expectedRootHex) {
         // 校验不过的残片**必须删掉**。
         //
         // 这是"伪造残片"场景（docs/DESIGN.md §3.5）真正的落点。续传点只按
@@ -656,16 +584,15 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
         (void)store_.remove(partPath_);
 
         out.status = CompleteStatus::kRootMismatch;
-        out.error = Status::Fail(ErrorCode::kProtocol, "merkle root mismatch: expected " +
-                                                           std::string(expectedRootHex) + ", got " + out.actualRootHex +
-                                                           " (partial file discarded, retry from scratch)");
+        out.error =
+            Status::Fail(ErrorCode::kProtocol, "merkle root mismatch: expected " + std::string(expectedRootHex) + ", got " +
+                                                   out.actualRootHex + " (partial file discarded, retry from scratch)");
         return out;
     }
 
     // 校验通过才改名。顺序反过来（先改名再校验）会在校验失败时留下一个
     // 名字正确、内容错误的文件——那比传输失败严重得多。
-    if (auto rs = store_.atomicReplace(partPath_, targetPath_); !rs.ok())
-    {
+    if (auto rs = store_.atomicReplace(partPath_, targetPath_); !rs.ok()) {
         out.status = CompleteStatus::kWriteFailed;
         out.error = std::move(rs);
         return out;
@@ -679,8 +606,7 @@ void TransferReceiver::abort()
 {
     {
         std::lock_guard<std::mutex> lock(mu_);
-        if (aborted_)
-        {
+        if (aborted_) {
             return;
         }
         aborted_ = true;
@@ -701,4 +627,4 @@ void TransferReceiver::abort()
     (void)store_.remove(partPath_);
 }
 
-}  // namespace relayer::core::transfer
+}   // namespace relayer::core::transfer

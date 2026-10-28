@@ -2,20 +2,16 @@
 
 #include <algorithm>
 
-namespace relayer::core::transfer
-{
+namespace relayer::core::transfer {
 
 SendWindow::SendWindow(std::uint32_t totalChunks, std::uint32_t windowChunks)
-    : total_(totalChunks)
-    , window_(windowChunks == 0 ? 1 : windowChunks)
-    , state_(totalChunks, ChunkState::kPending)
+    : total_(totalChunks), window_(windowChunks == 0 ? 1 : windowChunks), state_(totalChunks, ChunkState::kPending)
 {
 }
 
 bool SendWindow::inUse(std::uint32_t index) const noexcept
 {
-    if (index >= total_)
-    {
+    if (index >= total_) {
         return false;
     }
     const auto s = state_[index];
@@ -74,10 +70,8 @@ std::uint32_t SendWindow::freeSlots() const noexcept
     const auto retransmittable = needRetransmit();
 
     std::uint32_t used = 0;
-    for (std::uint32_t i = 0; i < total_; ++i)
-    {
-        if (inUse(i))
-        {
+    for (std::uint32_t i = 0; i < total_; ++i) {
+        if (inUse(i)) {
             ++used;
         }
     }
@@ -101,8 +95,7 @@ bool SendWindow::done() const noexcept
 std::vector<std::uint32_t> SendWindow::takeNextBatch(std::uint32_t maxCount)
 {
     std::vector<std::uint32_t> out;
-    if (maxCount == 0 || done())
-    {
+    if (maxCount == 0 || done()) {
         return out;
     }
 
@@ -132,12 +125,10 @@ std::vector<std::uint32_t> SendWindow::takeNextBatch(std::uint32_t maxCount)
     // 顺序仍然重要：新块不会让 ackThrough 前进，只有空洞被填上才会。若先
     // 发新块，窗口会被"永远得不到确认推进"的块占满——经典的重传饥饿。
     std::size_t consumed = 0;
-    while (consumed < retransmitQueue_.size() && out.size() < maxCount)
-    {
+    while (consumed < retransmitQueue_.size() && out.size() < maxCount) {
         const auto idx = retransmitQueue_[consumed];
         // 队列可能与状态脱节（比如重复标记），以状态为准。
-        if (idx < total_ && state_[idx] == ChunkState::kNeedRetransmit)
-        {
+        if (idx < total_ && state_[idx] == ChunkState::kNeedRetransmit) {
             state_[idx] = ChunkState::kInflight;
             out.push_back(idx);
             ++retransmitted_;
@@ -151,14 +142,12 @@ std::vector<std::uint32_t> SendWindow::takeNextBatch(std::uint32_t maxCount)
     // 重传段已经用掉了一些配额，剩下的才是新块能用的。freeSlots() 在重传段
     // 跑完之后重新算：那一段把 kNeedRetransmit 变成了 kInflight，inUse 的
     // 判定两边都算，所以 used 不变——这正说明重传没有额外占用窗口。
-    if (out.size() >= maxCount)
-    {
+    if (out.size() >= maxCount) {
         return out;
     }
 
     const auto newBudget = std::min(maxCount - static_cast<std::uint32_t>(out.size()), freeSlots());
-    if (newBudget == 0)
-    {
+    if (newBudget == 0) {
         return out;
     }
 
@@ -167,10 +156,8 @@ std::vector<std::uint32_t> SendWindow::takeNextBatch(std::uint32_t maxCount)
     // 但**不能停在第一个非 kPending 的块**——乱序 ACK 会在前缀之后留下
     // 已确认的块，跳过它们继续往后才是对的，否则每遇到一个空洞就少发一批。
     std::uint32_t taken = 0;
-    for (std::uint32_t i = ackThrough_; i < total_ && taken < newBudget; ++i)
-    {
-        if (state_[i] == ChunkState::kPending)
-        {
+    for (std::uint32_t i = ackThrough_; i < total_ && taken < newBudget; ++i) {
+        if (state_[i] == ChunkState::kPending) {
             state_[i] = ChunkState::kInflight;
             out.push_back(i);
             ++taken;
@@ -180,21 +167,18 @@ std::vector<std::uint32_t> SendWindow::takeNextBatch(std::uint32_t maxCount)
     return out;
 }
 
-std::uint32_t SendWindow::applyAck(const ChunkAck &ack)
+std::uint32_t SendWindow::applyAck(const ChunkAck& ack)
 {
     std::uint32_t newly = 0;
 
     const auto through = std::min(ack.ackThrough, total_);
-    for (std::uint32_t i = ackThrough_; i < through; ++i)
-    {
-        if (state_[i] != ChunkState::kAcked)
-        {
+    for (std::uint32_t i = ackThrough_; i < through; ++i) {
+        if (state_[i] != ChunkState::kAcked) {
             state_[i] = ChunkState::kAcked;
             ++newly;
         }
     }
-    if (through > ackThrough_)
-    {
+    if (through > ackThrough_) {
         ackThrough_ = through;
     }
 
@@ -203,20 +187,16 @@ std::uint32_t SendWindow::applyAck(const ChunkAck &ack)
     // 注意基准点是**本次 ACK 里的 ackThrough**，不是更新后的 ackThrough_：
     // 位图第 i 位对应块 (ack.ackThrough + i)。用错基准会让整段块错位，
     // 而错位在"内容全对但位置错"时只有最终哈希能发现。
-    for (std::uint32_t i = 0; i < ack.bitmap.size() * 32; ++i)
-    {
-        if (!bitmapTest(ack.bitmap, i))
-        {
+    for (std::uint32_t i = 0; i < ack.bitmap.size() * 32; ++i) {
+        if (!bitmapTest(ack.bitmap, i)) {
             continue;
         }
         const auto idx = static_cast<std::uint64_t>(ack.ackThrough) + i;
-        if (idx >= total_)
-        {
+        if (idx >= total_) {
             break;
         }
         const auto k = static_cast<std::uint32_t>(idx);
-        if (state_[k] != ChunkState::kAcked)
-        {
+        if (state_[k] != ChunkState::kAcked) {
             state_[k] = ChunkState::kAcked;
             ++newly;
         }
@@ -228,35 +208,30 @@ std::uint32_t SendWindow::applyAck(const ChunkAck &ack)
     acked_ = static_cast<std::uint32_t>(std::count(state_.begin(), state_.end(), ChunkState::kAcked));
 
     // 连续前缀要跟着推进：位图可能已经把 ackThrough 之后的块都补齐了。
-    while (ackThrough_ < total_ && state_[ackThrough_] == ChunkState::kAcked)
-    {
+    while (ackThrough_ < total_ && state_[ackThrough_] == ChunkState::kAcked) {
         ++ackThrough_;
     }
 
     return newly;
 }
 
-void SendWindow::release(const std::vector<std::uint32_t> &chunks)
+void SendWindow::release(const std::vector<std::uint32_t>& chunks)
 {
-    for (auto idx : chunks)
-    {
-        if (idx < total_ && state_[idx] == ChunkState::kInflight)
-        {
+    for (auto idx : chunks) {
+        if (idx < total_ && state_[idx] == ChunkState::kInflight) {
             state_[idx] = ChunkState::kPending;
         }
     }
 }
 
-std::uint32_t SendWindow::markRetransmit(const std::vector<std::uint32_t> &chunks)
+std::uint32_t SendWindow::markRetransmit(const std::vector<std::uint32_t>& chunks)
 {
     std::uint32_t marked = 0;
-    for (auto idx : chunks)
-    {
+    for (auto idx : chunks) {
         // 只有"在飞"的块能被判丢。已确认的不该回退（那说明 ACK 有矛盾，
         // 而回退会让已经落盘的数据重传一遍，还可能覆盖接收方正在写的
         // 其他块）；从没发过的块本来就该发，不需要走到重传队列。
-        if (idx < total_ && state_[idx] == ChunkState::kInflight)
-        {
+        if (idx < total_ && state_[idx] == ChunkState::kInflight) {
             state_[idx] = ChunkState::kNeedRetransmit;
             retransmitQueue_.push_back(idx);
             ++marked;
@@ -274,14 +249,12 @@ std::vector<std::uint32_t> SendWindow::outstanding() const
     // 调用方误以为它们已在路上，进而重复发送。
     std::vector<std::uint32_t> out;
     out.reserve(total_ - acked_);
-    for (std::uint32_t i = 0; i < total_; ++i)
-    {
-        if (state_[i] == ChunkState::kInflight)
-        {
+    for (std::uint32_t i = 0; i < total_; ++i) {
+        if (state_[i] == ChunkState::kInflight) {
             out.push_back(i);
         }
     }
     return out;
 }
 
-}  // namespace relayer::core::transfer
+}   // namespace relayer::core::transfer

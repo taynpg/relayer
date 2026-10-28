@@ -27,8 +27,7 @@
 // 错误处理：写侧超限返回 false（调用方转成 Status）；读侧越界后 ok() 变 false，
 // 之后所有读都返回 0/空。这样解码函数可以连续读五六个字段，最后统一判一次。
 
-namespace relayer::common
-{
+namespace relayer::common {
 
 // ---------------------------------------------------------------------------
 // 写
@@ -37,8 +36,7 @@ namespace relayer::common
 class PayloadWriter
 {
 public:
-    explicit PayloadWriter(std::vector<char> &out) noexcept
-        : out_(out)
+    explicit PayloadWriter(std::vector<char>& out) noexcept : out_(out)
     {
     }
 
@@ -55,16 +53,14 @@ public:
 
     void u32(std::uint32_t v)
     {
-        for (int i = 0; i < 4; ++i)
-        {
+        for (int i = 0; i < 4; ++i) {
             out_.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
         }
     }
 
     void u64(std::uint64_t v)
     {
-        for (int i = 0; i < 8; ++i)
-        {
+        for (int i = 0; i < 8; ++i) {
             out_.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
         }
     }
@@ -76,13 +72,12 @@ public:
     }
 
     // 原始字节，无长度前缀。调用方自己保证长度约定。
-    void raw(const void *data, std::size_t len)
+    void raw(const void* data, std::size_t len)
     {
-        if (len == 0)
-        {
+        if (len == 0) {
             return;
         }
-        const auto *p = static_cast<const char *>(data);
+        const auto* p = static_cast<const char*>(data);
         out_.insert(out_.end(), p, p + len);
     }
 
@@ -92,8 +87,7 @@ public:
     // 但实际缺了尾巴的载荷，而那个样子很像成功。
     [[nodiscard]] bool str(std::string_view s)
     {
-        if (s.size() > 0xFFFF)
-        {
+        if (s.size() > 0xFFFF) {
             return false;
         }
         u16(static_cast<std::uint16_t>(s.size()));
@@ -104,8 +98,7 @@ public:
     // u8 长度前缀 + 内容（路由字段与 id 用这个，§9.1）。
     [[nodiscard]] bool shortStr(std::string_view s)
     {
-        if (s.size() > 0xFF)
-        {
+        if (s.size() > 0xFF) {
             return false;
         }
         u8(static_cast<std::uint8_t>(s.size()));
@@ -119,7 +112,7 @@ public:
     }
 
 private:
-    std::vector<char> &out_;
+    std::vector<char>& out_;
 };
 
 // ---------------------------------------------------------------------------
@@ -130,22 +123,17 @@ class PayloadReader
 {
 public:
     // 借用外部缓冲，不复制。
-    explicit PayloadReader(const void *data, std::size_t len) noexcept
-        : ptr_(static_cast<const char *>(data))
-        , len_(len)
+    explicit PayloadReader(const void* data, std::size_t len) noexcept : ptr_(static_cast<const char*>(data)), len_(len)
     {
     }
 
-    explicit PayloadReader(const std::vector<char> &b) noexcept
-        : ptr_(b.data())
-        , len_(b.size())
+    explicit PayloadReader(const std::vector<char>& b) noexcept : ptr_(b.data()), len_(b.size())
     {
     }
 
     std::uint8_t u8()
     {
-        if (!ok_ || pos_ + 1 > len_)
-        {
+        if (!ok_ || pos_ + 1 > len_) {
             ok_ = false;
             return 0;
         }
@@ -162,8 +150,7 @@ public:
     std::uint32_t u32()
     {
         std::uint32_t v = 0;
-        for (int i = 0; i < 4; ++i)
-        {
+        for (int i = 0; i < 4; ++i) {
             v |= static_cast<std::uint32_t>(u8()) << (8 * i);
         }
         return v;
@@ -172,8 +159,7 @@ public:
     std::uint64_t u64()
     {
         std::uint64_t v = 0;
-        for (int i = 0; i < 8; ++i)
-        {
+        for (int i = 0; i < 8; ++i) {
             v |= static_cast<std::uint64_t>(u8()) << (8 * i);
         }
         return v;
@@ -187,14 +173,13 @@ public:
     // 取一段裸字节的指针 + 长度。不复制。
     //
     // 返回的指针指向原缓冲，调用方不得跨缓冲生命周期保存。
-    const char *raw(std::size_t n)
+    const char* raw(std::size_t n)
     {
-        if (!ok_ || pos_ + n > len_)
-        {
+        if (!ok_ || pos_ + n > len_) {
             ok_ = false;
             return nullptr;
         }
-        const char *p = ptr_ + pos_;
+        const char* p = ptr_ + pos_;
         pos_ += n;
         return p;
     }
@@ -203,11 +188,10 @@ public:
     std::string str()
     {
         const auto n = u16();
-        if (!ok_)
-        {
+        if (!ok_) {
             return {};
         }
-        const char *p = raw(n);
+        const char* p = raw(n);
         return p == nullptr ? std::string{} : std::string(p, n);
     }
 
@@ -215,11 +199,10 @@ public:
     std::string shortStr()
     {
         const auto n = u8();
-        if (!ok_)
-        {
+        if (!ok_) {
             return {};
         }
-        const char *p = raw(n);
+        const char* p = raw(n);
         return p == nullptr ? std::string{} : std::string(p, n);
     }
 
@@ -251,10 +234,10 @@ public:
     }
 
 private:
-    const char *ptr_ = nullptr;
+    const char* ptr_ = nullptr;
     std::size_t len_ = 0;
     std::size_t pos_ = 0;
     bool ok_ = true;
 };
 
-}  // namespace relayer::common
+}   // namespace relayer::common

@@ -2,14 +2,11 @@
 
 #include <algorithm>
 
-namespace relayer::core::transfer
-{
+namespace relayer::core::transfer {
 
-WorkerPool::WorkerPool(std::size_t threads, std::size_t queueCapacity)
-    : capacity_(queueCapacity)
+WorkerPool::WorkerPool(std::size_t threads, std::size_t queueCapacity) : capacity_(queueCapacity)
 {
-    if (threads == 0)
-    {
+    if (threads == 0) {
         // 传输是 I/O 密集型：线程再多也只是排队等盘。
         // 上限 4 是因为典型场景是"一块在读、一块在写、一块在算哈希"，
         // 再加线程换来的是上下文切换而不是吞吐。
@@ -18,8 +15,7 @@ WorkerPool::WorkerPool(std::size_t threads, std::size_t queueCapacity)
     }
 
     threads_.reserve(threads);
-    for (std::size_t i = 0; i < threads; ++i)
-    {
+    for (std::size_t i = 0; i < threads; ++i) {
         threads_.emplace_back([this] { workerLoop(); });
     }
 }
@@ -34,10 +30,8 @@ WorkerPool::~WorkerPool()
 {
     stop();
 
-    for (auto &t : threads_)
-    {
-        if (t.joinable())
-        {
+    for (auto& t : threads_) {
+        if (t.joinable()) {
             t.join();
         }
     }
@@ -45,19 +39,16 @@ WorkerPool::~WorkerPool()
 
 bool WorkerPool::submit(Task task)
 {
-    if (!task)
-    {
+    if (!task) {
         return false;
     }
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (stop_)
-        {
+        if (stop_) {
             return false;
         }
-        if (capacity_ != 0 && queue_.size() >= capacity_)
-        {
+        if (capacity_ != 0 && queue_.size() >= capacity_) {
             // 队列满 = 背压信号。不阻塞等空位：阻塞会把调用方（strand）
             // 一起卡住，而 strand 卡住的后果比"这一块暂时不读"严重得多。
             return false;
@@ -88,8 +79,7 @@ void WorkerPool::stop()
 {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (stop_.exchange(true))
-        {
+        if (stop_.exchange(true)) {
             return;
         }
         queue_.clear();
@@ -104,15 +94,13 @@ bool WorkerPool::stopped() const noexcept
 
 void WorkerPool::workerLoop()
 {
-    for (;;)
-    {
+    for (;;) {
         Task task;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [this] { return stop_.load(std::memory_order_relaxed) || !queue_.empty(); });
 
-            if (stop_.load(std::memory_order_relaxed))
-            {
+            if (stop_.load(std::memory_order_relaxed)) {
                 return;
             }
             task = std::move(queue_.front());
@@ -123,15 +111,12 @@ void WorkerPool::workerLoop()
         // 任务本身不该抛。真抛了（比如 std::bad_alloc）也不让整个线程死掉
         // ——死掉一个工作线程之后，剩下的线程会慢慢把队列啃完，而调用方
         // 完全看不出来"池子已经残了"。这里吞掉并继续，比静默降级更可控。
-        try
-        {
+        try {
             task();
-        }
-        catch (...)
-        {
+        } catch (...) {
         }
         running_.fetch_sub(1, std::memory_order_relaxed);
     }
 }
 
-}  // namespace relayer::core::transfer
+}   // namespace relayer::core::transfer

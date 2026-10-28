@@ -28,16 +28,14 @@
 // 这是背压在**逻辑层**的落点。物理层的落点是 WorkerPool 的队列上限
 // （磁盘跟不上时 submit 返回 false）。
 
-namespace relayer::core::transfer
-{
+namespace relayer::core::transfer {
 
 // 一块的当前状态。
-enum class ChunkState : std::uint8_t
-{
-    kPending = 0,         // 还没发过
-    kInflight = 1,        // 已发出，等 ACK
-    kAcked = 2,           // 已确认落盘
-    kNeedRetransmit = 3,  // 发过但被判丢（来自 SACK 或重传定时器）
+enum class ChunkState : std::uint8_t {
+    kPending = 0,          // 还没发过
+    kInflight = 1,         // 已发出，等 ACK
+    kAcked = 2,            // 已确认落盘
+    kNeedRetransmit = 3,   // 发过但被判丢（来自 SACK 或重传定时器）
 };
 
 class SendWindow
@@ -72,18 +70,18 @@ public:
     //
     // ack.ackThrough 可能超过 total_（对方多报），按 total_ 截断；
     // 位图越界位一律忽略。
-    std::uint32_t applyAck(const ChunkAck &ack);
+    std::uint32_t applyAck(const ChunkAck& ack);
 
     // 归还一批块（发送失败 / 会话取消）。状态退回 kPending，
     // 让它们还能被重新取走。
-    void release(const std::vector<std::uint32_t> &chunks);
+    void release(const std::vector<std::uint32_t>& chunks);
 
     // 把在飞超过 timeout 的块标记为待重传。返回被标记的块数。
     //
     // 由调用方的定时器驱动（本类不认识时间，只认识"这些块超时了"）。
     // 传入的是"待重传的块号列表"，由调用方自己按发送时刻算出来——
     // 把时间塞进来会让本类无法用纯逻辑测试。
-    std::uint32_t markRetransmit(const std::vector<std::uint32_t> &chunks);
+    std::uint32_t markRetransmit(const std::vector<std::uint32_t>& chunks);
 
     // 是否全部确认。
     [[nodiscard]] bool done() const noexcept;
@@ -133,8 +131,8 @@ private:
 
     std::vector<ChunkState> state_;
 
-    std::uint32_t ackThrough_ = 0;  // 连续已确认前缀长度
-    std::uint32_t acked_ = 0;       // 已确认总数（含空洞之外的）
+    std::uint32_t ackThrough_ = 0;   // 连续已确认前缀长度
+    std::uint32_t acked_ = 0;        // 已确认总数（含空洞之外的）
 
     // 累计重传块次。只增不减：release() 把块退回 kPending 也不回退它，
     // 因为"曾经重传过"这个事实不会因为后来的归还而消失。
@@ -146,4 +144,4 @@ private:
     std::vector<std::uint32_t> retransmitQueue_;
 };
 
-}  // namespace relayer::core::transfer
+}   // namespace relayer::core::transfer

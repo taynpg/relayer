@@ -14,37 +14,36 @@
 //      "要么全写、要么失败"的确定性判断。
 //   3. 错误码可以直接取自 errno，便于统一映射成 ErrorCode。
 
-namespace relayer::filestore::detail
-{
+namespace relayer::filestore::detail {
 
 class StdReadStream final : public IReadStream
 {
 public:
-    StdReadStream(std::FILE *fp, std::string path);
+    StdReadStream(std::FILE* fp, std::string path);
     ~StdReadStream() override;
 
-    StdReadStream(const StdReadStream &) = delete;
-    StdReadStream &operator=(const StdReadStream &) = delete;
+    StdReadStream(const StdReadStream&) = delete;
+    StdReadStream& operator=(const StdReadStream&) = delete;
 
-    std::size_t read(void *buf, std::size_t len, Status &st) override;
+    std::size_t read(void* buf, std::size_t len, Status& st) override;
     Status seek(std::uint64_t offset) override;
     [[nodiscard]] std::uint64_t tell() const override;
 
 private:
-    std::FILE *fp_;
+    std::FILE* fp_;
     std::string path_;
 };
 
 class StdWriteStream final : public IWriteStream
 {
 public:
-    StdWriteStream(std::FILE *fp, std::string path);
+    StdWriteStream(std::FILE* fp, std::string path);
     ~StdWriteStream() override;
 
-    StdWriteStream(const StdWriteStream &) = delete;
-    StdWriteStream &operator=(const StdWriteStream &) = delete;
+    StdWriteStream(const StdWriteStream&) = delete;
+    StdWriteStream& operator=(const StdWriteStream&) = delete;
 
-    Status write(const void *buf, std::size_t len) override;
+    Status write(const void* buf, std::size_t len) override;
     Status seek(std::uint64_t offset) override;
     [[nodiscard]] std::uint64_t tell() const override;
     Status flush() override;
@@ -52,8 +51,8 @@ public:
     Status resize(std::uint64_t size) override;
 
 private:
-    std::FILE *fp_;
+    std::FILE* fp_;
     std::string path_;
 };
 
-}  // namespace relayer::filestore::detail
+}   // namespace relayer::filestore::detail
