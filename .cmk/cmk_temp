@@ -1,9 +1,0 @@
-{
-  "action": "build",
-  "cleanBuild": false,
-  "cleanCache": false,
-  "cleanTypes": [],
-  "config": "D:\\Code\\relayer\\.cmk/cmk_config",
-  "root": "D:\\Code\\relayer",
-  "type": "Debug"
-}

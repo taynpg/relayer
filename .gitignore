@@ -55,3 +55,7 @@ Thumbs.db
 # ---- Python（e2e 测试脚本）----
 __pycache__/
 *.py[cod]
+
+# ---- 编辑器/工具本地状态 ----
+# cmk 是本机 CMake 前端的配置与临时状态，含本机绝对路径
+.cmk/
