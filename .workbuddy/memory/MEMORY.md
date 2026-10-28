@@ -37,7 +37,9 @@
 
 - C++17 / Qt6 / CMake 3.20+ / Ninja；MSYS2 UCRT64 下 GCC 16.2.0
 - GCC 工具链路径：`C:\msys64\ucrt64\bin\`，`clang-format` 也在那里
-- 代码风格：`.clang-format`（LLVM + Allman + 120 列 + 4 空格）
+- 代码风格：`.clang-format`（LLVM 底 + 130 列 + 4 空格 + 指针靠左 +
+  只给函数/类换行的大括号）。**2026-10-28 换过风格**，旧的是 Allman +
+  120 列 + 指针靠右；改风格必须全量重排一次，否则后续提交混入无关 diff
 - 格式化命令：`clang-format -i <files>`，提交前必跑
 - 产物统一在 `build/bin` 与 `build/lib`
 
