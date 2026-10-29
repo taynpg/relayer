@@ -30,6 +30,7 @@ add_test(NAME filestore COMMAND filestore_test)
 add_executable(core_test
     core/FrameTest.cpp
     core/ControlLinkTest.cpp
+    core/TransferLinkTest.cpp
     core/PairingTest.cpp
     core/AuthTest.cpp
     core/StateMachineTest.cpp

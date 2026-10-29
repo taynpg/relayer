@@ -34,6 +34,7 @@ add_library(relayer_core STATIC
     src/session/Session.cpp
     src/session/PeerTable.cpp
     src/net/ControlLink.cpp
+    src/net/TransferLink.cpp
     src/session/DataChannel.cpp
     src/session/FileList.cpp
     src/session/FileOp.cpp
