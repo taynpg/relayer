@@ -62,10 +62,10 @@ cmk                    # 无参数 = 重放上次 build（日常增量）
 cd build && ctest --output-on-failure   # 7 项，约 90 秒
 ```
 
-- cmk 配置在 `.cmk/cmk_config`——**已 gitignore（含本机路径）**，新 clone
-  没有：先 `cmk config auto` 生成默认配置，再把两个 configuration 块里的
-  `-DRELAYER_BUILD_TESTS=ON`（Debug/Release）与 `-DRELAYER_WERROR=ON`
-  （Release）补回去，否则 ctest 报 "No tests were found"。
+- cmk 配置 `.cmk/cmk_config` **已入库**（2026-10-29 用户要求，两个
+  configuration 块里 Debug/Release 都有 `-DRELAYER_BUILD_TESTS=ON`，
+  Release 另有 `-DRELAYER_WERROR=ON`）。`cmk_cache`/`cmk_temp` 忽略。
+  配置含本机编译器路径（C:/msys64），换机器按需改。
 - 不要动 `.cmk/cmk_cache`、`.cmk/cmk_temp`；重置用 `cmk clean cache|temp|all`。
 - 没有 Qt 的机器/CI 要显式 `-DRELAYER_BUILD_GUI=OFF`。
 
