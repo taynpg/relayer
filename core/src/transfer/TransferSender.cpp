@@ -1,6 +1,9 @@
 #include "relayer/core/transfer/TransferSender.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 
@@ -8,6 +11,48 @@
 #include "relayer/core/transfer/MerkleTree.h"
 
 namespace relayer::core::transfer {
+
+namespace {
+
+// 读盘任务的分段计时（临时，RELAYER_PROF=1 打开）。与 TransferPeer.cpp 里
+// 那份同源：这里只量"一块数据从提交到就绪"的三段，用来回答"每块 4ms 到底
+// 花在 open、seek 还是 read 上"。
+using ReadClock = std::chrono::steady_clock;
+
+struct ReadProf {
+    bool on = std::getenv("RELAYER_PROF") != nullptr;
+    std::uint64_t tasks = 0;
+    std::uint64_t openNs = 0;
+    std::uint64_t seekNs = 0;
+    std::uint64_t readNs = 0;
+    // 从任务开始到结束的墙钟（含锁竞争），用来和上面三段之和对比。
+    std::uint64_t totalNs = 0;
+
+    ~ReadProf()
+    {
+        if (!on || tasks == 0) {
+            return;
+        }
+        const double n = static_cast<double>(tasks);
+        std::fprintf(stderr, "[prof] read: tasks=%.0f 每块均 open=%.3fms seek=%.3fms read=%.3fms total=%.3fms\n", n,
+                     static_cast<double>(openNs) / 1e6 / n, static_cast<double>(seekNs) / 1e6 / n,
+                     static_cast<double>(readNs) / 1e6 / n, static_cast<double>(totalNs) / 1e6 / n);
+        std::fflush(stderr);
+    }
+};
+
+ReadProf& readProf()
+{
+    static ReadProf p;
+    return p;
+}
+
+std::uint64_t since(ReadClock::time_point t0)
+{
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(ReadClock::now() - t0).count());
+}
+
+}   // namespace
 
 TransferSender::TransferSender(filestore::IFileStore& store, WorkerPool& pool) : TransferSender(store, pool, Config{})
 {
@@ -97,11 +142,6 @@ Status TransferSender::open(std::string_view sourcePath, std::uint32_t chunkSize
 std::uint32_t TransferSender::totalChunks() const noexcept
 {
     return totalChunks_;
-}
-
-std::uint32_t TransferSender::chunkSize() const noexcept
-{
-    return chunkSize_;
 }
 
 std::uint64_t TransferSender::totalSize() const noexcept
@@ -234,6 +274,12 @@ std::uint32_t TransferSender::pump(const PostFn& post)
         runningTasks_.fetch_add(1, std::memory_order_acq_rel);
 
         const auto accepted = pool_.submit([this, idx, post]() {
+            auto& rp = readProf();
+            const auto tTask = ReadClock::now();
+            if (rp.on) {
+                ++rp.tasks;
+            }
+
             // 任务体退出时把计数还回去。用 RAII 而不是在每个 return 前
             // 手动减：这条函数里有五个出口，漏一个就是永久等待。
             struct RunningGuard {
@@ -262,7 +308,11 @@ std::uint32_t TransferSender::pump(const PostFn& post)
             };
 
             Status openStatus;
+            const auto tOpen = ReadClock::now();
             auto in = store_.openRead(sourcePath_, openStatus);
+            if (rp.on) {
+                rp.openNs += since(tOpen);
+            }
             if (!in) {
                 // 读完的块不投递，只把错误记到 readError_。上层在
                 // takeReadyChunks 之后检查 readError()。
@@ -273,11 +323,20 @@ std::uint32_t TransferSender::pump(const PostFn& post)
             // 每个任务自己 seek。不能共用流位置：多个任务并发读同一个
             // 文件时，共享的偏移会被彼此踩乱——读到的是别人的数据，
             // 而且长度正确，只有最终哈希能发现。
-            if (auto st = in->seek(offsetOf(idx)); !st.ok()) {
+            const auto tSeek = ReadClock::now();
+            std::uint64_t seekSpent = 0;
+            const auto seekStatus = in->seek(offsetOf(idx));
+            if (rp.on) {
+                seekSpent = since(tSeek);
+                rp.seekNs += seekSpent;
+            }
+            (void)seekSpent;
+            if (auto st = seekStatus; !st.ok()) {
                 fail(std::move(st));
                 return;
             }
 
+            const auto tRead = ReadClock::now();
             std::size_t got = 0;
             while (got < chunk.data.size()) {
                 Status st;
@@ -291,6 +350,11 @@ std::uint32_t TransferSender::pump(const PostFn& post)
                     return;
                 }
                 got += n;
+            }
+
+            if (rp.on) {
+                rp.readNs += since(tRead);
+                rp.totalNs += since(tTask);
             }
 
             if (post) {
@@ -372,6 +436,28 @@ std::vector<ReadChunk> TransferSender::takeReadyChunks()
     // 腾出来）。这是一个廉价但有效的优化，代价只是一次排序。
     std::sort(out.begin(), out.end(), [](const ReadChunk& a, const ReadChunk& b) { return a.chunkIndex < b.chunkIndex; });
     return out;
+}
+
+std::uint32_t TransferSender::chunkSize() const noexcept
+{
+    return chunkSize_;
+}
+
+std::uint32_t TransferSender::windowChunks() const noexcept
+{
+    return window_ ? window_->windowChunks() : 0;
+}
+
+std::size_t TransferSender::readyCount() const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    return ready_.size();
+}
+
+std::size_t TransferSender::pendingReads() const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    return reading_.size();
 }
 
 bool TransferSender::hasWork() const

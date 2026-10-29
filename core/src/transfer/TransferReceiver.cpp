@@ -1,12 +1,55 @@
 #include "relayer/core/transfer/TransferReceiver.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 
 #include "relayer/core/transfer/MerkleTree.h"
 
 namespace relayer::core::transfer {
+
+namespace {
+
+// 写盘任务的分段计时（临时，RELAYER_PROF=1）。要回答的是"每块 6ms 花在
+// 等锁、seek、write 还是 flush 上"。
+using WClock = std::chrono::steady_clock;
+
+struct WriteProf {
+    bool on = std::getenv("RELAYER_PROF") != nullptr;
+    std::uint64_t tasks = 0;
+    std::uint64_t lockNs = 0;
+    std::uint64_t seekNs = 0;
+    std::uint64_t writeNs = 0;
+    std::uint64_t flushNs = 0;
+
+    ~WriteProf()
+    {
+        if (!on || tasks == 0) {
+            return;
+        }
+        const double n = static_cast<double>(tasks);
+        std::fprintf(stderr, "[prof] write: tasks=%.0f 每块均 等锁=%.3fms seek=%.3fms write=%.3fms flush=%.3fms\n", n,
+                     static_cast<double>(lockNs) / 1e6 / n, static_cast<double>(seekNs) / 1e6 / n,
+                     static_cast<double>(writeNs) / 1e6 / n, static_cast<double>(flushNs) / 1e6 / n);
+        std::fflush(stderr);
+    }
+};
+
+WriteProf& writeProf()
+{
+    static WriteProf p;
+    return p;
+}
+
+std::uint64_t sinceW(WClock::time_point t0)
+{
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(WClock::now() - t0).count());
+}
+
+}   // namespace
 
 namespace {
 
@@ -335,27 +378,49 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void* data,
         // 的代价（实测 9ms/块），正是它让 256 KiB 分块看起来比 4 MiB
         // 慢三倍。见 writeStream_ 的说明。
         Status ws;
+        auto& wp = writeProf();
+        if (wp.on) {
+            ++wp.tasks;
+        }
+        const auto tLock = WClock::now();
         {
             std::lock_guard<std::mutex> lock(writeMu_);
+            if (wp.on) {
+                wp.lockNs += sinceW(tLock);
+            }
             if (!writeStream_) {
                 // 流已经被 finalize / abort 关掉了，而这一块还没写完。
                 // 正常收尾顺序不该出现；如实报错，别静默丢块。
                 ws = Status::Fail(ErrorCode::kIoError, "part file closed before chunk write: " + partPath_);
-            } else if (auto st = writeStream_->seek(offsetOf(idx)); !st.ok()) {
-                ws = std::move(st);
-            } else if (auto stw = writeStream_->write(c.data.data(), c.data.size()); !stw.ok()) {
-                ws = std::move(stw);
-            }
-            // flush 是**必须**的，sync 是可选的。
-            //
-            // 必须 flush 的理由不在"数据安全"，而在 flush 会把用户态
-            // 缓冲交给操作系统——不做这一步，write 成功只意味着"进了
-            // 本进程的缓冲区"。而下一行就要告诉对端"这块我收好了"。
-            // ACK 的语义是"已经到文件里了"，不是"已经到我的内存里了"。
-            else if (auto stf = writeStream_->flush(); !stf.ok()) {
-                ws = std::move(stf);
-            } else if (config_.syncOnWrite) {
-                ws = writeStream_->sync();
+            } else {
+                const auto t1 = WClock::now();
+                ws = writeStream_->seek(offsetOf(idx));
+                if (wp.on) {
+                    wp.seekNs += sinceW(t1);
+                }
+                if (ws.ok()) {
+                    const auto t2 = WClock::now();
+                    ws = writeStream_->write(c.data.data(), c.data.size());
+                    if (wp.on) {
+                        wp.writeNs += sinceW(t2);
+                    }
+                }
+                // flush 是**必须**的，sync 是可选的。
+                //
+                // 必须 flush 的理由不在"数据安全"，而在 flush 会把用户态
+                // 缓冲交给操作系统——不做这一步，write 成功只意味着"进了
+                // 本进程的缓冲区"。而下一行就要告诉对端"这块我收好了"。
+                // ACK 的语义是"已经到文件里了"，不是"已经到我的内存里了"。
+                if (ws.ok()) {
+                    const auto t3 = WClock::now();
+                    ws = writeStream_->flush();
+                    if (wp.on) {
+                        wp.flushNs += sinceW(t3);
+                    }
+                }
+                if (ws.ok() && config_.syncOnWrite) {
+                    ws = writeStream_->sync();
+                }
             }
         }
 

@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <asio/post.hpp>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <utility>
 #include <vector>
@@ -16,6 +19,116 @@ using protocol::Frame;
 using protocol::FrameType;
 
 constexpr auto kAckInterval = std::chrono::milliseconds(20);
+
+// ---------------------------------------------------------------------------
+// 吞吐探针（临时诊断，RELAYER_PROF=1 打开）
+// ---------------------------------------------------------------------------
+//
+// 为什么要有它：端到端实测 ~48 MB/s，直连（不经中继）也只有 ~57 MB/s，
+// 反推每块约 4.3 ms —— 比"读 256 KiB + 编码 + 写 socket"应有的量级差了
+// 两个数量级。窗口、ACK 周期、线程池大小、写盘并发都单独试过，都不是。
+// 剩下的可能分散在每块的几个阶段里，光看代码分不出来，所以直接量。
+//
+// 输出在进程退出时打到 stderr（静态对象析构），形如：
+//   [prof] send pumps=.. chunks=.. (..块/轮) encode=..% frame=..%
+//
+// 设计成运行期开关：关着的时候只有一个 bool 判断，不进热路径的计时分支。
+// 定下来就删，不要留在主干里。
+using ProfClock = std::chrono::steady_clock;
+
+struct Prof {
+    bool on = false;
+
+    // 发送侧
+    std::uint64_t pumps = 0;
+    std::uint64_t chunksTaken = 0;
+    std::uint64_t submitted = 0;   // sender_->pump 返回的提交块数累计
+    std::uint64_t pumpIdle = 0;    // 提交为 0 的轮数（读盘在飞满 / 窗口满）
+    std::uint64_t acks = 0;
+    std::uint64_t ackAdvance = 0;   // ackThrough 累计推进块数
+    std::uint64_t readInFlightSum = 0;
+    std::uint64_t busy = 0;   // 接收端拒绝受理的块数（背压丢块）
+    // 每次 pump 发出的块数分布：bins[i] = "发出 i 块"的轮数，最后一个桶是 >=9。
+    std::uint64_t bins[10] = {};
+
+    // ACK / 批次时序。要回答的是"一个窗口周转的 100ms 里，发送、传输、接收
+    // 处理各占多少"。
+    std::uint64_t ackGapNs = 0;   // 相邻两次 sendAck 的间隔累计
+    std::uint64_t ackGapCount = 0;
+    std::uint64_t firstChunkToAckNs = 0;   // 本轮第一块到达 → 发 ACK
+    std::uint64_t firstChunkToAckCount = 0;
+    bool batchOpen = false;
+    ProfClock::time_point batchStart{};
+    std::uint64_t encodeNs = 0;
+    std::uint64_t frameNs = 0;
+
+    // 接收侧
+    std::uint64_t chunksIn = 0;
+    std::uint64_t decodeNs = 0;
+    std::uint64_t acceptNs = 0;
+
+    Prof() : on(std::getenv("RELAYER_PROF") != nullptr)
+    {
+    }
+
+    ~Prof()
+    {
+        if (!on || (pumps == 0 && chunksIn == 0)) {
+            return;
+        }
+        const double mpumps = static_cast<double>(pumps);
+        const double min = static_cast<double>(chunksIn);
+        std::fprintf(stderr, "[prof] send: pumps=%.0f chunks=%.0f (%.2f 块/轮) 提交=%.0f 空转轮=%.0f\n", mpumps,
+                     static_cast<double>(chunksTaken), mpumps > 0 ? static_cast<double>(chunksTaken) / mpumps : 0.0,
+                     static_cast<double>(submitted), static_cast<double>(pumpIdle));
+        std::fprintf(stderr, "[prof] send: encode=%.0fms frame=%.0fms  acks=%.0f 读盘在飞均=%.1f\n",
+                     static_cast<double>(encodeNs) / 1e6, static_cast<double>(frameNs) / 1e6, static_cast<double>(acks),
+                     mpumps > 0 ? static_cast<double>(readInFlightSum) / mpumps : 0.0);
+        std::fprintf(stderr, "[prof] recv: chunks=%.0f decode=%.0fms accept=%.0fms 背压丢块=%.0f\n", min,
+                     static_cast<double>(decodeNs) / 1e6, static_cast<double>(acceptNs) / 1e6, static_cast<double>(busy));
+        std::fprintf(stderr, "[prof] ACK 间隔均=%.1fms  首块→ACK 均=%.1fms\n",
+                     ackGapCount > 0 ? static_cast<double>(ackGapNs) / 1e6 / static_cast<double>(ackGapCount) : 0.0,
+                     firstChunkToAckCount > 0
+                         ? static_cast<double>(firstChunkToAckNs) / 1e6 / static_cast<double>(firstChunkToAckCount)
+                         : 0.0);
+        std::fprintf(stderr, "[prof] 每轮发出块数分布: 0=%llu 1=%llu 2=%llu 3=%llu 4=%llu 5=%llu 6=%llu 7=%llu 8=%llu >=9=%llu\n",
+                     static_cast<unsigned long long>(bins[0]), static_cast<unsigned long long>(bins[1]),
+                     static_cast<unsigned long long>(bins[2]), static_cast<unsigned long long>(bins[3]),
+                     static_cast<unsigned long long>(bins[4]), static_cast<unsigned long long>(bins[5]),
+                     static_cast<unsigned long long>(bins[6]), static_cast<unsigned long long>(bins[7]),
+                     static_cast<unsigned long long>(bins[8]), static_cast<unsigned long long>(bins[9]));
+        std::fflush(stderr);
+    }
+};
+
+Prof& prof()
+{
+    static Prof p;
+    return p;
+}
+
+// 只累加一段代码的墙钟时间。开关关着时构造/析构都是空操作。
+struct ScopedTimer {
+    bool on;
+    ProfClock::time_point t0;
+    std::uint64_t* acc;
+
+    explicit ScopedTimer(std::uint64_t& a) : on(prof().on), acc(&a)
+    {
+        if (on) {
+            t0 = ProfClock::now();
+        }
+    }
+    ~ScopedTimer()
+    {
+        if (on) {
+            *acc +=
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(ProfClock::now() - t0).count());
+        }
+    }
+    ScopedTimer(const ScopedTimer&) = delete;
+    ScopedTimer& operator=(const ScopedTimer&) = delete;
+};
 
 }   // namespace
 
@@ -217,6 +330,8 @@ void TransferPeer::handleChunkAck(const Frame& frame)
     }
 
     ++stats_.acksReceived;
+    ++prof().acks;
+    prof().ackAdvance += std::min<std::uint64_t>(ack.ackThrough, 0xFFFFFFFFULL);
     sender_->applyAck(ack);
 
     if (sender_->done()) {
@@ -268,13 +383,44 @@ void TransferPeer::sendReadyChunks()
     // 让它与 pump 落在同一线程上——本层没有额外加锁，全靠这个串行化。
     const PostFn post = [&ctx = ctx_](std::function<void()> fn) { asio::post(ctx, std::move(fn)); };
 
-    (void)sender_->pump(post);
+    if (prof().on) {
+        static bool paramsLogged = false;
+        if (!paramsLogged) {
+            paramsLogged = true;
+            std::fprintf(stderr, "[prof] 参数: chunk=%u 窗口=%u块 读盘上限=%u 写盘上限=%u 缓冲上限=%u\n", sender_->chunkSize(),
+                         sender_->windowChunks(), config_.sender.maxReadInFlight, config_.receiver.maxWriteInFlight,
+                         config_.receiver.maxBufferedChunks);
+            std::fflush(stderr);
+        }
+    }
 
-    for (auto& chunk : sender_->takeReadyChunks()) {
+    const auto submitted = sender_->pump(post);
+    ++prof().pumps;
+    if (prof().on && prof().pumps <= 20) {
+        std::fprintf(stderr, "[prof] 轮%llu 提交=%u reading=%zu ready=%zu\n", static_cast<unsigned long long>(prof().pumps),
+                     submitted, sender_->pendingReads(), sender_->readyCount());
+        std::fflush(stderr);
+    }
+    prof().submitted += submitted;
+    if (submitted == 0) {
+        ++prof().pumpIdle;
+    }
+
+    auto ready = sender_->takeReadyChunks();
+    if (prof().on) {
+        const auto n = ready.size();
+        ++prof().bins[n < 9 ? n : 9];
+    }
+    for (auto& chunk : ready) {
+        ++prof().chunksTaken;
+
         std::vector<char> body;
-        if (auto st = encodeChunk(chunk.chunkIndex, chunk.data.data(), chunk.data.size(), body); !st.ok()) {
-            finish(TransferOutcome::kFailed, st);
-            return;
+        {
+            ScopedTimer t(prof().encodeNs);
+            if (auto st = encodeChunk(chunk.chunkIndex, chunk.data.data(), chunk.data.size(), body); !st.ok()) {
+                finish(TransferOutcome::kFailed, st);
+                return;
+            }
         }
 
         Frame f;
@@ -284,7 +430,10 @@ void TransferPeer::sendReadyChunks()
         f.to = toPeerId_;
         f.body = std::move(body);
 
-        sendFrame(std::move(f));
+        {
+            ScopedTimer t(prof().frameNs);
+            sendFrame(std::move(f));
+        }
         ++stats_.chunksSent;
         chunkSentAt_[chunk.chunkIndex] = std::chrono::steady_clock::now();
     }
@@ -500,9 +649,20 @@ void TransferPeer::handleChunkData(const Frame& frame)
         return;
     }
 
+    ++prof().chunksIn;
+    if (prof().on && !prof().batchOpen) {
+        prof().batchOpen = true;
+        prof().batchStart = ProfClock::now();
+    }
+
     ChunkData chunk;
     std::string err;
-    if (!decodeChunk(frame.body, chunk, err)) {
+    bool decoded = false;
+    {
+        ScopedTimer t(prof().decodeNs);
+        decoded = decodeChunk(frame.body, chunk, err);
+    }
+    if (!decoded) {
         ++stats_.protocolErrors;
         finish(TransferOutcome::kFailed, Status::Fail(ErrorCode::kProtocol, "bad chunk frame: " + err));
         return;
@@ -540,7 +700,11 @@ void TransferPeer::handleChunkData(const Frame& frame)
         });
     };
 
-    const auto st = receiver_->acceptChunk(chunk.chunkIndex, chunk.payload, chunk.payloadLen, post);
+    Status st;
+    {
+        ScopedTimer t(prof().acceptNs);
+        st = receiver_->acceptChunk(chunk.chunkIndex, chunk.payload, chunk.payloadLen, post);
+    }
 
     if (st.code == ErrorCode::kAlreadyExists) {
         // 重传的重复块。正常路径：说明我们上一轮的 ACK 丢了。
@@ -551,6 +715,7 @@ void TransferPeer::handleChunkData(const Frame& frame)
     }
 
     if (st.code == ErrorCode::kBusy) {
+        ++prof().busy;
         // 背压。此刻**不能**回 ACK 说收到了——这一块没被受理。让它停在
         // 对端的窗口里，等我们消化完它自然会重传。
         //
@@ -658,7 +823,21 @@ void TransferPeer::sendAck()
 
     ++stats_.acksSent;
     ackPending_ = false;
-    lastAckSent_ = std::chrono::steady_clock::now();
+    const auto nowAck = std::chrono::steady_clock::now();
+    if (prof().on) {
+        if (lastAckSent_ != std::chrono::steady_clock::time_point{}) {
+            prof().ackGapNs +=
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(nowAck - lastAckSent_).count());
+            ++prof().ackGapCount;
+        }
+        if (prof().batchOpen) {
+            prof().firstChunkToAckNs += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(nowAck - prof().batchStart).count());
+            ++prof().firstChunkToAckCount;
+            prof().batchOpen = false;
+        }
+    }
+    lastAckSent_ = nowAck;
 }
 
 void TransferPeer::sendAnswerSend(AnswerStatus status, std::uint32_t resumeFrom, std::string_view reason)

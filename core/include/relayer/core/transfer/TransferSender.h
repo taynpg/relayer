@@ -129,6 +129,17 @@ public:
     // 是否还有活要干：有块待发、有块在读，或有块读好了没被取走。
     [[nodiscard]] bool hasWork() const;
 
+    // 读盘在飞的任务数。**仅用于诊断**（吞吐剖面），不要用它做调度决策
+    // ——需要判断"该不该等"用 hasWork()。
+    [[nodiscard]] std::size_t pendingReads() const;
+
+    // 窗口块数。只用于诊断：它决定"一轮窗口能装多少"，
+    // 而吞吐 ≈ 窗口块数 ÷ ACK 往返周期。块大小看 chunkSize()（已有）。
+    [[nodiscard]] std::uint32_t windowChunks() const noexcept;
+
+    // 已读好、等待发出的块数。诊断用。
+    [[nodiscard]] std::size_t readyCount() const;
+
     // 收到 ACK。
     void applyAck(const ChunkAck& ack);
 

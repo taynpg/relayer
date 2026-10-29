@@ -776,3 +776,58 @@ TEST_CASE("sender fails instead of waiting forever on a silent peer", "[peer][in
 
     h.requireEveryFrameAddressed();
 }
+
+// 吞吐基准：**不经中继**的直连传输。
+//
+// 为什么单独留一条：线上每次都经 relayerd 转发，而"慢"到底慢在 core 的
+// 编解码/落盘，还是慢在中继那一跳，光看端到端数字分不清。这条把中继摘掉，
+// 于是两次测量的差就是中继的代价。
+//
+// 标签前加点 = 默认不跑（Catch2 的隐藏用例），手工执行：
+//     core_test.exe "[.throughput]"
+//
+// 注意它比生产快的原因里有两条是测试环境特有的，比较时要心里有数：
+//   1. pump 由 driveUntil 驱动（毫秒级），而生产由 TransferLink 的
+//      tickInterval(10ms) 驱动；
+//   2. 两端在同一个 io_context 上，没有跨进程的 syscall 与唤醒。
+TEST_CASE("吞吐基准：直连（不经中继）", "[.throughput]")
+{
+    test::TempDir srcDir;
+    test::TempDir dstDir;
+    Harness h;
+
+    const std::size_t kSize = 128u * 1024 * 1024;
+    const auto content = makeContent(kSize);
+    const auto srcPath = srcDir.utf8() + "/payload.bin";
+    const auto dstPath = dstDir.utf8() + "/received.bin";
+    REQUIRE(writeAllStore(h.storeA, srcPath, content));
+
+    // **默认配置**，只定块大小——要量的是引擎默认值下的表现，
+    // 不是某个调优组合。
+    TransferPeer::Config cfg;
+    cfg.chunkSize = 256u * 1024;
+
+    connectPair(h, [&] {
+        h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, dstPath, 7, cfg,
+                                                  [sink = h.receiverSink](const TransferResult& r) {
+                                                      ++sink->calls;
+                                                      sink->result = r;
+                                                  });
+        h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "payload.bin", "client-1", 7, cfg,
+                                              [sink = h.senderSink](const TransferResult& r) {
+                                                  ++sink->calls;
+                                                  sink->result = r;
+                                              });
+    });
+
+    const auto t0 = std::chrono::steady_clock::now();
+    REQUIRE(driveUntil(h, [&] { return h.senderSink->calls > 0 && h.receiverSink->calls > 0; }, std::chrono::seconds(180)));
+    const auto dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    REQUIRE(h.senderSink->result.outcome == TransferOutcome::kCompleted);
+    REQUIRE(h.receiverSink->result.outcome == TransferOutcome::kCompleted);
+
+    const double mb = static_cast<double>(kSize) / (1024.0 * 1024.0);
+    std::printf("\n[throughput] 直连(无中继) %.0f MB: %.2fs => %.1f MB/s\n", mb, dt, mb / dt);
+    std::fflush(stdout);
+}

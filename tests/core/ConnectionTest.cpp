@@ -5,6 +5,7 @@
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <string>
@@ -282,7 +283,7 @@ TEST_CASE("connection carries a large body", "[transport][connection][integratio
     auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame&) {}, [](Status) {}));
     auto b = Connection::adopt(ctx, std::move(pair.b), handler([&](const Frame& f) { gotBody = f.body; }, [](Status) {}));
 
-    // 1MB，跨越多个 readChunk（默认 4KB）
+    // 1MB，跨越多轮读取（readChunk 默认 256 KiB，这里要读 4 轮）
     std::string body(1024 * 1024, '\0');
     for (std::size_t i = 0; i < body.size(); ++i) {
         body[i] = static_cast<char>(i % 253);
@@ -295,6 +296,16 @@ TEST_CASE("connection carries a large body", "[transport][connection][integratio
     REQUIRE(pumpUntil(ctx, [&] { return gotBody.size() == body.size(); }, std::chrono::seconds(5)));
 
     REQUIRE(std::equal(gotBody.begin(), gotBody.end(), body.begin()));
+
+    // bytesSent_ 在**写完成回调**里累加，而"对端收到完整 body"只保证数据
+    // 已经进了 socket，不保证发送方的完成回调已经跑过——两端在同一个
+    // io_context 里，接收回调完全可能先执行。
+    //
+    // 原先这条断言能过，是因为 readChunk 是 4 KiB、1 MB 要读 256 次，
+    // 那个时间差恰好让写回调先跑完了。把 readChunk 提到 256 KiB 之后
+    // 4 次就读完，这点时间差消失了，断言立刻变红——它一直是个时序依赖，
+    // 只是被一个低效的默认值掩盖着。
+    pump(ctx, std::chrono::milliseconds(10));
     REQUIRE(a->bytesSent() > body.size());
     REQUIRE(b->bytesReceived() > body.size());
 }
@@ -648,4 +659,51 @@ TEST_CASE("connection state names are stable", "[transport][connection]")
     REQUIRE(toString(ConnectionState::kOpen) == "open");
     REQUIRE(toString(ConnectionState::kClosing) == "closing");
     REQUIRE(toString(ConnectionState::kClosed) == "closed");
+}
+
+// 吞吐基准：**只走连接层**，不经传输引擎。
+//
+// 存在的唯一理由是把"慢在哪"这条线切开：引擎（TransferPeer）与连接
+// （Connection）都可以怀疑，但两者的读数混在端到端数字里分不出来。
+// 这条用例只做一件事——把 32 MB 帧灌进一条已建立的回环连接，量对端
+// 收到的时间。
+//
+// 标签前加点 = 默认不跑。手工执行：
+//     core_test.exe "[.connthroughput]"
+TEST_CASE("吞吐基准：连接层裸吞吐", "[.connthroughput]")
+{
+    asio::io_context ctx;
+    auto pair = makeSocketPair(ctx);
+
+    constexpr std::size_t kFrames = 100;   // 25 MB，留在发送队列上限（32 MiB）以内
+    constexpr std::size_t kBody = 256u * 1024;
+
+    std::size_t received = 0;
+    std::size_t bytes = 0;
+
+    auto a = Connection::adopt(ctx, std::move(pair.a), handler([](const Frame&) {}, [](Status) {}));
+    auto b = Connection::adopt(ctx, std::move(pair.b),
+                               handler(
+                                   [&](const Frame& f) {
+                                       ++received;
+                                       bytes += f.body.size();
+                                   },
+                                   [](Status) {}));
+
+    const std::vector<char> payload(kBody, 'x');
+    const auto t0 = std::chrono::steady_clock::now();
+    for (std::size_t i = 0; i < kFrames; ++i) {
+        Frame f;
+        f.type = FrameType::kChunkRequestData;
+        f.index = static_cast<std::int64_t>(i);
+        f.body = payload;   // 故意拷贝：真实路径也是每个帧各有一份 body
+        const auto st = a->send(std::move(f));
+        REQUIRE(st.ok());
+    }
+
+    REQUIRE(pumpUntil(ctx, [&] { return received == kFrames; }, std::chrono::seconds(120)));
+    const auto dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const double mb = static_cast<double>(bytes) / (1024.0 * 1024.0);
+    std::printf("\n[conn] 连接层裸吞吐 %.0f MB: %.2fs => %.1f MB/s\n", mb, dt, mb / dt);
+    std::fflush(stdout);
 }
