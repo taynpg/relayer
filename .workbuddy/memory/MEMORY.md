@@ -53,17 +53,21 @@
 
 ## 构建与验证
 
-```bash
-# app/ 已落地（阶段 E），GUI 默认 ON，本机 Qt 6.11.2 能被 CMake 找到
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DRELAYER_BUILD_TESTS=ON
-cmake --build build
-cd build && ctest --output-on-failure        # 7 项，约 51 秒
-# 没有 Qt 的机器/CI 要显式 -DRELAYER_BUILD_GUI=OFF
+**统一用 `cmk`**（2026-10-29 用户指定，别再手写 `cmake -G Ninja ...`）：
 
-# 带 -Werror 的 Release 验证（提交前跑一次）
-cmake -S . -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DRELAYER_WERROR=ON
-cmake --build build-rel && cd build-rel && ctest
+```bash
+cmk build -t Debug     # build/，Debug，配置里已含 RELAYER_BUILD_TESTS=ON
+cmk build -t Release   # build-rel/，Release + RELAYER_WERROR + tests（提交前跑一次）
+cmk                    # 无参数 = 重放上次 build（日常增量）
+cd build && ctest --output-on-failure   # 7 项，约 90 秒
 ```
+
+- cmk 配置在 `.cmk/cmk_config`——**已 gitignore（含本机路径）**，新 clone
+  没有：先 `cmk config auto` 生成默认配置，再把两个 configuration 块里的
+  `-DRELAYER_BUILD_TESTS=ON`（Debug/Release）与 `-DRELAYER_WERROR=ON`
+  （Release）补回去，否则 ctest 报 "No tests were found"。
+- 不要动 `.cmk/cmk_cache`、`.cmk/cmk_temp`；重置用 `cmk clean cache|temp|all`。
+- 没有 Qt 的机器/CI 要显式 `-DRELAYER_BUILD_GUI=OFF`。
 
 ## 当前进度
 
