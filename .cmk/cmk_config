@@ -1,0 +1,41 @@
+{
+    "version": 1,
+    "base.doc1": "以下所有选项配置内容为空的就不启用这个选项，使用默认行为。",
+    "base.doc2": "本工具cmk默认使用ninja作为构建工具，以便导出compile_commands.json文件。",
+    "base.doc3": "本工具cmake选项默认添加-DCMAKE_EXPORT_COMPILE_COMMANDS=ON。",
+    "cmake.bin": "cmake",
+    "cmake.compiler.vs": {
+        "cmake.compiler.vs.enabled": false,
+        "cmake.compiler.vswhere.path": "C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe",
+        "cmake.compiler.vs.version.doc": "可填15.0(2017), 16.0(2019), 17.0(2022), 18.0(2026)",
+        "cmake.compiler.vs.version": ""
+    },
+    "cmake.compiler.env.doc": "填写添加的PATH路径，多个路径用分号隔开。",
+    "cmake.compiler.env": "C:/msys64/ucrt64/bin",
+    "cmake.compiler.envKeyValue.doc": "自定义环境变量键值对，会覆盖同名环境变量；如需追加PATH请使用cmake.compiler.env。",
+    "cmake.compiler.envKeyValue": {},
+    "cmake.compiler.c": "",
+    "cmake.compiler.cxx": "",
+    "configuration": {
+        "Debug": {
+            "build.directory": "build",
+            "cmake.prefix.append.doc": "填写添加的CMAKE_PREFIX_PATH路径，多个路径用分号隔开。",
+            "cmake.prefix.append": "",
+            "cmake.options": [
+                "-Wno-dev",
+                "-DCMAKE_BUILD_TYPE=Debug",
+                "-DRELAYER_BUILD_TESTS=ON"
+            ]
+        },
+        "Release": {
+            "build.directory": "build-rel",
+            "cmake.prefix.append": "",
+            "cmake.options": [
+                "-Wno-dev",
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DRELAYER_BUILD_TESTS=ON",
+                "-DRELAYER_WERROR=ON"
+            ]
+        }
+    }
+}
