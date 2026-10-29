@@ -582,20 +582,21 @@ int main(int argc, char** argv)
         client->listPeers();
     }
 
-    // run() 在"没有待处理事件"时才会返回。Client 结束时会 cancel 掉自己
-    // 的定时器，但仍可能有排队的 completed handler，所以这里靠 done 标志
-    // 而不是靠 run() 返回——stop() 之后再 run() 一次会立即返回，这样做
-    // 既能跑完收尾，也不会卡住。
+    // 等结论。
+    //
+    // 这里**不能**用"`run_for()` 返回 0 就等于内部状态机停了"来判断：返回 0
+    // 只意味着这 50ms 里没有 handler 跑到，而"安静地等着对端发文件"完全
+    // 合法——recv 的常态就是长时间无事发生。上一版之所以看起来能这么判断，
+    // 是因为它有个 10ms 的 pump 定时器在不停唤醒事件循环，恰好掩盖了这条
+    // 判据本身不成立。
+    //
+    // 结论由 Client 保证：连接阶段有连接看门狗（connectTimeout），每个请求
+    // 有应答超时，整个操作可选 hardTimeout。三者覆盖了"该有结论"的所有情形。
     while (!done) {
         if (ctx.stopped()) {
             ctx.restart();
         }
-        if (ctx.run_for(std::chrono::milliseconds(50)) == 0 && !done) {
-            // 没有任何事件在等，说明内部状态机已经彻底停下（既不完成也不
-            // 报错）。这是逻辑 bug，不该让进程挂住。
-            std::fprintf(stderr, "\n错误: 内部状态机停止响应\n");
-            return kExitFailed;
-        }
+        ctx.run_for(std::chrono::milliseconds(50));
     }
 
     // 进度行之后要换行，否则结论会接在进度条后面。

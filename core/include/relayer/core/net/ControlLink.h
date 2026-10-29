@@ -113,7 +113,13 @@ public:
     //
     // 返回 true 后 done 一定会被调用恰好一次：成功、超时、连接断开、应答
     // 类型不符，四条路径都归一到 done。
-    [[nodiscard]] bool ask(protocol::FrameType askType, std::string to, std::vector<char> body, AnswerFn done);
+    // timeout 为 0 表示用 Config::askTimeout。
+    //
+    // 需要单独指定的是**慢请求**：目录取回（§11.10）与解压（§11.12）的应答
+    // 在对端压缩/解压完成之后才发，几十秒是正常值。用统一的 10 秒会让正常
+    // 的目录取回被误判成"对端离线"。
+    [[nodiscard]] bool ask(protocol::FrameType askType, std::string to, std::vector<char> body, AnswerFn done,
+                           std::chrono::seconds timeout = std::chrono::seconds(0));
 
     // 发一条不需要应答的帧（通知）。失败只表达"没写进发送队列"。
     [[nodiscard]] Status post(protocol::Frame frame);
@@ -167,6 +173,7 @@ private:
 
     bool ready_ = false;
     bool closing_ = false;
+    bool claimSent_ = false;   // kClaimId 只发一次（Session 会通知两次认证完成）
     std::string assignedId_;
 };
 

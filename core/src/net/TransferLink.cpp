@@ -34,6 +34,8 @@ transfer::TransferPeer::Config TransferLink::peerConfig() const
         c.chunkSize = config_.chunkSize;
     }
     c.overwriteExisting = config_.overwriteExisting;
+    c.finalizeTimeout = config_.idleTimeout;
+    c.answerTimeout = config_.answerTimeout;
     return c;
 }
 
@@ -83,13 +85,27 @@ void TransferLink::onSessionReady(std::string assignedId)
     if (!assignedId.empty()) {
         assignedId_ = std::move(assignedId);
     }
+
+    // 声明身份。数据连接的 id 由上层指定（通常是"控制连接的 id + 后缀"），
+    // 为什么必须自己声明：中继按帧头 `to` 里的 id 找连接转发，而双方交换
+    // 数据连接 id 的时机晚于认证——用服务端分配的 client-N 也能工作，但
+    // 那个号在每次重连后都变，调用方没法预判；声明成确定的名字让"重连后
+    // 数据连接仍然叫同一个名字"成立。
+    if (!config_.requestedId.empty() && !claimSent_ && session_ != nullptr && session_->authenticated() &&
+        assignedId_ != config_.requestedId) {
+        claimSent_ = true;
+        (void)session_->claimPeerId(config_.requestedId);
+    }
+
     if (handler_.onReady) {
         handler_.onReady(assignedId_);
     }
 
     // 认证一过就把接收挂上：数据连接的意义之一是"随时能收"，等到有人要发
     // 才挂，对端那一下请求就会落空（它会收到拒绝，然后退避重试）。
-    ensureReceiver();
+    if (config_.acceptIncoming) {
+        ensureReceiver();
+    }
     scheduleTick();
 }
 
@@ -231,6 +247,19 @@ void TransferLink::onJobDone(std::uint64_t id, const transfer::TransferResult& r
         info.id = id;
         info.sending = false;
         info.path = result.targetPath;
+        if (receiver_) {
+            // receiver_ 在这一刻还活着（reset 在回调之后），计数读得到。
+            const auto p = receiver_->progress();
+            info.bytesDone = p.bytesDone;
+            info.bytesTotal = p.bytesTotal;
+            const auto st = receiver_->stats();
+            info.chunksSent = st.chunksSent;
+            info.chunksReceived = st.chunksReceived;
+            info.chunksRetransmitted = st.chunksRetransmitted;
+            info.duplicateChunks = st.duplicateChunks;
+            info.acksSent = st.acksSent;
+            info.acksReceived = st.acksReceived;
+        }
         if (handler_.onFinished) {
             handler_.onFinished(info, result);
         }
@@ -265,6 +294,13 @@ TransferLink::JobInfo TransferLink::infoOf(const Job& job) const
         const auto p = job.peer->progress();
         info.bytesDone = p.bytesDone;
         info.bytesTotal = p.bytesTotal;
+        const auto st = job.peer->stats();
+        info.chunksSent = st.chunksSent;
+        info.chunksReceived = st.chunksReceived;
+        info.chunksRetransmitted = st.chunksRetransmitted;
+        info.duplicateChunks = st.duplicateChunks;
+        info.acksSent = st.acksSent;
+        info.acksReceived = st.acksReceived;
     }
     return info;
 }

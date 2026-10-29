@@ -145,6 +145,11 @@ bool isValidPeerId(std::string_view id) noexcept
     return true;
 }
 
+bool isInternalPeerId(std::string_view id) noexcept
+{
+    return !id.empty() && id.front() == kInternalIdPrefix.front();
+}
+
 // ---------------------------------------------------------------------------
 // 载荷编解码
 // ---------------------------------------------------------------------------

@@ -4,10 +4,15 @@
 #include <asio/post.hpp>
 #include <asio/steady_timer.hpp>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
+#include <map>
 #include <utility>
 
 #include "relayer/common/crypto/Sha256.h"
+#include "relayer/core/net/ControlLink.h"
+#include "relayer/core/net/TransferLink.h"
+#include "relayer/core/session/DataChannel.h"
 #include "relayer/core/session/FileList.h"
 #include "relayer/core/session/FileOp.h"
 #include "relayer/core/session/PathMeta.h"
@@ -16,36 +21,47 @@
 #include "relayer/core/transfer/TransferPeer.h"
 #include "relayer/filestore/TarXzArchiver.h"
 
-// Client 的实现。
+// Client 的实现：**双连接**客户端门面。
 //
-// 整个类只有一个状态机，三条路（send / receive / list）共用骨架：
+//   control_  常驻控制连接（net::ControlLink）—— 认证、在线表、列举、
+//             元信息、文件操作、数据通道协商。每个请求带请求号，多条可以
+//             同时在飞。
+//   data_     数据连接（net::TransferLink）—— 只跑文件传输的帧，按需建立。
 //
-//   connect ──> authenticated ──┬─> (send) 建 TransferPeer 发请求
-//                               ├─> (receive) 建 TransferPeer 等请求
-//                               └─> (list)  问列表、打印、结束
-//                                        │
-//                                        └─> finished
+// 与上一版的根本差别，一句话：**应答不再靠"下一个回来的就是我的"配对**。
+// 上一版每条连接上一次只能挂一个请求，于是"列举、元信息、取回、远端操作"
+// 四者必须互斥，而且传输期间连列举都做不了（同一条 TCP 上数据帧会把控制帧
+// 压在写队列后面）。
 //
-// 所有状态都只在事件循环线程上被读写（io_context 单线程跑），所以没有锁。
-// 这不是"暂时偷懒"，而是本类被设计成必须单线程 run 的：pump 定时器、
-// 帧回调、结束回调都在同一个 strand 语义下顺序执行。
+// 直接后果是代码短了：上一版有一大张 dispatch() 表，按"帧类型 + 哪个在飞
+// 标志位"判断这帧归谁；现在每个请求的回调自带上下文，那张表连同
+// browseActive / metaActive / pullActive / opActive 四个标志位一起消失。
+//
+// 线程模型不变：所有成员只在 io 线程上读写，没有锁。回调里可以直接发下一个
+// 请求（ControlLink 保证回调时 pending 表已经干净）。
 
 namespace relayer::cli {
 
 namespace {
 
+using core::net::ControlLink;
+using core::net::TransferLink;
 using protocol::Frame;
 using protocol::FrameType;
+namespace transfer = core::transfer;
 
-// 进度上报的最小间隔。
+// 数据通道协商的重试节奏。
 //
-// 每块都报一次的话，默认 256 KiB 块下一个 256 MB 的文件会刷出 1024 行，
-// 终端直接淹掉。100ms 是"人眼觉得在动、输出又不至于刷屏"的折中。
-constexpr auto kProgressInterval = std::chrono::milliseconds(100);
+// 为什么要重试：双方都在控制连接就绪后立刻建自己的数据连接，但两条连接的
+// 握手是并行的，先到的一方问"你的数据连接叫什么"时，另一方可能还在握手。
+// 那时它回 kNotReady，而这不是错误——协议里明写了它是"暂时建不起来"。
+// 200ms × 40 = 8 秒，覆盖 PBKDF2 在慢机器上的握手时间。
+constexpr auto kNegotiateRetryDelay = std::chrono::milliseconds(200);
+constexpr int kNegotiateMaxAttempts = 40;
 
-// pump 间隔。TransferPeer 不自带定时器（见它的 pump 注释），由调用方驱动。
-// 10ms 对它够用：重传判定是秒级，ACK 是 20ms 级。
-constexpr auto kPumpInterval = std::chrono::milliseconds(10);
+// 慢请求的应答时限：目录取回与解压的应答在**对端压缩/解压完成之后**才发
+// （PROTOCOL.md §11.10.2 / §11.12），几十秒是正常值。
+constexpr auto kSlowAskTimeout = std::chrono::seconds(120);
 
 std::string fileNameOf(const std::string& path)
 {
@@ -53,15 +69,44 @@ std::string fileNameOf(const std::string& path)
     return policy.fileName(path);
 }
 
+// 数据连接的 id：`<控制连接 id>~d`。
+//
+// 服务端把 `~` 前缀保留给内部连接（session::kInternalIdPrefix），在线列表
+// 会把它过滤掉——用户看到的"在线对端"是人，不该多出一条自己的数据连接。
+//
+// 为什么不用服务端分配的 client-N：那个号每次重连都变，对端缓存的
+// "数据连接 id"立刻过期；声明成确定的名字后，重连后仍然叫同一个名字。
+// 超长时退回不声明（用分配的号），代价只是它会出现在在线列表里。
+std::string dataIdFor(const std::string& controlId)
+{
+    if (controlId.empty()) {
+        return {};
+    }
+    const std::string candidate = controlId + "~d";
+    if (candidate.size() > core::session::kMaxDataChannelIdBytes) {
+        return {};
+    }
+    return candidate;
+}
+
 }   // namespace
 
 struct Client::Impl {
     Impl(asio::io_context& ctxIn, ClientConfig cfg, std::function<void(const ProgressReport&)> prog,
          std::function<void(const Outcome&)> done)
-        : ctx(ctxIn), config(std::move(cfg)), onProgress(std::move(prog)), onDone(std::move(done)), pumpTimer(ctxIn),
-          watchdog(ctxIn), progressTimer(ctxIn)
+        : ctx(ctxIn), config(std::move(cfg)), onProgress(std::move(prog)), onDone(std::move(done)),
+          alive(std::make_shared<char>(0)), idleTimer(ctxIn), watchdog(ctxIn), connectTimer(ctxIn)
     {
     }
+
+    // ---- 常量 ----
+
+    // 目录取回的打包上限（PROTOCOL.md §11.10.3）。压缩是同步做的，这两个
+    // 数字决定了"最坏卡多久"，所以写死而不做成配置。
+    static constexpr std::size_t kMaxPackFiles = 20000;
+    static constexpr std::uint64_t kMaxPackBytes = 256ULL * 1024 * 1024;
+
+    // ---- 基本 ----
 
     asio::io_context& ctx;
     ClientConfig config;
@@ -69,162 +114,142 @@ struct Client::Impl {
     std::function<void(const Outcome&)> onDone;
 
     filestore::StdFileStore store;
-    core::transfer::WorkerPool pool{2};
 
-    std::shared_ptr<core::session::Session> session;
-    std::shared_ptr<core::transfer::TransferPeer> peer;
+    // 回调存活的凭据。Impl 由 unique_ptr 持有，回调里没法用 weak_ptr 指到
+    // 它，而 asio 的异步回调可能在 Client 析构之后才轮到（定时器、连接关闭
+    // 通知）。凡是捕获 `this` 的异步回调都先看一眼它：use_count() == 1
+    // 表示只剩回调自己还持有，Impl 已经不在了。
+    std::shared_ptr<char> alive;
 
-    // ---- 常驻会话上的"搭车发送" ----
-    //
-    // 常驻接收会话（keepReceiving）活着时，发送**不新建连接**，而是把第二个
-    // TransferPeer 挂到同一条 session 上。两边的帧靠 sessionId 区分：接收方
-    // 空闲时以 0 通配、只认领 kFileRequestSend；发送方的应答/ACK 帧类型
-    // 不同，不会被接收 peer 误吞（见 TransferPeer::onFrame 的 sessionMismatch
-    // 判定）。服务端只按 to 字段转发，不关心一条连接上跑几个传输。
-    //
-    // 这样做的根因：每新建一条连接，服务端就分配一个新 id —— GUI"点一次
-    // 发送，自己的 id 就涨一号"，对方表里的我们也随之过期。
-    std::shared_ptr<core::transfer::TransferPeer> sendPeer;
-    std::string sendSourcePath;
-    std::string sendRemoteName;
-    std::string sendToPeerId;
-    std::function<void(const Outcome&)> onSendDone;
-    bool sendActive = false;
+    // 正在析构。析构期间不能再往上层报结论——那时上层对象可能已经没了。
+    bool destroying = false;
 
-    asio::steady_timer pumpTimer;
-    asio::steady_timer watchdog;   // 空闲 / 总时长
-    asio::steady_timer progressTimer;
-    // 会话内列举的应答超时。对端离线时服务端**静默丢帧**（§11.3 没有"投递
-    // 失败"这一类），不设这个定时器，远端浏览面板会永远停在"读取中"。
-    asio::steady_timer browseTimer{ctx};
+    // ---- 连接 ----
+
+    std::shared_ptr<ControlLink> control;
+    std::shared_ptr<TransferLink> data;
+
+    enum class DataState {
+        kIdle,
+        kConnecting,
+        kReady,
+        kFailed,
+    };
+    DataState dataState = DataState::kIdle;
+    std::vector<std::function<void(bool)>> dataWaiters;
+    std::string dataId;            // 本机数据连接的 id（协商时告诉对端的就是它）
+    std::string requestedDataId;   // 声明给服务端的名字（`<控制连接 id>~d`）
+    // 等 claim 生效的兜底。claim 可能失败（名字被占用），那时永远不会等到
+    // 真名，不能无限等——用临时号也能工作，只是对端缓存的 id 会随重连变。
+    asio::steady_timer claimWait{ctx};
+    bool claimWaitStarted = false;
+
+    // 对端控制连接 id → 对端数据连接 id。协商一次就记住，之后直接复用。
+    std::map<std::string, std::string> peerDataIds;
+
+    // 在飞的协商：peer → 等待者。同一对端只发一次请求，多个调用方排队。
+    struct Negotiation {
+        std::vector<std::function<void(bool, std::string)>> waiters;
+        bool inFlight = false;
+    };
+    std::map<std::string, Negotiation> negotiations;
+
+    // 在飞的发送：jobId → 结论回调。
+    std::map<std::uint64_t, std::function<void(const Outcome&)>> sends;
 
     Action action = Action::kList;
-    std::string toPeerId;
-
-    // kBrowse 的目标与相对路径（PROTOCOL.md §11.8）。
-    std::string browsePeerId;
-    std::string browseRelPath;
-
-    // 常驻会话上的列举（GUI 用，见 Client::browseOnSession）。与 sendActive
-    // 同一套思路：会话不结束，只把这一次的结论回调给上层。
-    bool browseActive = false;
-    std::function<void(const Outcome&)> onBrowseDone;
-
-    // 常驻会话上的批量路径元信息（GUI 的发送前检查）。
-    // 与列举、取回共用"会话不结束、只回调这一次结论"的模式；三者互斥
-    // ——同一时刻只有一个请求在等应答，否则应答回来分不清是哪一笔的。
-    bool metaActive = false;
-    std::string metaPeerId;
-    std::vector<std::string> metaPaths;
-    std::vector<core::session::RemoteMeta> metaResults;
-    std::function<void(const Outcome&)> onMetaDone;
-    asio::steady_timer metaTimer{ctx};
-
-    // 会话内的一次"取回请求"（PROTOCOL.md §11.9）。只等到 kAnswerFilePull
-    // 为止——真正的文件由常驻接收会话收下，走的是普通接收路径。
-    bool pullActive = false;   // 这一次是"取目录"还是"取文件"。只影响失败文案：同一个 kNotFound，
-    // 对文件请求是"不存在或它是目录"，对目录请求是"不存在或它不是目录"。
-    bool pullIsArchive = false;
-    std::function<void(const Outcome&)> onPullDone;
-    asio::steady_timer pullTimer{ctx};
-    std::string targetPath;
-
-    // 会话上的远端文件操作（PROTOCOL.md §11.12）：算 SHA-256 / 改名 / 删除 /
-    // 新建目录 / 解压。与 browse/meta/pull 同一套"只等一次应答"的模式，
-    // 四者互斥（见 startFileOpOnSession 的检查）。
-    bool opActive = false;
-    FileOpKind opKind = FileOpKind::kSha256;
-    core::session::FileOpStatus opStatus = core::session::FileOpStatus::kOk;
-    std::vector<std::string> opFailedPaths;
-    std::string opSha256Hex;
-    std::string opExtractedDir;
-    std::function<void(const Outcome&)> onOpDone;
-    asio::steady_timer opTimer{ctx};
-
-    bool authenticated = false;
+    std::string assignedId;
+    bool startedOnce = false;
     bool finished = false;
 
-    // onAuthenticated 可能被回调两次（先空身份、后真实 id），而它触发的
-    // 动作一旦做两遍就会把已建立的 TransferPeer 覆盖掉。见 onAuthenticated
-    // 的注释。
-    bool startedOnce = false;
+    // 接收目录（对端发来的文件落在这里，相对路径也按它还原）。
+    std::string targetPath;
 
-    // 已经发过 kClaimId。声明成功后服务端会再回调一次 onAuthenticated
-    // （带新 id），没有这个标志就会无限声明。
-    bool claimSent = false;
-
-    // 自检发送已启动（见 ClientConfig::selfSendPath）。
-    bool selfSendStarted = false;
-    // 自检列举已发起（见 ClientConfig::selfBrowse）。
+    // 一次性的自检 / 搭车动作的"只做一次"标志。
     bool selfBrowseStarted = false;
-    // 取回请求已发起（见 ClientConfig::pullFrom）。
+    bool selfSendStarted = false;
     bool pullStarted = false;
-    // 会话内列举出过结论。finish() 据此把结果搬进 Outcome——action 是
-    // kReceive（自检列举）时不满足 `action == Action::kBrowse` 那个条件。
-    bool browseDone = false;
 
-    std::string assignedId;
+    // list 的结果（finish 时要搬进 Outcome）。
+    std::vector<core::session::PeerInfo> peers;
 
-    // 进度速率的基线。用"两次上报之间走了多少字节"算瞬时速度，比
-    // "总字节 / 总耗时"更早反映"卡住了"。
+    // browse 的结果。
+    std::vector<core::session::RemoteEntry> remoteEntries;
+    core::session::FileListStatus listStatus = core::session::FileListStatus::kOk;
+    bool rootListing = false;
+
+    // fileOp 的结果。
+    std::string opSha256Hex;
+    std::string opExtractedDir;
+    std::vector<std::string> opFailedPaths;
+    FileOpKind opKind = FileOpKind::kSha256;
+
+    // 请求参数（一次性动作的输入）。
+    std::string browsePeerId;
+    std::string browseRelPath;
+    std::string toPeerId;
+    std::string peerPathSource;
+    std::string peerPathRemoteName;
+
+    // 进度速率的基线。
     std::uint64_t lastBytes = 0;
     std::chrono::steady_clock::time_point lastReportAt = std::chrono::steady_clock::now();
     double lastSpeed = 0.0;
 
-    // 空闲看门狗的"最后有进展"时刻。任何帧、任何字节变化都刷新它。
-    std::chrono::steady_clock::time_point lastActivity = std::chrono::steady_clock::now();
+    TransferStats lastStats;
+
+    // 空闲看门狗。传输层自己也有一个（TransferPeer 的 finalizeTimeout），
+    // 但那只覆盖"收尾阶段等确认"；"传了一半对端消失"必须由调用方判——
+    // 发送方进程被 kill 之后，接收方在本端观察到的唯一事实就是"没有进展"。
+    asio::steady_timer idleTimer;
     std::uint64_t lastActivityBytes = 0;
+    std::chrono::steady_clock::time_point lastActivity = std::chrono::steady_clock::now();
+    // 传输是否真的开始过（收到过非零 total）。用它把"还没开始传"和
+    // "传到一半停了"区分开——前者沉默是正常的（发送方在算摘要、对端还没
+    // 点发送），后者才是故障。
+    bool transferStarted = false;
 
-    // 服务端列表（kAnswerClientList 的内容）。
-    std::vector<core::session::PeerInfo> peers;
+    asio::steady_timer watchdog;
 
-    // 远端列举的结果（kAnswerFileList 的内容）。由 finish() 搬进 Outcome。
-    std::vector<core::session::RemoteEntry> remoteEntries;
-    core::session::FileListStatus listStatus = core::session::FileListStatus::kOk;
-    // 本次列举是不是根列表（条目名是完整路径）。解码时带出，回填给 UI
-    // 决定"双击时是拼相对路径还是直接用这条的完整路径"。
-    bool rootListing = false;
+    // 连接看门狗：从 connect() 起算，到控制连接就绪为止。
+    //
+    // 必须有它。没有的话，某些"连不上"的路径（TCP 被拒、握手无响应）里
+    // 连接层可能既不回调 ready 也不回调 closed，事件循环就此空转——现象是
+    // 进程挂着不动，既不成功也不报错，只能靠外面 kill。手写一个上限，
+    // 让每一种失败都有一个明确的结论。
+    asio::steady_timer connectTimer;
 
     // ---------------------------------------------------------------------
     // 收尾
     // ---------------------------------------------------------------------
 
-    // 结束这件事只能发生一次。所有路径（成功、失败、超时、连接断）都
-    // 走这里，否则会出现"先因为超时报了错，两秒后又因为对端回帧报了成功"。
+    // 结束只能发生一次。所有路径（成功、失败、超时、连接断）都走这里，
+    // 否则会出现"先因为超时报错，两秒后又因为对端回帧报成功"。
     void finish(bool ok, std::string summary, Status status = Status{}, bool connectionLost = false)
     {
         if (finished) {
             return;
         }
         finished = true;
-
-        pumpTimer.cancel();
         watchdog.cancel();
-        progressTimer.cancel();
+        connectTimer.cancel();
+        idleTimer.cancel();
 
-        // 会话要结束了：正在搭车发送的那一次不再单独回调——上层能收到的
-        // 结论只能有一个，就是本次 onDone（会话级）。sendPeer 随后随
-        // Impl 一起释放。
-        sendActive = false;
-        onSendDone = nullptr;
-        // 挂起的列举同理：会话结束时上层已经收到 onDone，这次列举的回调
-        // 不能再单独发（否则上层会收到两个结论）。
-        browseActive = false;
-        onBrowseDone = nullptr;
-        browseTimer.cancel();
-        // 挂起的元信息查询同理。
-        metaActive = false;
-        onMetaDone = nullptr;
-        metaTimer.cancel();
-        // 挂起的远端文件操作同理。
-        opActive = false;
-        onOpDone = nullptr;
-        opTimer.cancel();
+        // 会话级结论统一由下面这次 onDone 发出，正在进行的子操作不再单独
+        // 回调（上层收到两个结论会把同一项算两遍）。
+        sends.clear();
+        negotiations.clear();
+        dataWaiters.clear();
 
-        if (!ok) {
-            // 失败时**不**调 session->close()：先让调用方看到结论，关闭
-            // 交给析构。反过来（先关再报）会让 main 拿到结论时连接已经
-            // 没了，日志里看不出是哪一步断的。
+        if (data) {
+            data->close();
+        }
+        if (control) {
+            control->close();
+        }
+
+        if (destroying) {
+            return;
         }
 
         if (onDone) {
@@ -233,153 +258,87 @@ struct Client::Impl {
             o.summary = std::move(summary);
             o.status = std::move(status);
             o.connectionLost = connectionLost;
-            if (peer) {
-                // 只在这里读一次：finish 之后 peer 会被上层释放，之后再取
-                // 就是悬空访问。
-                const auto s = peer->stats();
-                o.stats.chunksSent = s.chunksSent;
-                o.stats.chunksReceived = s.chunksReceived;
-                o.stats.chunksRetransmitted = s.chunksRetransmitted;
-                o.stats.duplicateChunks = s.duplicateChunks;
-                o.stats.acksSent = s.acksSent;
-                o.stats.acksReceived = s.acksReceived;
-            }
+            o.stats = lastStats;
             if (action == Action::kList) {
                 for (const auto& p : peers) {
                     o.peerList.push_back(PeerEntry{p.id, p.address});
                 }
-            } else if (action == Action::kBrowse || browseDone) {
+            } else if (action == Action::kBrowse || !remoteEntries.empty()) {
+                // 除了 ls，**自检列举**（--self-browse）也会带出目录内容，
+                // 而它的 action 是 kReceive——只按 action 判会把结果丢掉，
+                // 现象是"列了两项却说 count=0"。
                 o.remoteEntries = remoteEntries;
                 o.listStatus = listStatus;
                 o.rootListing = rootListing;
             } else if (action == Action::kFileOp) {
-                // 文件操作的结论字段（其它操作时都是默认值）。
                 o.sha256Hex = opSha256Hex;
                 o.extractedDir = opExtractedDir;
                 o.failedPaths = opFailedPaths;
             }
-            onDone(o);
+            auto cb = std::move(onDone);
+            onDone = nullptr;
+            cb(o);
         }
     }
 
-    // ---------------------------------------------------------------------
-    // 定时器
-    // ---------------------------------------------------------------------
-
-    void startPump()
-    {
-        if (finished) {
-            return;
-        }
-        pumpTimer.expires_after(kPumpInterval);
-        pumpTimer.async_wait([this](std::error_code ec) {
-            if (ec || finished) {
-                return;
-            }
-            if (sendPeer) {
-                sendPeer->pump();
-            }
-            if (peer) {
-                peer->pump();
-            }
-            // 空闲判定放在这里而不是单独一个定时器：pump 本来就在
-            // 固定节拍上跑，再起一个只会多一条要 cancel 的生命周期。
-            checkIdle();
-            startPump();
-        });
-    }
-
-    void startProgressTimer()
-    {
-        if (finished) {
-            return;
-        }
-        progressTimer.expires_after(kProgressInterval);
-        progressTimer.async_wait([this](std::error_code ec) {
-            if (ec || finished) {
-                return;
-            }
-            reportProgress();
-            startProgressTimer();
-        });
-    }
-
+    // 硬上限：与传输空闲超时不是一回事。后者看"有没有进展"，本项看
+    // "总共花了多久"，测试用它兜底，避免一个逻辑 bug 把 CI 拖到全局超时。
     void armHardTimeout()
     {
         if (config.hardTimeout.count() <= 0 || finished) {
             return;
         }
         watchdog.expires_after(config.hardTimeout);
-        watchdog.async_wait([this](std::error_code ec) {
-            if (ec || finished) {
+        std::weak_ptr<char> token = alive;
+        watchdog.async_wait([this, token](const std::error_code& ec) {
+            if (ec || token.expired()) {
                 return;
             }
             finish(false, "超时：操作总时长超过上限", Status::Fail(ErrorCode::kTimeout, "hard timeout"));
         });
     }
 
-    // 空闲判定：多久没有任何**看得见的进展**。
+    // 空闲看门狗：500ms 一次的粗粒度检查。
     //
-    // 什么算进展：
-    //   - 收到任何一帧（见 dispatch / touch）
-    //   - 传输的已完成字节数变化
-    //   - 本地还在忙（正在算摘要、正在读盘）——这一点最容易被漏掉
-    //
-    // 早先的版本只看 bytesDone，结果发送方在算摘要的那十几秒里 bytesDone
-    // 一直是 0，看门狗判定"对端无响应"，在请求帧还没发出去时就把传输
-    // 掐了。用户看到的是"对端没应答"，而真实原因是我们自己在读盘。
-    //
-    // 所以判据不是"有没有字节流过"，而是"这件事到底还有没有人在推进"：
-    // 本地还在干活，就说明不是对端的问题。
-    void checkIdle()
+    // 为什么不是"每次收到帧就重置一个定时器"：那要在每个回调里插一行，
+    // 漏一处就永远不超时。周期性检查只依赖两个状态（字节数、开始标志），
+    // 加新代码时不会悄悄失效。
+    void armIdleWatch()
     {
-        if (finished || !authenticated) {
+        if (finished || config.idleTimeout.count() <= 0) {
             return;
         }
-
-        // 看门狗盯"当前在动的那件事"：有会话内发送时看发送，否则看接收。
-        // 两者同时在跑时只看发送——接收那边的沉默由它自己的收尾/空闲
-        // 判定负责，而批次场景下用户关心的是发送是否卡住。
-        auto* active = (sendActive && sendPeer) ? sendPeer.get() : peer.get();
-        if (active) {
-            const auto p = active->progress();
-            if (p.bytesDone != lastActivityBytes) {
-                lastActivityBytes = p.bytesDone;
-                lastActivity = std::chrono::steady_clock::now();
+        idleTimer.expires_after(std::chrono::milliseconds(500));
+        std::weak_ptr<char> token = alive;
+        idleTimer.async_wait([this, token](const std::error_code& ec) {
+            if (ec || token.expired() || finished) {
                 return;
             }
+            checkIdle();
+            armIdleWatch();
+        });
+    }
 
-            // 传输还没开始（发送方等摘要，或接收方等请求帧）时不算空闲。
-            //
-            // 两边的沉默都是**正常**的：
-            //   - 发送方的摘要阶段没有上限可用：1GB 文件在慢盘上可能要几十秒，
-            //     而这段时间它对网络是完全沉默的。用 idleTimeout 卡它等于
-            //     "文件越大越容易失败"，而那与用户感知的"网速慢"毫无关系。
-            //   - 接收方在第一个 kFileRequestSend 到达之前只是挂着等别人发，
-            //     这段时间长不代表对端失联——对端可能还没点"发送"。
-            //
-            // 所以判据交给传输层：started() 就是"现在沉默是否正常"的答案
-            // （见 TransferPeer.h 的注释）。**不要按角色分别判**——早先只写了
-            // kSend，结果接收方用 `--idle-timeout 8` 时，发送端还在算摘要、
-            // 请求帧还没发出，接收端就把自己掐了；发送方随后拿到的是
-            // "peer did not answer"，排查方向完全错（看着像中继丢包）。
-            //
-            // 真正的兜底是 hardTimeout（如果调用方给了）——那是另一个语义：
-            // 不管有没有进展，总共只许花这么久。
-            if (!active->started()) {
-                lastActivity = std::chrono::steady_clock::now();
-                return;
-            }
+    void checkIdle()
+    {
+        if (finished || !transferStarted) {
+            // 还没开始传：沉默是正常的（发送方在算摘要、接收方在等请求帧）。
+            lastActivity = std::chrono::steady_clock::now();
+            return;
         }
-
+        if (lastBytes != lastActivityBytes) {
+            lastActivityBytes = lastBytes;
+            lastActivity = std::chrono::steady_clock::now();
+            return;
+        }
         const auto idle = std::chrono::steady_clock::now() - lastActivity;
         if (idle < config.idleTimeout) {
             return;
         }
 
-        // 注意措辞：这里的结论是"对端没动静"，不是"传输失败"。对端进程
-        // 被 kill 之后，本地能观察到的**唯一**事实就是没有进展——把这点
-        // 说清楚，测试失败时人才不会往错的方向查。
+        // 措辞要准：这里的结论是"对端没动静"，不是"传输失败"。对端进程被
+        // kill 之后本地能观察到的**唯一**事实就是没有进展——把这点说清楚，
+        // 测试失败时人才不会往错的方向查。
         finish(false,
                "对端长时间无响应（" +
                    std::to_string(std::chrono::duration_cast<std::chrono::seconds>(config.idleTimeout).count()) + " 秒无进展）",
@@ -389,240 +348,105 @@ struct Client::Impl {
                true);
     }
 
-    void touch()
-    {
-        lastActivity = std::chrono::steady_clock::now();
-    }
-
-    void reportProgress()
-    {
-        auto* active = (sendActive && sendPeer) ? sendPeer.get() : peer.get();
-        if (!onProgress || !active) {
-            return;
-        }
-        const auto p = active->progress();
-
-        const auto now = std::chrono::steady_clock::now();
-        const auto dt = std::chrono::duration<double>(now - lastReportAt).count();
-        if (dt > 0.0 && p.bytesDone >= lastBytes) {
-            lastSpeed = static_cast<double>(p.bytesDone - lastBytes) / dt;
-        }
-        lastBytes = p.bytesDone;
-        lastReportAt = now;
-
-        ProgressReport r;
-        r.bytesDone = p.bytesDone;
-        r.bytesTotal = p.bytesTotal;
-        r.bytesPerSecond = lastSpeed;
-        onProgress(r);
-    }
-
     // ---------------------------------------------------------------------
-    // 入口
+    // 连接
     // ---------------------------------------------------------------------
 
     void connect()
     {
-        core::session::SessionConfig sc;
-        sc.role = core::session::Role::kClient;
-        // 客户端侧的字段名是 clientPassword，不是 server.password——
-        // 后者是"服务端要求的口令"，填错了表现为认证失败，很难查。
-        sc.clientPassword = config.password;
-        // server.allowNoAuth 在客户端侧的语义是"我知道对端关了认证"：
-        // 决定 ClientHandshake 走 kNoAuth（不期待 Challenge）还是
-        // kRequireAuth。不设置它时，无认证中继发来的 answer_id 会被
-        // 当成"未完成握手册收到了业务帧"而拒绝连接——症状是"连上去
-        // 立刻被断开"，与中继不可达的表现完全不同，极难排查。
-        sc.server.allowNoAuth = config.serverAllowNoAuth;
-        sc.handshakeTimeout = config.connectTimeout;
+        ControlLink::Config cc;
+        cc.host = config.host;
+        cc.port = config.port;
+        cc.password = config.password;
+        cc.noAuth = config.serverAllowNoAuth;
+        cc.requestedId = config.requestedId;
 
-        core::session::SessionHandler h;
+        ControlLink::Handler h;
+        std::weak_ptr<char> token = alive;
 
-        h.onAuthenticated = [this](core::session::Session& self, std::string id) {
-            const std::string previous = assignedId;
-            assignedId = std::move(id);
-            authenticated = true;
-            touch();
-
-            // 声明标识：认证一过就发，只发一次。
-            //
-            // 发在这一刻而不是"拿到 id 之后"：服务端在认证完成时就分配了
-            // 临时号并发 kAnswerId，两者到达顺序不确定；而 kClaimId 只要
-            // 在认证之后发就有效（服务端会做改名）。
-            //
-            // claimSent 防重入：声明成功后 assignPeerId 会再回调一次
-            // onAuthenticated（新身份），不设防就会无限声明。
-            if (!config.requestedId.empty() && !claimSent) {
-                claimSent = true;
-                if (const auto st = self.claimPeerId(config.requestedId); !st.ok()) {
-                    finish(false, "声明标识失败：" + config.requestedId, st, true);
-                    return;
-                }
-            }
-
-            (void)self;
-
-            // 把分配到的身份打到 stdout，供集成测试解析。
-            //
-            // 为什么这是"契约输出"而不是调试打印：id 由服务端分配且**递增**，
-            // 测试无法预知接收端会拿到 client-几。没有这一行，测试就只能
-            // 靠解析 list 的输出猜——而每次 list 又建一条新连接、消耗一个
-            // 新 id，猜的过程本身会改变答案。
-            //
-            // 与 relayerd 的 LISTEN_PORT= 是同一类东西：进程对外宣告自己的
-            // 某个动态事实，格式固定，供机器读取。
-            //
-            // **只打非空、且只打一次**。这里踩过一次坑：onAuthenticated 会在
-            // "认证成功但还不知道自己叫什么"时先调一次（id 为空），随后
-            // 收到 kAnswerId 再调一次（真实 id）。两次都打印时，第一行是
-            // `ASSIGNED_ID=`，而脚本用 head -1 取第一条——拿到空串，于是
-            // "接收端没拿到 id"这个报错出现在完全正常的连接上。
-            //
-            // 判据用"非空且与上次不同"而不是单纯的"非空"：服务端理论上可以
-            // 改名再通知一次，那时该打新值；而重复通知同一个 id 时重复打印
-            // 会让"第一行"这个契约失效。
-            //
-            // 声明了标识时还要多一条：**临时号不算数**。认证后服务端先发
-            // client-N，改名成功后再发真正的名字；中间那个 N 一旦打出去，
-            // e2e 的 head -1 就会拿到它（"接收端 id 不是我要的那个"），
-            // GUI 也会闪一下错误的身份。所以只认"等于声明的那个"。
-            const bool identityFinal = config.requestedId.empty() || assignedId == config.requestedId;
-            if (!assignedId.empty() && assignedId != previous && identityFinal) {
-                std::printf("ASSIGNED_ID=%s\n", assignedId.c_str());
-                std::fflush(stdout);
-                if (config.onIdAssigned) {
-                    config.onIdAssigned(assignedId);
-                }
-
-                // askListOnStart 放在"真实 id 到手"这一刻而不是 startReceiving：
-                // 首次 onAuthenticated 回调时身份还是空的，此刻问列表，服务端
-                // 返回的名单里未必有自己（id 都还没发），GUI 的自标红就会失效。
-                if (action == Action::kReceive && config.askListOnStart) {
-                    touch();
-                    requestPeerList();
-                }
-            }
-
-            onAuthenticated();
-
-            // 自检（PROTOCOL.md §11.3.1）：接收端已经建好，把自己的文件
-            // 发给自己，帧由中继绕回本连接。
-            //
-            // 必须等身份**最终确定**（identityFinal）再发：声明了标识时，
-            // 第一次回调的身份还是空的，那时发出去 to 会是空串（被当成
-            // "发给服务端"），请求直接进黑洞。
-            if (action == Action::kReceive && identityFinal && !config.selfSendPath.empty() && !selfSendStarted) {
-                selfSendStarted = true;
-                const bool started = startSendOnSession(config.selfSendPath, std::string(), assignedId, [this](const Outcome& o) {
-                    // 成功不做额外动作：接收侧收完会自己 finish（退出码
-                    // 由它决定）。失败要提前结束，否则进程挂在"等文件"
-                    // 上直到硬超时，看不出是自检发送出了问题。
-                    if (!o.ok) {
-                        finish(false, "自检发送失败：" + o.summary, o.status, o.connectionLost);
-                    }
-                });
-                if (!started) {
-                    finish(false, "自检发送未能启动（接收会话不可用）",
-                           Status::Fail(ErrorCode::kUnknown, "self-send unavailable"), false);
-                }
-            }
-
-            // 远端取回（PROTOCOL.md §11.9）：在接收会话上请对端把文件发过来。
-            // 走 recv 模式是因为回程的文件需要这个常驻会话收下。
-            if (action == Action::kReceive && identityFinal && !config.pullFrom.empty() && !pullStarted) {
-                pullStarted = true;
-                const bool started =
-                    startPullOnSession(config.pullFrom, config.pullPath, config.pullAsArchive, [this](const Outcome& o) {
-                        std::printf("PULL %s\n", o.ok ? "accepted" : "failed");
-                        std::fflush(stdout);
-                        if (!o.ok) {
-                            // 拒绝/超时：不会再等文件了，直接结束。
-                            // 成功则继续等回程的文件（接收路径负责收尾）。
-                            finish(false, "取回失败：" + o.summary, o.status, false);
-                        }
-                    });
-                if (!started) {
-                    finish(false, "取回请求未能发起（会话不可用或正忙）", Status::Fail(ErrorCode::kUnknown, "pull unavailable"),
-                           false);
-                }
-            }
-
-            // 自检列举：在接收会话上向自己要一份目录（GUI 远端浏览的同一条
-            // 路径——请求搭在 kReceive 会话上，而不是新开连接）。自投让请求
-            // 与应答都绕回本连接，所以一个进程就把服务端应答侧也验了。
-            if (action == Action::kReceive && identityFinal && config.selfBrowse && !selfBrowseStarted) {
-                selfBrowseStarted = true;
-                const bool started = startBrowseOnSession(assignedId, config.selfBrowsePath, [this](const Outcome& o) {
-                    // 列完就结束：这是自检，不是长期接收。
-                    finish(o.ok, o.summary, o.status, false);
-                });
-                if (!started) {
-                    finish(false, "自检列举未能启动（接收会话不可用或正忙）",
-                           Status::Fail(ErrorCode::kUnknown, "self-browse unavailable"), false);
-                }
-            }
-        };
-
-        h.onFrame = [this](core::session::Session&, const Frame& f) {
-            touch();
-            dispatch(f);
-        };
-
-        h.onClosed = [this](std::string, Status st) {
-            if (finished) {
+        h.onReady = [this, token](std::string id) {
+            if (token.expired()) {
                 return;
             }
-            // 未认证状态收到业务帧，几乎总是"客户端按认证模式连了一个
-            // 无认证中继"：服务端跳过握手直接发 answer_id，被客户端按
-            // 协议拒绝。这个场景足够常见（服务端 --allow-no-auth 部署），
-            // 给一条可照做的提示，而不是让用户去猜协议细节。
-            if (!config.serverAllowNoAuth && st.message.find("non-auth frame") != std::string::npos) {
-                st.message += "（中继可能以 --allow-no-auth 启动，客户端请加 --no-auth 重试）";
-            }
-            // 声明标识被拒：这不是"网络断了"，措辞必须让用户知道该改什么。
-            // 两种原因的处置完全不同——被占用是要么换名字、要么关掉占用的
-            // 那台；不合法是名字本身不能用。
-            if (st.code == ErrorCode::kIdTaken) {
-                finish(false, "标识「" + config.requestedId + "」已被占用，该标识同时只能有一条连接", std::move(st), true);
+            onControlReady(std::move(id));
+        };
+        h.onClosed = [this, token](Status why) {
+            if (token.expired()) {
                 return;
             }
-            if (st.code == ErrorCode::kIdInvalid) {
-                finish(false, "标识「" + config.requestedId + "」不合法（不能为空/超长/含非法字符）", std::move(st), true);
-                return;
+            onControlClosed(std::move(why));
+        };
+        h.onPeerRequest = [this, token](const Frame& req, Frame& answer) {
+            if (token.expired()) {
+                return false;
             }
-            finish(false, "与中继的连接断开", std::move(st), true);
+            return serveRequest(req, answer);
         };
 
-        session = core::session::Session::connect(ctx, config.host, config.port, std::move(sc), std::move(h));
-
-        // 连接失败（拒绝、DNS）也会走到 onClosed，所以这里不重复判定。
-        startPump();
-        startProgressTimer();
+        control = ControlLink::connect(ctx, std::move(cc), std::move(h));
         armHardTimeout();
+        armIdleWatch();
+
+        // 连接 / 认证的整体时限。握手本身有超时，这里兜的是"连 TCP 都没
+        // 建立起来且没人报错"的情形。
+        connectTimer.expires_after(config.connectTimeout);
+        std::weak_ptr<char> ct = alive;
+        connectTimer.async_wait([this, ct](const std::error_code& ec) {
+            if (ec || ct.expired() || finished || startedOnce) {
+                return;
+            }
+            finish(false, "连不上中继（" + std::to_string(config.connectTimeout.count()) + " 秒内没完成认证）",
+                   Status::Fail(ErrorCode::kTimeout, "connect timeout"));
+        });
     }
 
-    void onAuthenticated()
+    void onControlReady(std::string id)
     {
-        // **必须幂等**。Session 会在两处回调 onAuthenticated：
-        //   1. 握手刚过，此时还不知道自己叫什么（id 为空）
-        //   2. 收到服务端的 kAnswerId，拿到真实 id
+        // ControlLink 会在两处通知：握手刚过（此时还不知道自己叫什么）与
+        // 收到 kAnswerId 之后（真实 id）。所以本函数必须幂等。
+        const std::string previous = assignedId;
+        if (!id.empty()) {
+            assignedId = std::move(id);
+        }
+
+        // 契约输出：id 由服务端分配且递增，测试无法预知接收端会拿到
+        // client-几。没有这一行，测试只能靠解析 list 的输出猜，而每次
+        // list 又会消耗一个新的 id——猜的过程改变答案。
         //
-        // 踩过的坑：这里不做防护时，两次都会走下面的 startSending()，于是
-        // 发送方**建了两个 TransferPeer**——第二个把第一个覆盖掉。而第二个
-        // 用的是新选的 sessionId（时间戳，每次不同），所以第一个 peer 发出
-        // 的请求即使收到应答，也已经没有对象能接收它了。表现是：
-        //
-        //   服务端日志显示 500 发出、501 回来了、然后发送方**又发了一次
-        //   500（换了个 sessionId）**，最后报"对端没应答"。
-        //
-        // 而接收方同理：它的 peer 也被重建，`.relaypart` 建了却收不到数据。
-        //
-        // 这份工作只需要做一次。用 peer/请求已发起作为判据，而不是"第几次
-        // 回调"——回调次数是 Session 的实现细节，不该被上层依赖。
+        // **只打非空、且只打一次**。踩过的坑：第一行若是 `ASSIGNED_ID=`，
+        // 脚本 head -1 拿到空串，于是"接收端没拿到 id"这个报错出现在完全
+        // 正常的连接上。声明了标识时还要多一条：临时号不算数，只认等于
+        // 声明的那个（服务端会先发 client-N，改名成功后再发真名）。
+        const bool identityFinal = config.requestedId.empty() || assignedId == config.requestedId;
+        if (!assignedId.empty() && assignedId != previous && identityFinal) {
+            std::printf("ASSIGNED_ID=%s\n", assignedId.c_str());
+            std::fflush(stdout);
+            if (config.onIdAssigned) {
+                config.onIdAssigned(assignedId);
+            }
+
+            // 数据连接的 id 依赖控制连接的最终 id（`<id>~d`），所以在身份
+            // 确定之后才建立它。提前建会拿到 `~` 后面跟着临时号的垃圾名字。
+            if (action == Action::kReceive || action == Action::kSend || !config.selfSendPath.empty()) {
+                ensureDataLink([](bool) {});
+            }
+
+            if (action == Action::kReceive && config.askListOnStart) {
+                requestPeerList();
+            }
+
+            // 自检与搭车动作都要**最终身份**：声明了 --id 时，第一次回调的
+            // id 还是临时号（甚至为空），那时发出去的 `to` 是错的。
+            if (action == Action::kReceive) {
+                startReceiveExtras();
+            }
+        }
+
         if (startedOnce) {
             return;
         }
         startedOnce = true;
+        connectTimer.cancel();   // 控制连接已就绪，连接看门狗完成使命
 
         switch (action) {
         case Action::kList:
@@ -630,89 +454,452 @@ struct Client::Impl {
             return;
 
         case Action::kBrowse:
-            // 只要 `to` 对，不需要等自己的 id——服务端在认证时已经登记了
-            // 这条连接，转发目标查得到。
+            // 只要 `to` 对，不必等自己的 id——服务端在认证时就登记了这条
+            // 连接，转发目标查得到。
             requestFileList();
             return;
 
         case Action::kSend:
-            startSending();
+            ensureDataLink([this](bool ok) {
+                if (!ok) {
+                    finish(false, "无法建立数据连接", Status::Fail(ErrorCode::kIoError, "data link failed"));
+                    return;
+                }
+                negotiateDataId(toPeerId, [this](bool ok2, std::string peerDataId) {
+                    if (!ok2) {
+                        finish(false, "对端的数据连接不可用（对方可能正在关闭或未升级协议）",
+                               Status::Fail(ErrorCode::kTimeout, "data channel negotiation failed"));
+                        return;
+                    }
+                    startSend(peerPathSource, peerPathRemoteName, peerDataId);
+                });
+            });
             return;
 
         case Action::kReceive:
-            // 接收方什么都不做：等对端的 kFileRequestSend。
-            // 但要把 peer 建起来，否则帧来了没人接。
-            startReceiving();
+            // 接收方本身不主动做事：数据连接挂好常驻 receiver 之后等对端推。
+            // 自检 / 取回那几件事需要**最终身份**，所以在 onControlReady 的
+            // identityFinal 分支里启动（见 startReceiveExtras）。
             return;
 
         case Action::kFileOp:
-            // 一次性连接上让对端做一件事，拿到应答就结束（`op` 子命令）。
-            requestFileOpOnce();
+            runFileOpOnce();
             return;
         }
     }
 
-    // ---------------------------------------------------------------------
-    // list
-    // ---------------------------------------------------------------------
-
-    void requestPeerList()
+    // 接收会话上的"一次性搭车动作"：自检列举、取回、自检发送。
+    //
+    // 三者都要求身份**最终确定**（见 onControlReady 的注释），且各自只做
+    // 一次。放在这里而不是 switch 里，是因为 switch 只在第一次认证回调时
+    // 跑一遍，而那时 id 可能还是空的——声明了 --id 的客户端会因此**永远
+    // 不启动**这些动作，症状是 recv 挂着不动直到硬超时。
+    void startReceiveExtras()
     {
-        // 空 body。encodeAskId 那套编码在这里用不上——问列表不需要参数。
-        Frame f;
-        f.type = FrameType::kAskClientList;
-        (void)session->send(f);
-    }
-
-    void requestFileList()
-    {
-        Frame f;
-        f.type = FrameType::kAskFileList;
-        f.to = browsePeerId;
-        f.body = core::session::encodeAskFileList(browseRelPath);
-        if (!session->send(f).ok()) {
-            finish(false, "远端列举请求发送失败", Status::Fail(ErrorCode::kProtocol, "send failed"));
+        // 自检列举：在常驻接收会话上向自己发一次 kAskFileList，列完即退出。
+        // 存在的理由是 CLI 的 ls 走 browsePeer（一次性连接），那条路与
+        // GUI 的"在常驻会话上列举"不是同一份代码，只测 ls 覆盖不到。
+        if (config.selfBrowse && !selfBrowseStarted) {
+            selfBrowseStarted = true;
+            browseNow(assignedId, config.selfBrowsePath, [this](const Outcome& o) {
+                // 结果先落回成员再收尾：finish() 是按成员构造 Outcome 的。
+                remoteEntries = o.remoteEntries;
+                listStatus = o.listStatus;
+                rootListing = o.rootListing;
+                finish(o.ok, o.summary, o.status);
+            });
             return;
         }
 
-        // 同 GUI 路径：对端离线时服务端静默丢帧，不设超时就会一直等。
-        browseTimer.expires_after(std::chrono::seconds(10));
-        browseTimer.async_wait([this](const std::error_code& ec) {
-            if (ec || action != Action::kBrowse) {
+        // 取回：请求搭在控制连接上，回程的文件由数据连接收下。
+        if (!config.pullFrom.empty()) {
+            maybeStartPull();
+            return;
+        }
+
+        // 自检发送：把自己的文件发给自己（§11.3.1）。一条命令就能验证
+        // "中继 + 认证 + 双连接 + 传输 + 落盘"整条链路，不必找第二台机器。
+        if (!config.selfSendPath.empty() && !selfSendStarted) {
+            selfSendStarted = true;
+            ensureDataLink([this](bool ok) {
+                if (!ok) {
+                    finish(false, "无法建立数据连接", Status::Fail(ErrorCode::kIoError, "data link failed"));
+                    return;
+                }
+                negotiateDataId(assignedId, [this](bool ok2, std::string peerDataId) {
+                    if (!ok2) {
+                        // 自己是自己，协商失败说明链路有问题：报出来，别让
+                        // 进程挂在"等文件"上直到硬超时。
+                        finish(false, "自我协商失败（数据连接不可用）",
+                               Status::Fail(ErrorCode::kTimeout, "self negotiate failed"));
+                        return;
+                    }
+                    startSend(config.selfSendPath, std::string(), peerDataId, [this](const Outcome& o) {
+                        // 成功不做额外动作：接收侧收完会自己 finish。失败要
+                        // 提前结束，否则进程挂在"等文件"上，看不出是自检发送
+                        // 出了问题。
+                        if (!o.ok && !finished) {
+                            finish(false, "自检发送失败：" + o.summary, o.status);
+                        }
+                    });
+                });
+            });
+        }
+    }
+
+    void onControlClosed(Status why)
+    {
+        if (finished) {
+            return;
+        }
+
+        // 声明标识被拒：这不是"网络断了"，措辞必须让用户知道该改什么。
+        // 两种原因的处置完全不同——被占用是要么换名字、要么关掉占用的那台；
+        // 不合法是名字本身不能用。
+        if (why.code == ErrorCode::kIdTaken) {
+            finish(false, "标识「" + config.requestedId + "」已被占用，该标识同时只能有一条连接", std::move(why), true);
+            return;
+        }
+        if (why.code == ErrorCode::kIdInvalid) {
+            finish(false, "标识「" + config.requestedId + "」不合法（不能为空/超长/含非法字符）", std::move(why), true);
+            return;
+        }
+
+        // 漏填 --no-auth 时的症状是"连上立刻被断开"，与中继不可达完全不同，
+        // 给一条可照做的提示，而不是让用户去猜协议细节。
+        std::string msg = why.message;
+        if (!config.serverAllowNoAuth && msg.find("non-auth frame") != std::string::npos) {
+            msg += "（中继可能以 --allow-no-auth 启动，客户端请加 --no-auth 重试）";
+        }
+
+        // 连接没了，正在跑的传输不会有结论。报一次连接级失败——重试剩余
+        // 工作没有意义（批次执行者凭 connectionLost 打住）。
+        const bool userClosed = why.code == ErrorCode::kCancelled;
+        finish(false, userClosed ? "已断开" : "与中继的连接已断开：" + msg, std::move(why), true);
+    }
+
+    // ---------------------------------------------------------------------
+    // 数据连接
+    // ---------------------------------------------------------------------
+
+    // 建立（或确认已建立）数据连接。cb 在就绪/失败时调用恰好一次。
+    void ensureDataLink(std::function<void(bool)> cb)
+    {
+        if (finished || control == nullptr) {
+            cb(false);
+            return;
+        }
+        if (dataState == DataState::kReady && data && data->ready()) {
+            cb(true);
+            return;
+        }
+        if (dataState == DataState::kFailed) {
+            // 失败过的连接不自动重试：上一次多半是认证失败或端口不可达，
+            // 悄悄重试只会把真实的错误藏起来。
+            cb(false);
+            return;
+        }
+
+        dataWaiters.push_back(std::move(cb));
+        if (dataState == DataState::kConnecting || dataState == DataState::kReady) {
+            return;
+        }
+        // 身份还没定下来：数据连接的 id 是 `<控制连接 id>~d`，此刻建出来的
+        // 会是 `~d` 这种垃圾名字（或者干脆退化成不声明）。等 onControlReady
+        // 拿到最终 id 后再启动——它会再调一次 ensureDataLink。
+        if (assignedId.empty()) {
+            return;
+        }
+        startDataLink();
+    }
+
+    void startDataLink()
+    {
+        dataState = DataState::kConnecting;
+        requestedDataId = dataIdFor(assignedId);
+        dataId = requestedDataId;
+        claimWaitStarted = false;
+
+        TransferLink::Config dc;
+        dc.host = config.host;
+        dc.port = config.port;
+        dc.password = config.password;
+        dc.noAuth = config.serverAllowNoAuth;
+        dc.requestedId = dataId;
+        dc.receiveDir = targetPath;
+        dc.chunkSize = config.chunkSize;
+        dc.overwriteExisting = config.overwriteExisting;
+        dc.idleTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(config.idleTimeout);
+        // 与 idleTimeout 解耦：它只管"请求帧发出后等 kAnswerSend"这一段。
+        // 目标不在线时中继静默丢帧，用 60 秒的 idleTimeout 意味着"发错 id
+        // 要干等一分钟"，而 AnswerSend 在对端在线时是毫秒级。
+        dc.answerTimeout =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::min(config.idleTimeout, std::chrono::seconds(10)));
+        // 只发不收的客户端不挂 receiver：否则任何知道本机数据连接 id 的
+        // 对端都能往接收目录写文件，而纯发送方没理由接受这件事。
+        dc.acceptIncoming = (action == Action::kReceive);
+
+        TransferLink::Handler h;
+        std::weak_ptr<char> token = alive;
+
+        h.onReady = [this, token](std::string id) {
+            if (token.expired()) {
                 return;
             }
-            finish(false, "对端没有响应（可能已离线）", Status::Fail(ErrorCode::kTimeout, "browse answer timeout"));
-        });
+            // **空 id 不算就绪**。Session 的第一次认证通知发生在"知道自己
+            // 叫什么之前"，此时 id 为空，而 dataId 还停在 startDataLink 预设
+            // 的猜测值（`<控制连接 id>~d`）——直接判就绪会让协商抢在 claim
+            // 之前跑，把临时号发给对端。
+            if (id.empty()) {
+                return;
+            }
+            dataId = id;
+            if (dataState == DataState::kReady) {
+                return;
+            }
+
+            // **声明了名字时要等那个名字**。服务端在认证完成时先给一个临时
+            // 号（client-N），claim 生效后才改名；而这两次通知之间，协商
+            // 完全可能已经跑完了——那时告诉对端的是 client-N，等 claim 一
+            // 改名，对端缓存的 id 立刻失效，它下一次发送就发进虚空（中继
+            // 找不到目标，静默丢帧，发送方等满 answerTimeout）。
+            //
+            // 所以这里不把"拿到临时号"当作就绪：在真名到手之前，协商请求
+            // 会被回 kNotReady，发起方 200ms 后重试——那条路径本来就有。
+            if (!requestedDataId.empty() && dataId != requestedDataId) {
+                if (!claimWaitStarted) {
+                    claimWaitStarted = true;
+                    claimWait.expires_after(std::chrono::seconds(3));
+                    claimWait.async_wait([this, token](const std::error_code& ec) {
+                        if (ec || token.expired() || dataState == DataState::kReady) {
+                            return;
+                        }
+                        // claim 没成功（名字被占用）：用临时号也能工作。
+                        // 3 秒是"一个人等得起、又不会掩盖问题"的折中。
+                        markDataReady();
+                    });
+                }
+                return;
+            }
+            claimWait.cancel();
+            markDataReady();
+        };
+        h.onClosed = [this, token](Status why) {
+            if (token.expired()) {
+                return;
+            }
+            // 数据连接断了不影响控制连接：列举、浏览、改名都还能用。
+            // 只有正在跑的传输会失败（TransferLink 自己会逐个报出来）。
+            claimWait.cancel();
+            auto waiters = std::move(dataWaiters);
+            dataWaiters.clear();
+            for (auto& w : waiters) {
+                w(false);
+            }
+
+            // 常驻会话（GUI 的接收端）必须自己把数据连接捡回来：没有它，
+            // 之后的每一次发送都会失败，而用户看到的只是"发不出去"，
+            // 没有任何线索指向"数据连接已经没了"。
+            //
+            // 一次性操作（CLI 的 send/ls/op）不重建：那条连接用完就退，
+            // 重建只会让进程多活一会儿。
+            if (config.keepReceiving && !finished) {
+                dataState = DataState::kIdle;
+                asio::post(ctx, [this, token] {
+                    if (token.expired() || finished || dataState != DataState::kIdle) {
+                        return;
+                    }
+                    startDataLink();
+                });
+                return;
+            }
+            dataState = DataState::kFailed;
+            (void)why;
+        };
+        h.onProgress = [this, token](const TransferLink::JobInfo& job) {
+            if (token.expired()) {
+                return;
+            }
+            reportProgress(job);
+        };
+        h.onFinished = [this, token](const TransferLink::JobInfo& job, const transfer::TransferResult& r) {
+            if (token.expired()) {
+                return;
+            }
+            onJobFinished(job, r);
+        };
+
+        data = TransferLink::connect(ctx, std::move(dc), store, std::move(h));
     }
 
-    // `op` 子命令：一条连接只做一件事，拿到应答就结束。
-    //
-    // 与 GUI 的差别只在"能不能搭常驻会话"：CLI 每次新连一条，不会顶掉
-    // 别人的接收会话（它本来就没有）。所以这里不检查 canSendOnSession。
-    void requestFileOpOnce()
+    // 数据连接可以用了：把排队的调用方全部唤醒。
+    void markDataReady()
     {
-        if (!startFileOp(config.fileOp, [this](const Outcome& o) { finish(o.ok, o.summary, o.status); })) {
-            finish(false, "远端操作请求不合法（路径为空、条数超限，或已有请求在飞）",
-                   Status::Fail(ErrorCode::kProtocol, "file op request rejected"));
+        if (dataState == DataState::kReady) {
+            return;
+        }
+        dataState = DataState::kReady;
+        auto waiters = std::move(dataWaiters);
+        dataWaiters.clear();
+        for (auto& w : waiters) {
+            w(true);
         }
     }
 
-    // 对端来问目录：按**绝对路径**列一层、回一条。
-    //
-    // 没有共享根了（DESIGN.md §3.8）：本工具是单用户自用，v1 就是全路径
-    // 访问，多一层"相对根"只会让"看 D:\照片"变成先配置再浏览两步。代价是
-    // 任何能连上中继、知道本机 id 的人都能列举本机路径——这一点写在
-    // PROTOCOL.md §11.8.1，不要在别处偷偷把它当安全边界。
-    //
-    // 目录列举是同步做的：一次 readdir 在该规模下是毫秒级，而引入工作线程
-    // 会把"谁保证 store 生命周期"的问题带进来。真遇到网络盘这类慢列举，
-    // 再按传输路径那样丢进 WorkerPool。
-    void serveFileList(const Frame& req)
+    // 换对端的数据连接 id。一次往返，结果缓存。
+    void negotiateDataId(std::string peerId, std::function<void(bool, std::string)> cb)
     {
-        Frame answer;
+        if (peerId.empty()) {
+            cb(false, {});
+            return;
+        }
+        if (const auto it = peerDataIds.find(peerId); it != peerDataIds.end()) {
+            cb(true, it->second);
+            return;
+        }
+
+        auto& n = negotiations[peerId];
+        n.waiters.push_back(std::move(cb));
+        if (n.inFlight) {
+            return;
+        }
+        n.inFlight = true;
+        askDataChannel(peerId, 1);
+    }
+
+    void askDataChannel(const std::string& peerId, int attempt)
+    {
+        if (finished || control == nullptr || dataState != DataState::kReady) {
+            finishNegotiation(peerId, false, {});
+            return;
+        }
+
+        std::weak_ptr<char> token = alive;
+        auto body = core::session::encodeAskDataChannel(dataId);
+        const bool asked = control->ask(
+            FrameType::kAskDataChannel, peerId, std::move(body), [this, token, peerId, attempt](const ControlLink::Answer& a) {
+                if (token.expired()) {
+                    return;
+                }
+                if (!a.ok) {
+                    finishNegotiation(peerId, false, {});
+                    return;
+                }
+                core::session::DataChannelStatus status = core::session::DataChannelStatus::kRejected;
+                std::string peerDataId;
+                std::string err;
+                if (!core::session::decodeAnswerDataChannel(a.body, status, peerDataId, err)) {
+                    finishNegotiation(peerId, false, {});
+                    return;
+                }
+                if (status == core::session::DataChannelStatus::kOk && !peerDataId.empty()) {
+                    peerDataIds[peerId] = peerDataId;
+                    finishNegotiation(peerId, true, peerDataId);
+                    return;
+                }
+                if (status == core::session::DataChannelStatus::kNotReady && attempt < kNegotiateMaxAttempts) {
+                    // 对端的数据连接还在握手。等一会儿再问——这不是
+                    // 错误，协议里明写了它是"暂时建不起来"。
+                    auto timer = std::make_shared<asio::steady_timer>(ctx);
+                    timer->expires_after(kNegotiateRetryDelay);
+                    timer->async_wait([this, token, peerId, attempt, timer](const std::error_code& ec) {
+                        if (ec || token.expired()) {
+                            return;
+                        }
+                        askDataChannel(peerId, attempt + 1);
+                    });
+                    return;
+                }
+                finishNegotiation(peerId, false, {});
+            });
+        if (!asked) {
+            finishNegotiation(peerId, false, {});
+        }
+    }
+
+    void finishNegotiation(const std::string& peerId, bool ok, std::string peerDataId)
+    {
+        const auto it = negotiations.find(peerId);
+        if (it == negotiations.end()) {
+            return;
+        }
+        auto waiters = std::move(it->second.waiters);
+        negotiations.erase(it);
+        for (auto& w : waiters) {
+            w(ok, peerDataId);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // 接收侧：对端发来的请求
+    // ---------------------------------------------------------------------
+
+    // 返回 true = 认了这条请求，answer 里装的是应答（`to` 与 `index` 由
+    // ControlLink 填）。返回 false = 不认识，对方会等满它自己的超时。
+    bool serveRequest(const Frame& req, Frame& answer)
+    {
+        switch (req.type) {
+        case FrameType::kAskFileList:
+            serveFileList(req, answer);
+            return true;
+
+        case FrameType::kAskPathMeta:
+            servePathMeta(req, answer);
+            return true;
+
+        case FrameType::kAskDataChannel:
+            serveDataChannel(req, answer);
+            return true;
+
+        case FrameType::kAskFilePull:
+            servePullRequest(req, answer, false);
+            return true;
+
+        case FrameType::kAskArchivePull:
+            servePullRequest(req, answer, true);
+            return true;
+
+        case FrameType::kAskSha256:
+        case FrameType::kAskRename:
+        case FrameType::kAskCreateDir:
+        case FrameType::kAskDelete:
+        case FrameType::kAskUnarchive:
+            serveFileOp(req, answer);
+            return true;
+
+        default:
+            return false;
+        }
+    }
+
+    // 对端登记它的数据连接，同时得知我们的。
+    //
+    // 这一步不只是"告诉对方一个名字"：请求里带着对方的数据连接 id，我们
+    // 存下来——之后对方来要文件（§11.9）时，我们得知道往哪儿发。
+    void serveDataChannel(const Frame& req, Frame& answer)
+    {
+        std::string peerDataId;
+        std::string err;
+        if (core::session::decodeAskDataChannel(req.body, peerDataId, err) && !peerDataId.empty()) {
+            peerDataIds[req.from] = peerDataId;
+        }
+
+        answer.type = FrameType::kAnswerDataChannel;
+        const bool ready = (dataState == DataState::kReady && data && data->ready());
+        core::session::DataChannelStatus status =
+            ready ? core::session::DataChannelStatus::kOk : core::session::DataChannelStatus::kNotReady;
+        (void)core::session::encodeAnswerDataChannel(status, ready ? dataId : std::string(), answer.body);
+    }
+
+    // 对端来问目录：按**绝对路径**列一层。
+    //
+    // 没有共享根（DESIGN.md §3.8）：本工具是单用户自用，v1 就是全路径访问，
+    // 多一层"相对根"只会让"看 D:\照片"变成先配置再浏览两步。代价是任何能
+    // 连上中继、知道本机 id 的人都能列举本机路径——这一点写在
+    // PROTOCOL.md §11.8.1，不要在别处偷偷把它当安全边界。
+    void serveFileList(const Frame& req, Frame& answer)
+    {
         answer.type = FrameType::kAnswerFileList;
-        // 请求者的身份由服务端在转发时绑定（不是自称），可以直接当回信地址。
-        answer.to = req.from;
 
         std::vector<core::session::RemoteEntry> out;
         auto status = core::session::FileListStatus::kOk;
@@ -723,8 +910,8 @@ struct Client::Impl {
         if (!core::session::decodeAskFileList(req.body, path, err)) {
             status = core::session::FileListStatus::kRejected;
         } else if (path.empty()) {
-            // 空路径 = 要根列表：盘符 + 家目录。没有这一层，请求方在
-            // 绝对路径模型下就没有起点，只能靠猜盘符。
+            // 空路径 = 要根列表：盘符 + 家目录。没有这一层，请求方在绝对
+            // 路径模型下就没有起点，只能靠猜盘符。
             isRootList = true;
             const auto roots = store.roots();
             if (roots.empty()) {
@@ -777,22 +964,19 @@ struct Client::Impl {
             }
         }
 
-        if (const auto st = core::session::encodeAnswerFileList(status, isRootList, out, answer.body); !st.ok()) {
-            return;   // 编码失败只可能是内部 bug，没必要再回一个坏帧
+        if (!core::session::encodeAnswerFileList(status, isRootList, out, answer.body).ok()) {
+            answer.body.clear();
         }
-        (void)session->send(answer);
     }
 
     // 对端来问"这几个绝对路径在不在、多大、什么时候改的、指纹是多少"。
     //
     // 一次 stat + 一次 quickFingerprint（只读前 64KB）逐条处理。指纹是给
-    // 发送方的覆盖提示用的：它拿本地文件的指纹一比就知道"内容是否一致"，
-    // 不必再单独发一轮采样请求（v1 的 AskFileSamplesBatch 就省掉了）。
-    void servePathMeta(const Frame& req)
+    // 发送方的覆盖提示用的：拿本地文件的指纹一比就知道"内容是否一致"，
+    // 不必再单独发一轮采样请求（v1 的 AskFileSamplesBatch 由此省掉）。
+    void servePathMeta(const Frame& req, Frame& answer)
     {
-        Frame answer;
         answer.type = FrameType::kAnswerPathMeta;
-        answer.to = req.from;
 
         std::vector<std::string> paths;
         std::string err;
@@ -800,9 +984,7 @@ struct Client::Impl {
         if (!core::session::decodeAskPathMeta(req.body, paths, err)) {
             // 请求结构坏了：回 0 条而不是不回。不发应答会让对端等到超时，
             // 那看起来像网络问题。
-            if (const auto st = core::session::encodeAnswerPathMeta(metas, answer.body); st.ok()) {
-                (void)session->send(answer);
-            }
+            (void)core::session::encodeAnswerPathMeta(metas, answer.body);
             return;
         }
 
@@ -829,498 +1011,285 @@ struct Client::Impl {
             metas.push_back(std::move(m));
         }
 
-        if (const auto st = core::session::encodeAnswerPathMeta(metas, answer.body); st.ok()) {
-            (void)session->send(answer);
-        }
+        (void)core::session::encodeAnswerPathMeta(metas, answer.body);
     }
 
-    void refreshPeers()
-    {
-        // 在现有连接上问列表，不新建连接（见 Client::refreshPeers 的注释）。
-        // touch 刷新空闲基线：等响应的往返不该被看门狗当成"对端无响应"。
-        if (finished || action != Action::kReceive || !authenticated || !session) {
-            return;
-        }
-        touch();
-        requestPeerList();
-    }
-
-    // ---------------------------------------------------------------------
-    // 传输
-    // ---------------------------------------------------------------------
-
-    core::transfer::TransferPeer::Config peerConfig() const
-    {
-        core::transfer::TransferPeer::Config c;
-        if (config.chunkSize > 0) {
-            c.chunkSize = config.chunkSize;
-        }
-        // 空闲超时接进传输层：让 TransferPeer 自己也会因为"等不到应答"
-        // 而失败，而不是只靠外面的看门狗。两层都设不是重复——外层的
-        // 看门狗看整体有没有字节进展，能覆盖"连 peer 都没建起来"的阶段。
-        c.finalizeTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(config.idleTimeout);
-
-        // answerTimeout 与 idleTimeout 解耦：它只管"请求帧发出后等
-        // AnswerSend"这一段（见 TransferPeer pump 里 started_ 之前的分支）。
-        // 目标不在线时中继静默丢帧（协议没有投递失败帧，§9 靠超时发现），
-        // 用 60s 的 idleTimeout 意味着"发错 id 要干等一分钟才报错"。
-        // AnswerSend 在对端在线时是毫秒级（收到请求即回），10s 已经很宽裕；
-        // 传输开始后的超时仍由 finalizeTimeout/重传逻辑负责，不受影响。
-        c.answerTimeout =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::min(config.idleTimeout, std::chrono::seconds(10)));
-
-        // 覆盖策略透传。默认 false（拒绝覆盖）是 core 层的设计；CLI 的
-        // --overwrite 与 GUI 的接收开关在这里汇入。
-        c.overwriteExisting = config.overwriteExisting;
-        return c;
-    }
-
-    void startSending()
-    {
-        if (toPeerId.empty()) {
-            finish(false, "内部错误：发送时缺少目标对端", Status::Fail(ErrorCode::kUnknown, "empty toPeerId"));
-            return;
-        }
-
-        auto cfg = peerConfig();
-
-        // sessionId 由发送方选。这里用时间戳而不是随机数：多进程测试里
-        // 两边都从同一个种子起算，撞车的概率与"进程启动在同一毫秒"相当，
-        // 而时间戳在日志里能直接看出"哪一次"。
-        const auto sid =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-
-        peer = core::transfer::TransferPeer::createSender(ctx, session, store, pool, peerPathSource, peerPathRemoteName, toPeerId,
-                                                          sid, std::move(cfg),
-                                                          [this](const core::transfer::TransferResult& r) { onTransferDone(r); });
-
-        // createSender 内部可能已经同步失败（源文件打不开），此时 onDone
-        // 已经在构造函数里被调用过，peer 处于 finished 状态。
-        if (peer && peer->finished()) {
-            return;
-        }
-
-        touch();
-    }
-
-    void startReceiving()
-    {
-        // 接收方用自己的 sessionId 是错的——sessionId 是**发送方**选的，
-        // 接收方要接受任意一个。这里传 0 并依赖 TransferPeer 的
-        // "接收方以收到的帧里的 sessionId 为准"的语义。
-        //
-        // 但当前实现里 onFrame 会按 sessionId 过滤（!= sessionId_ 就丢），
-        // 所以接收方的 sessionId 必须与发送方一致。命令行工具没法协商，
-        // 于是接收方采用 **0 表示通配**——见下面对 dispatch 的处理。
-        auto cfg = peerConfig();
-        peer =
-            core::transfer::TransferPeer::createReceiver(ctx, session, store, pool, targetPath, 0, std::move(cfg),
-                                                         [this](const core::transfer::TransferResult& r) { onTransferDone(r); });
-
-        touch();
-    }
-
-    std::string peerPathSource;
-    std::string peerPathRemoteName;
-
-    // ---------------------------------------------------------------------
-    // 常驻会话上的发送
-    // ---------------------------------------------------------------------
-
-    // 只有"常驻接收会话活着"时才能搭车发送：别的 action 是一次性操作，
-    // 连接生命周期与操作绑定，发完就该结束。
-    bool canSendOnSession() const noexcept
-    {
-        return !finished && authenticated && session && action == Action::kReceive;
-    }
-
-    // 现在就能起一次搭车发送吗（会话在 + 没有别的发送在跑）。
-    // servePullRequest 靠它决定"接受"还是"正忙，拒绝"。
-    bool canStartSendOnSession() const noexcept
-    {
-        return canSendOnSession() && !sendActive;
-    }
-
-    // 常驻会话上请对端把某个文件发给我（PROTOCOL.md §11.9）。
+    // 对端来要文件 / 要目录（B 侧）：校验 → 回状态 → 在数据连接上推。
     //
-    // 回调在**收到 kAnswerFilePull 时就触发**，不等文件传完：上层要区分
-    // "对方不给我"（立刻可知）和"给了但传得慢"（随后由接收路径报告）。
-    bool startPullOnSession(std::string peerId, std::string relPath, bool archive, std::function<void(const Outcome&)> done)
+    // 应答与文件的先后顺序在这里很要紧：
+    //   - 取**文件**：先回"接受"，再推。反过来的话请求方会先收到一个陌生的
+    //     传输请求，它甚至不知道该不该收。
+    //   - 取**目录**：先打包，**打包成功之后**才回"接受"（§11.10.2）。打包
+    //     会失败（磁盘满、权限、文件在压缩中被删）。先回 0 再失败，请求方
+    //     只能看到"对方答应了但没来东西"，直到空闲超时——所有失败里最难查的
+    //     一种。
+    void servePullRequest(const Frame& req, Frame& answer, bool archive)
     {
-        if (!canSendOnSession() || pullActive) {
-            return false;
-        }
-        pullActive = true;
-        pullIsArchive = archive;
-        onPullDone = std::move(done);
+        using core::session::FilePullStatus;
 
-        Frame f;
-        f.type = archive ? FrameType::kAskArchivePull : FrameType::kAskFilePull;
-        f.to = std::move(peerId);
-        // 请求体与 kAskFileList 同构（对端绝对路径），复用同一套编解码。
-        f.body = core::session::encodeAskFileList(relPath);
-
-        touch();
-        if (const auto st = session->send(f); !st.ok()) {
-            finishPull(false, "取回请求发送失败", st);
-            return false;
-        }
-
-        // 与列举同理：对端离线时服务端静默丢帧，不设超时就会一直等。
-        //
-        // 归档请求等 120 秒：对端要先遍历 + 压缩，应答是在**打包完成之后**
-        // 才发的（§11.10.2）。同一个 10 秒对"打开文件"够用，对"压缩一个
-        // 目录"不够——用 10 秒会让正常的目录取回被误判成对端离线。
-        pullTimer.expires_after(archive ? std::chrono::seconds(120) : std::chrono::seconds(10));
-        pullTimer.async_wait([this](const std::error_code& ec) {
-            if (ec || !pullActive) {
-                return;
-            }
-            finishPull(false, "对端没有响应（可能已离线）", Status::Fail(ErrorCode::kTimeout, "pull answer timeout"));
-        });
-        return true;
-    }
-
-    void finishPull(bool ok, std::string summary, Status status = Status{})
-    {
-        if (!pullActive) {
-            return;
-        }
-        pullActive = false;
-        pullTimer.cancel();
-        auto done = std::move(onPullDone);
-        onPullDone = nullptr;
-
-        Outcome o;
-        o.ok = ok;
-        o.summary = std::move(summary);
-        o.status = std::move(status);
-        if (done) {
-            done(o);
-        }
-    }
-
-    // 目录取回的打包上限（PROTOCOL.md §11.10.3）。压缩是同步做的，这两个
-    // 数字决定了"最坏卡多久"，所以写死而不做成配置。
-    static constexpr std::size_t kMaxPackFiles = 20000;
-    static constexpr std::uint64_t kMaxPackBytes = 256ULL * 1024 * 1024;
-
-    // 递归收集要打包的条目。DirEntry.name 只有文件名，所以这里自己拼相对
-    // 路径——store.list 的 recursive 模式不返回层级信息。
-    //
-    // 返回 false 表示超限（文件数或字节数），由调用方转成 status=2。
-    bool collectItems(const std::string& absDir, const std::string& relPrefix, std::vector<filestore::ArchiveItem>& items,
-                      std::uint64_t& bytes) const
-    {
-        std::vector<filestore::DirEntry> entries;
-        if (!store.list(absDir, false, entries).ok()) {
-            return true;   // 某一层读不了就跳过它，不因此让整次打包失败
-        }
-        for (const auto& e : entries) {
-            if (e.isDir) {
-                // 空目录也要进包：只收文件会让"解出来少了几个空目录"，
-                // 而空目录有时是有意义的（占位、目录结构约定）。
-                const std::string rel = relPrefix.empty() ? e.name : relPrefix + "/" + e.name;
-                filestore::ArchiveItem dirItem;
-                dirItem.sourcePath = absDir + "/" + e.name;
-                dirItem.entryName = rel + "/";
-                items.push_back(std::move(dirItem));
-
-                if (!collectItems(absDir + "/" + e.name, rel, items, bytes)) {
-                    return false;
-                }
-                continue;
-            }
-            bytes += e.size;
-            if (items.size() >= kMaxPackFiles || bytes > kMaxPackBytes) {
-                return false;
-            }
-            filestore::ArchiveItem item;
-            item.sourcePath = absDir + "/" + e.name;
-            item.entryName = relPrefix.empty() ? e.name : relPrefix + "/" + e.name;
-            items.push_back(std::move(item));
-        }
-        return true;
-    }
-
-    // 把目录打包到系统临时目录，返回包路径（失败返回空串）。
-    //
-    // **不能放进共享根**：那会让对端在列举里看到这个临时包，也污染用户目录。
-    std::string packDirectory(const std::string& absDir, const std::string& dirName, std::string& err)
-    {
-        std::vector<filestore::ArchiveItem> items;
-        std::uint64_t bytes = 0;
-        if (!collectItems(absDir, std::string(), items, bytes)) {
-            err = "目录过大（超过 " + std::to_string(kMaxPackFiles) + " 个文件或 256 MiB），请分批取回";
-            return std::string();
-        }
-        if (items.empty()) {
-            err = "目录是空的";
-            return std::string();
-        }
-
-        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        const auto path = std::filesystem::temp_directory_path() / ("relayer-pack-" + std::to_string(stamp) + ".tar.xz");
-
-        filestore::TarXzArchiver archiver(store);
-        filestore::ArchiveOptions options;
-        // 级别 1：传输场景里网络是瓶颈，压缩比多省的那点字节不值"多等 30 秒"
-        // （PROTOCOL.md §11.10.3）。
-        options.compressionLevel = 1;
-        std::vector<std::string> skipped;
-        const auto st = archiver.create(path.string(), items, options, skipped);
-        if (!st.ok()) {
-            std::error_code ec;
-            std::filesystem::remove(path, ec);   // 半成品不能留下
-            err = "打包失败：" + st.message;
-            return std::string();
-        }
-        (void)dirName;
-        return path.string();
-    }
-
-    // 对端来要文件（B 侧）：校验绝对路径 → 回 status → 用普通"推"流程发送。
-    void servePullRequest(const Frame& req)
-    {
-        Frame answer;
         answer.type = FrameType::kAnswerFilePull;
-        // 请求方的身份由服务端在转发时绑定，可以直接当回信地址。
-        answer.to = req.from;
 
         std::string path;
         std::string err;
-        auto status = core::session::FilePullStatus::kRejected;
-        std::string target;
+        auto status = FilePullStatus::kRejected;
+        std::string sendPath;
+        std::string sendName;
+        std::string packPath;   // 打包产生的临时文件，传完要删
 
         if (!core::session::decodeAskFileList(req.body, path, err)) {
-            status = core::session::FilePullStatus::kRejected;
+            status = FilePullStatus::kRejected;
         } else if (path.empty()) {
             // 空路径没有意义（根不是文件），明确拒绝。
-            status = core::session::FilePullStatus::kRejected;
-        } else if (!canStartSendOnSession()) {
-            // 自己正在发别的：明确拒绝而不是排进队列。排队会让请求方看到
-            // 一个不动的进度条，而它并不知道前面还有别人在传。
-            status = core::session::FilePullStatus::kRejected;
+            status = FilePullStatus::kRejected;
         } else {
             path = core::session::normalizePathText(path);
             const auto st = store.stat(path);
-            if (!st.exists || st.isDir) {
-                // 目录不支持：目录请走 §11.10 的打包取回。
-                status = core::session::FilePullStatus::kNotFound;
+            if (archive) {
+                if (!st.exists || !st.isDir) {
+                    status = FilePullStatus::kNotFound;   // 文件请走 §11.9
+                } else {
+                    std::string packErr;
+                    packPath = packDirectory(path, packErr);
+                    if (packPath.empty()) {
+                        status = FilePullStatus::kRejected;
+                    } else {
+                        status = FilePullStatus::kAccepted;
+                        sendPath = packPath;
+                        // 包名用目录最后一段，让对方一眼知道落到本地的是什么
+                        // （§11.10.3）。绝对路径上分隔符可能是 `/` 也可能是
+                        // `\`，两个都要认——否则 C:\foo 会被当成整串名字，
+                        // 包名变成 `C:\foo.tar.xz`（非法文件名）。
+                        const auto slash = path.find_last_of("/\\");
+                        const std::string dirName = (slash == std::string::npos) ? path : path.substr(slash + 1);
+                        sendName = dirName + ".tar.xz";
+                    }
+                }
             } else {
-                status = core::session::FilePullStatus::kAccepted;
-                target = path;
+                if (!st.exists || st.isDir) {
+                    status = FilePullStatus::kNotFound;
+                } else {
+                    status = FilePullStatus::kAccepted;
+                    sendPath = path;
+                    sendName = fileNameOf(path);
+                }
+            }
+        }
+
+        // 需要对方的数据连接 id 才能发。拿不到就明确拒绝——回"接受"然后
+        // 静默发不出去，请求方会一直等到空闲超时。
+        if (status == FilePullStatus::kAccepted) {
+            const auto it = peerDataIds.find(req.from);
+            if (it == peerDataIds.end() || it->second.empty() || dataState != DataState::kReady) {
+                status = FilePullStatus::kRejected;
+                if (!packPath.empty()) {
+                    std::error_code ec;
+                    std::filesystem::remove(packPath, ec);
+                    packPath.clear();
+                }
             }
         }
 
         answer.body = core::session::encodeAnswerFilePull(status);
-        if (const auto st = session->send(answer); !st.ok()) {
+        if (status != FilePullStatus::kAccepted) {
             return;
         }
 
-        if (status == core::session::FilePullStatus::kAccepted) {
-            // 先回 status 再发文件：应答里那个 0 是"我接受"，文件随后才到。
-            // 顺序反了的话，请求方会先看到一个陌生的 kFileRequestSend。
-            (void)startSendOnSession(target, std::string(), req.from, [](const Outcome&) {});   // 结论由接收方自己报
-        }
-    }
-
-    // 对端来要目录（B 侧）：校验 → 打包 → **打包完成后**才回 status → 推包。
-    //
-    // 应答放在打包之后是刻意的（§11.10.2）：打包会失败（磁盘满、权限、
-    // 文件在压缩中被删）。先回 0 再失败，请求方只能看到"对方答应了但没来
-    // 东西"，直到会话空闲超时——所有失败里最难查的一种。
-    void serveArchivePullRequest(const Frame& req)
-    {
-        Frame answer;
-        answer.type = FrameType::kAnswerFilePull;
-        answer.to = req.from;
-
-        std::string path;
-        std::string err;
-        auto status = core::session::FilePullStatus::kRejected;
-        std::string packPath;
-
-        if (!core::session::decodeAskFileList(req.body, path, err)) {
-            status = core::session::FilePullStatus::kRejected;
-        } else if (path.empty()) {
-            // 空路径 = 根，不打包它：多半是点错了，而且把整个盘打包出来
-            // 对方也不知道该解到哪。
-            status = core::session::FilePullStatus::kRejected;
-        } else if (!canStartSendOnSession()) {
-            status = core::session::FilePullStatus::kRejected;
-        } else {
-            path = core::session::normalizePathText(path);
-            const auto st = store.stat(path);
-            if (!st.exists || !st.isDir) {
-                status = core::session::FilePullStatus::kNotFound;   // 文件请走 §11.9
-            } else {
-                std::string packErr;
-                packPath = packDirectory(path, std::string(), packErr);
-                status = packPath.empty() ? core::session::FilePullStatus::kRejected : core::session::FilePullStatus::kAccepted;
-            }
-        }
-
-        answer.body = core::session::encodeAnswerFilePull(status);
-        if (const auto st = session->send(answer); !st.ok()) {
-            return;
-        }
-
-        if (status != core::session::FilePullStatus::kAccepted) {
-            return;
-        }
-
-        // 包名用目录最后一段，让对方一眼知道落到本地的是什么（§11.10.3）。
-        // 绝对路径上分隔符可能是 `/` 也可能是 `\`，两个都要认——否则
-        // C:\foo 会被当成整串名字，包名变成 `C:\foo.tar.xz`（非法文件名）。
-        const auto slash = path.find_last_of("/\\");
-        const std::string dirName = (slash == std::string::npos) ? path : path.substr(slash + 1);
-        const std::string packName = dirName + ".tar.xz";
-
-        const bool started = startSendOnSession(packPath, packName, req.from, [packPath](const Outcome&) {
-            // 传完（成功、失败、取消）都删：留着的临时包
-            // 只会越积越多，而它已经没用了。
-            std::error_code ec;
-            std::filesystem::remove(packPath, ec);
-        });
-        if (!started) {
-            // 兜底：post 与发送之间的竞态（比如会话刚好断了）。
-            std::error_code ec;
-            std::filesystem::remove(packPath, ec);
-        }
-    }
-
-    // 常驻会话上问一次远端目录。会话继续活着（id 不变、接收不中断），
-    // 这与 Client::browsePeer 的一次性连接是两条路：后者给 CLI 用，前者
-    // 给 GUI——GUI 一旦新开连接就会顶掉常驻接收会话、把自己的 id 换掉。
-    bool startBrowseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome&)> done)
-    {
-        if (!canSendOnSession() || browseActive) {
-            return false;
-        }
-        browseActive = true;
-        onBrowseDone = std::move(done);
-        browsePeerId = std::move(peerId);
-        browseRelPath = std::move(relPath);
-
-        Frame f;
-        f.type = FrameType::kAskFileList;
-        f.to = browsePeerId;
-        f.body = core::session::encodeAskFileList(browseRelPath);
-
-        touch();
-        if (const auto st = session->send(f); !st.ok()) {
-            finishBrowse(false, "远端列举请求发送失败", st);
-            return false;
-        }
-
-        // 应答超时：与"对端没应答"同一时限语义，但独立计时——会话本身
-        // 还活着，不能靠会话级看门狗（那会连接收一起判死）。
-        browseTimer.expires_after(std::chrono::seconds(10));
-        browseTimer.async_wait([this](const std::error_code& ec) {
-            if (ec || !browseActive) {
+        // ControlLink 在本函数返回后**同步**把应答放进写队列，所以这里排的
+        // 任务一定排在应答之后——上面的顺序依赖这一点。
+        const std::string peerDataId = peerDataIds.at(req.from);
+        std::weak_ptr<char> token = alive;
+        asio::post(ctx, [this, token, sendPath, sendName, peerDataId, packPath] {
+            if (token.expired() || finished) {
                 return;
             }
-            finishBrowse(false, "对端没有响应（可能已离线）", Status::Fail(ErrorCode::kTimeout, "browse answer timeout"));
+            startSend(sendPath, sendName, peerDataId, [packPath](const Outcome&) {
+                // 传完（成功、失败、取消）都删：留着的临时包只会越积越多，
+                // 而它已经没用了。
+                if (packPath.empty()) {
+                    return;
+                }
+                std::error_code ec;
+                std::filesystem::remove(packPath, ec);
+            });
         });
-        return true;
-    }
-
-    // 一次会话内列举的结论。与 finishSend 对称：只回调这一次，不动 busy。
-    void finishBrowse(bool ok, std::string summary, Status status = Status{})
-    {
-        if (!browseActive) {
-            return;
-        }
-        browseActive = false;
-        browseDone = true;
-        browseTimer.cancel();
-        auto done = std::move(onBrowseDone);
-        onBrowseDone = nullptr;
-
-        Outcome o;
-        o.ok = ok;
-        o.summary = std::move(summary);
-        o.status = std::move(status);
-        o.remoteEntries = remoteEntries;
-        o.listStatus = listStatus;
-        o.rootListing = rootListing;
-        if (done) {
-            done(o);
-        }
-    }
-
-    // 会话上批量问路径元信息（PROTOCOL.md §11.11）。
-    bool startAskPathMetaOnSession(std::string peerId, std::vector<std::string> absPaths,
-                                   std::function<void(const Outcome&)> done)
-    {
-        if (!canSendOnSession() || metaActive || browseActive || pullActive) {
-            // 与列举、取回互斥：三者都靠"下一个应答就是我的"来配对，
-            // 同时挂两个就分不清应答是谁的。
-            return false;
-        }
-        if (absPaths.empty()) {
-            return false;
-        }
-        metaActive = true;
-        metaPaths = absPaths;
-        metaResults.clear();
-        onMetaDone = std::move(done);
-        metaPeerId = std::move(peerId);
-
-        Frame f;
-        f.type = FrameType::kAskPathMeta;
-        f.to = metaPeerId;
-        f.body = core::session::encodeAskPathMeta(metaPaths);
-        if (f.body.empty()) {
-            finishMeta(false, "要查的路径太多或为空，请分批",
-                       Status::Fail(ErrorCode::kInvalidPath, "path meta request is empty"));
-            return false;
-        }
-
-        touch();
-        if (const auto st = session->send(f); !st.ok()) {
-            finishMeta(false, "路径元信息请求发送失败", st);
-            return false;
-        }
-
-        // 10 秒与列举一致：对端要逐条 stat + 读 64KB 算指纹，正常几百条也在
-        // 毫秒级；超过这个时限基本就是掉线了。
-        metaTimer.expires_after(std::chrono::seconds(10));
-        metaTimer.async_wait([this](const std::error_code& ec) {
-            if (ec || !metaActive) {
-                return;
-            }
-            finishMeta(false, "对端没有响应（可能已离线）", Status::Fail(ErrorCode::kTimeout, "path meta answer timeout"));
-        });
-        return true;
-    }
-
-    void finishMeta(bool ok, std::string summary, Status status = Status{})
-    {
-        if (!metaActive) {
-            return;
-        }
-        metaActive = false;
-        metaTimer.cancel();
-        auto done = std::move(onMetaDone);
-        onMetaDone = nullptr;
-
-        Outcome o;
-        o.ok = ok;
-        o.summary = std::move(summary);
-        o.status = std::move(status);
-        if (ok) {
-            o.remoteMetas = metaResults;
-        }
-        if (done) {
-            done(o);
-        }
     }
 
     // ---------------------------------------------------------------------
     // 远端文件操作（PROTOCOL.md §11.12）
     // ---------------------------------------------------------------------
+
+    void serveFileOp(const Frame& req, Frame& answer)
+    {
+        switch (req.type) {
+        case FrameType::kAskSha256:
+            serveSha256(req, answer);
+            return;
+        case FrameType::kAskRename:
+            serveRename(req, answer);
+            return;
+        case FrameType::kAskCreateDir:
+            serveCreateDir(req, answer);
+            return;
+        case FrameType::kAskDelete:
+            serveDelete(req, answer);
+            return;
+        case FrameType::kAskUnarchive:
+            serveUnarchive(req, answer);
+            return;
+        default:
+            return;
+        }
+    }
+
+    void serveSha256(const Frame& req, Frame& answer)
+    {
+        using core::session::FileOpStatus;
+        FileOpStatus status = FileOpStatus::kOk;
+        std::vector<char> digest;
+        std::string path;
+        std::string err;
+
+        if (!core::session::decodeAskPath(req.body, path, err)) {
+            status = FileOpStatus::kRejected;
+        } else {
+            path = absoluteForPeer(std::move(path));
+            const auto st = store.stat(path);
+            if (!st.exists) {
+                status = FileOpStatus::kNotFound;
+            } else if (st.isDir) {
+                // 目录没有"内容的 SHA-256"。回 kRejected 而不是算一个空摘要
+                // ——后者会让界面显示一串看起来正常的哈希。
+                status = FileOpStatus::kRejected;
+            } else {
+                digest = sha256Of(path, err);
+                if (digest.empty()) {
+                    status = FileOpStatus::kDenied;
+                }
+            }
+        }
+
+        answer.type = FrameType::kAnswerSha256;
+        answer.body.clear();
+        (void)core::session::encodeAnswerSha256(status, digest, answer.body);
+    }
+
+    void serveRename(const Frame& req, Frame& answer)
+    {
+        using core::session::FileOpStatus;
+        FileOpStatus status = FileOpStatus::kOk;
+        std::string from;
+        std::string to;
+        std::string err;
+
+        if (!core::session::decodeAskRename(req.body, from, to, err)) {
+            status = FileOpStatus::kRejected;
+        } else {
+            from = absoluteForPeer(std::move(from));
+            to = absoluteForPeer(std::move(to));
+            const auto src = store.stat(from);
+            if (!src.exists) {
+                status = FileOpStatus::kNotFound;
+            } else if (store.stat(to).exists) {
+                // 不覆盖：改名撞上已有文件时覆盖等于"悄悄删掉别人的东西"，
+                // 而且不可恢复。让用户自己先改名或先删。
+                status = FileOpStatus::kExists;
+            } else if (!store.atomicReplace(from, to).ok()) {
+                status = FileOpStatus::kFailed;
+            }
+        }
+
+        answer.type = FrameType::kAnswerRename;
+        answer.body.clear();
+        (void)core::session::encodeAnswerFileOp(status, answer.body);
+    }
+
+    void serveCreateDir(const Frame& req, Frame& answer)
+    {
+        using core::session::FileOpStatus;
+        FileOpStatus status = FileOpStatus::kOk;
+        std::string path;
+        std::string err;
+
+        if (!core::session::decodeAskPath(req.body, path, err)) {
+            status = FileOpStatus::kRejected;
+        } else {
+            path = absoluteForPeer(std::move(path));
+            const auto st = store.stat(path);
+            if (st.exists) {
+                // 已经存在（目录或同名文件）：报 kExists 而不是"mkdirs 成功"。
+                // 两种情形给的下一步动作相同（换个名字），所以统一一个状态。
+                status = FileOpStatus::kExists;
+            } else if (!store.mkdirs(path).ok()) {
+                status = FileOpStatus::kFailed;
+            }
+        }
+
+        answer.type = FrameType::kAnswerCreateDir;
+        answer.body.clear();
+        (void)core::session::encodeAnswerFileOp(status, answer.body);
+    }
+
+    void serveDelete(const Frame& req, Frame& answer)
+    {
+        using core::session::FileOpStatus;
+        FileOpStatus status = FileOpStatus::kOk;
+        std::vector<std::string> paths;
+        std::vector<std::string> failed;
+        std::string err;
+
+        if (!core::session::decodeAskDelete(req.body, paths, err)) {
+            status = FileOpStatus::kRejected;
+        } else {
+            for (const auto& raw : paths) {
+                const auto p = absoluteForPeer(raw);
+                std::string why;
+                if (!removeRecursive(p, why)) {
+                    failed.push_back(p);
+                }
+            }
+            status = failed.empty() ? FileOpStatus::kOk : FileOpStatus::kDenied;
+        }
+
+        answer.type = FrameType::kAnswerDelete;
+        answer.body.clear();
+        (void)core::session::encodeAnswerDelete(status, failed, answer.body);
+    }
+
+    void serveUnarchive(const Frame& req, Frame& answer)
+    {
+        using core::session::FileOpStatus;
+        FileOpStatus status = FileOpStatus::kOk;
+        std::string dir;
+        std::string path;
+        std::string err;
+
+        if (!core::session::decodeAskPath(req.body, path, err)) {
+            status = FileOpStatus::kRejected;
+        } else {
+            path = absoluteForPeer(std::move(path));
+            const auto st = store.stat(path);
+            if (!st.exists || st.isDir) {
+                status = FileOpStatus::kNotFound;
+            } else {
+                // 与本地右键「解压缩」同一语义：解到 `<父目录>/<包名去后缀>/`，
+                // 成功后删包。intoSubdir=true：本操作解的是对端自己的包，
+                // 形状可能是"有顶层目录"也可能是"没有"，多套一层比散在父目录
+                // 安全（散开会把内容混进用户自己的文件里）。
+                dir = Client::unpackArchive(path, true);
+                if (dir.empty()) {
+                    status = FileOpStatus::kFailed;
+                } else {
+                    // 统一成 `/` 分隔：std::filesystem 在 Windows 上拼出来是
+                    // 反斜杠，界面直接显示会与其它远端路径不一致。
+                    dir = core::session::normalizePathText(dir);
+                }
+            }
+        }
+
+        answer.type = FrameType::kAnswerUnarchive;
+        answer.body.clear();
+        (void)core::session::encodeAnswerUnarchive(status, dir, answer.body);
+    }
 
     // 把对端发来的路径还原成本机可用的绝对路径。
     //
@@ -1400,832 +1369,694 @@ struct Client::Impl {
         return true;
     }
 
-    void sendFileOpAnswer(FrameType type, const std::string& to, const std::vector<char>& body)
+    // 递归收集要打包的条目。DirEntry.name 只有文件名，所以这里自己拼相对
+    // 路径——store.list 的 recursive 模式不返回层级信息。
+    //
+    // 返回 false 表示超限（文件数或字节数），由调用方转成"拒绝"。
+    bool collectItems(const std::string& absDir, const std::string& relPrefix, std::vector<filestore::ArchiveItem>& items,
+                      std::uint64_t& bytes) const
     {
-        Frame answer;
-        answer.type = type;
-        answer.to = to;
-        answer.body = body;
-        (void)session->send(answer);
-    }
-
-    void serveFileOp(const Frame& req)
-    {
-        switch (req.type) {
-        case FrameType::kAskSha256:
-            serveSha256(req);
-            return;
-        case FrameType::kAskRename:
-            serveRename(req);
-            return;
-        case FrameType::kAskCreateDir:
-            serveCreateDir(req);
-            return;
-        case FrameType::kAskDelete:
-            serveDelete(req);
-            return;
-        case FrameType::kAskUnarchive:
-            serveUnarchive(req);
-            return;
-        default:
-            return;
+        std::vector<filestore::DirEntry> entries;
+        if (!store.list(absDir, false, entries).ok()) {
+            return true;   // 某一层读不了就跳过它，不因此让整次打包失败
         }
-    }
+        for (const auto& e : entries) {
+            if (e.isDir) {
+                // 空目录也要进包：只收文件会让"解出来少了几个空目录"，
+                // 而空目录有时是有意义的（占位、目录结构约定）。
+                const std::string rel = relPrefix.empty() ? e.name : relPrefix + "/" + e.name;
+                filestore::ArchiveItem dirItem;
+                dirItem.sourcePath = absDir + "/" + e.name;
+                dirItem.entryName = rel + "/";
+                items.push_back(std::move(dirItem));
 
-    void serveSha256(const Frame& req)
-    {
-        using core::session::FileOpStatus;
-        FileOpStatus status = FileOpStatus::kOk;
-        std::vector<char> digest;
-        std::string path;
-        std::string err;
-
-        if (!core::session::decodeAskPath(req.body, path, err)) {
-            status = FileOpStatus::kRejected;
-        } else {
-            path = absoluteForPeer(std::move(path));
-            const auto st = store.stat(path);
-            if (!st.exists) {
-                status = FileOpStatus::kNotFound;
-            } else if (st.isDir) {
-                // 目录没有"内容的 SHA-256"。回 kRejected 而不是算一个空摘要
-                // ——后者会让界面显示一串看起来正常的哈希。
-                status = FileOpStatus::kRejected;
-            } else {
-                digest = sha256Of(path, err);
-                if (digest.empty()) {
-                    status = FileOpStatus::kDenied;
+                if (!collectItems(absDir + "/" + e.name, rel, items, bytes)) {
+                    return false;
                 }
+                continue;
             }
-        }
-
-        std::vector<char> body;
-        if (core::session::encodeAnswerSha256(status, digest, body).ok()) {
-            sendFileOpAnswer(FrameType::kAnswerSha256, req.from, body);
-        }
-    }
-
-    void serveRename(const Frame& req)
-    {
-        using core::session::FileOpStatus;
-        FileOpStatus status = FileOpStatus::kOk;
-        std::string from;
-        std::string to;
-        std::string err;
-
-        if (!core::session::decodeAskRename(req.body, from, to, err)) {
-            status = FileOpStatus::kRejected;
-        } else {
-            from = absoluteForPeer(std::move(from));
-            to = absoluteForPeer(std::move(to));
-            const auto src = store.stat(from);
-            if (!src.exists) {
-                status = FileOpStatus::kNotFound;
-            } else if (store.stat(to).exists) {
-                // 不覆盖：改名撞上已有文件时覆盖等于"悄悄删掉别人的东西"，
-                // 而且不可恢复。让用户自己先改名或先删。
-                status = FileOpStatus::kExists;
-            } else if (!store.atomicReplace(from, to).ok()) {
-                status = FileOpStatus::kFailed;
+            bytes += e.size;
+            if (items.size() >= kMaxPackFiles || bytes > kMaxPackBytes) {
+                return false;
             }
+            filestore::ArchiveItem item;
+            item.sourcePath = absDir + "/" + e.name;
+            item.entryName = relPrefix.empty() ? e.name : relPrefix + "/" + e.name;
+            items.push_back(std::move(item));
         }
-
-        std::vector<char> body;
-        if (core::session::encodeAnswerFileOp(status, body).ok()) {
-            sendFileOpAnswer(FrameType::kAnswerRename, req.from, body);
-        }
-    }
-
-    void serveCreateDir(const Frame& req)
-    {
-        using core::session::FileOpStatus;
-        FileOpStatus status = FileOpStatus::kOk;
-        std::string path;
-        std::string err;
-
-        if (!core::session::decodeAskPath(req.body, path, err)) {
-            status = FileOpStatus::kRejected;
-        } else {
-            path = absoluteForPeer(std::move(path));
-            const auto st = store.stat(path);
-            if (st.exists) {
-                // 已经存在（目录或同名文件）：报 kExists 而不是"mkdirs 成功"。
-                // 同名文件时 mkdirs 会失败，两种情形给的下一步动作相同
-                // （换个名字），所以统一一个状态。
-                status = FileOpStatus::kExists;
-            } else if (!store.mkdirs(path).ok()) {
-                status = FileOpStatus::kFailed;
-            }
-        }
-
-        std::vector<char> body;
-        if (core::session::encodeAnswerFileOp(status, body).ok()) {
-            sendFileOpAnswer(FrameType::kAnswerCreateDir, req.from, body);
-        }
-    }
-
-    void serveDelete(const Frame& req)
-    {
-        using core::session::FileOpStatus;
-        FileOpStatus status = FileOpStatus::kOk;
-        std::vector<std::string> paths;
-        std::vector<std::string> failed;
-        std::string err;
-
-        if (!core::session::decodeAskDelete(req.body, paths, err)) {
-            status = FileOpStatus::kRejected;
-        } else {
-            for (const auto& raw : paths) {
-                const auto p = absoluteForPeer(raw);
-                std::string why;
-                if (!removeRecursive(p, why)) {
-                    failed.push_back(p);
-                }
-            }
-            // 空请求解不出 paths（encode 侧已挡），走到这里 paths 必非空。
-            status = failed.empty() ? FileOpStatus::kOk : FileOpStatus::kDenied;
-        }
-
-        std::vector<char> body;
-        if (core::session::encodeAnswerDelete(status, failed, body).ok()) {
-            sendFileOpAnswer(FrameType::kAnswerDelete, req.from, body);
-        }
-    }
-
-    void serveUnarchive(const Frame& req)
-    {
-        using core::session::FileOpStatus;
-        FileOpStatus status = FileOpStatus::kOk;
-        std::string dir;
-        std::string path;
-        std::string err;
-
-        if (!core::session::decodeAskPath(req.body, path, err)) {
-            status = FileOpStatus::kRejected;
-        } else {
-            path = absoluteForPeer(std::move(path));
-            const auto st = store.stat(path);
-            if (!st.exists || st.isDir) {
-                status = FileOpStatus::kNotFound;
-            } else {
-                // 与本地右键「解压缩」同一语义：解到 `<父目录>/<包名去后缀>/`，
-                // 成功后删包。intoSubdir=true 是取回目录那种"包内无顶层目录"
-                // 的形状；本操作解的是对端自己的包，可能两种形状都有——
-                // 这里按"有顶层目录"处理（intoSubdir=false 会散在父目录，
-                // 风险更大），宁可多一层。
-                dir = Client::unpackArchive(path, true);
-                if (dir.empty()) {
-                    status = FileOpStatus::kFailed;
-                } else {
-                    // 统一成 `/` 分隔：std::filesystem 在 Windows 上拼出来是
-                    // 反斜杠，界面直接显示会与其它远端路径不一致。
-                    dir = core::session::normalizePathText(dir);
-                }
-            }
-        }
-
-        std::vector<char> body;
-        if (core::session::encodeAnswerUnarchive(status, dir, body).ok()) {
-            sendFileOpAnswer(FrameType::kAnswerUnarchive, req.from, body);
-        }
-    }
-
-    bool startFileOpOnSession(FileOpRequest req, std::function<void(const Outcome&)> done)
-    {
-        // GUI 走这条路：必须搭在常驻会话上，不新开连接（新连接会顶掉接收
-        // 会话、换掉本机 id）。
-        if (!canSendOnSession()) {
-            return false;
-        }
-        return startFileOp(std::move(req), std::move(done));
-    }
-
-    // 真正构造并发出请求。两个入口共用：GUI 的会话内操作（要求 canSendOnSession）、
-    // CLI 的一次性连接（已有会话，只是不需要"常驻"这个前提）。
-    bool startFileOp(FileOpRequest req, std::function<void(const Outcome&)> done)
-    {
-        // 四种"只等一次应答"的请求互斥：同时挂两个，应答回来就分不清是谁的。
-        if (opActive || browseActive || metaActive || pullActive) {
-            return false;
-        }
-
-        Frame f;
-        switch (req.kind) {
-        case FileOpKind::kSha256:
-            f.type = FrameType::kAskSha256;
-            f.body = core::session::encodeAskPath(req.path);
-            break;
-        case FileOpKind::kCreateDir:
-            f.type = FrameType::kAskCreateDir;
-            f.body = core::session::encodeAskPath(req.path);
-            break;
-        case FileOpKind::kUnarchive:
-            f.type = FrameType::kAskUnarchive;
-            f.body = core::session::encodeAskPath(req.path);
-            break;
-        case FileOpKind::kRename:
-            f.type = FrameType::kAskRename;
-            f.body = core::session::encodeAskRename(req.path, req.newPath);
-            break;
-        case FileOpKind::kDelete:
-            f.type = FrameType::kAskDelete;
-            f.body = core::session::encodeAskDelete(req.paths);
-            break;
-        }
-        if (f.body.empty()) {
-            return false;   // 参数不合法（空路径/超长/条数超限），调用方该先校验
-        }
-
-        opActive = true;
-        opKind = req.kind;
-        opStatus = core::session::FileOpStatus::kOk;
-        opFailedPaths.clear();
-        opSha256Hex.clear();
-        opExtractedDir.clear();
-        onOpDone = std::move(done);
-        f.to = req.peerId;
-
-        touch();
-        if (const auto st = session->send(f); !st.ok()) {
-            finishOp(false, "远端操作请求发送失败", st);
-            return false;
-        }
-
-        // 超时：解压要给足时间（对端在解一个大包，几十秒很正常），其余
-        // 与列举/元信息一致用 10 秒。
-        const auto limit = (req.kind == FileOpKind::kUnarchive) ? std::chrono::seconds(120) : std::chrono::seconds(10);
-        opTimer.expires_after(limit);
-        opTimer.async_wait([this](const std::error_code& ec) {
-            if (ec || !opActive) {
-                return;
-            }
-            finishOp(false, "对端没有响应（可能已离线）", Status::Fail(ErrorCode::kTimeout, "file op answer timeout"));
-        });
         return true;
     }
 
-    // 远端文件操作的应答。按 opKind 校验帧类型：四种请求互斥，但一个
-    // 乱序/过期的帧不该被当成本次的结论（比如超时之后才到的应答）。
-    void onFileOpAnswer(const Frame& f)
+    // 把目录打包到系统临时目录，返回包路径（失败返回空串）。
+    //
+    // **不能放进接收目录**：那会让对端在列举里看到这个临时包，也污染用户目录。
+    std::string packDirectory(const std::string& absDir, std::string& err)
+    {
+        std::vector<filestore::ArchiveItem> items;
+        std::uint64_t bytes = 0;
+        if (!collectItems(absDir, std::string(), items, bytes)) {
+            err = "目录过大（超过 " + std::to_string(kMaxPackFiles) + " 个文件或 256 MiB），请分批取回";
+            return std::string();
+        }
+        if (items.empty()) {
+            err = "目录是空的";
+            return std::string();
+        }
+
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        const auto path = std::filesystem::temp_directory_path() / ("relayer-pack-" + std::to_string(stamp) + ".tar.xz");
+
+        filestore::TarXzArchiver archiver(store);
+        filestore::ArchiveOptions options;
+        // 级别 1：传输场景里网络是瓶颈，压缩比多省的那点字节不值"多等 30 秒"
+        // （PROTOCOL.md §11.10.3）。
+        options.compressionLevel = 1;
+        std::vector<std::string> skipped;
+        const auto st = archiver.create(path.string(), items, options, skipped);
+        if (!st.ok()) {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);   // 半成品不能留下
+            err = "打包失败：" + st.message;
+            return std::string();
+        }
+        return path.string();
+    }
+
+    // ---------------------------------------------------------------------
+    // 请求侧
+    // ---------------------------------------------------------------------
+
+    void requestPeerList()
+    {
+        if (control == nullptr || !control->ready()) {
+            return;
+        }
+        std::weak_ptr<char> token = alive;
+        const bool asked =
+            control->ask(FrameType::kAskClientList, std::string(), {}, [this, token](const ControlLink::Answer& a) {
+                if (token.expired()) {
+                    return;
+                }
+                if (!a.ok) {
+                    finish(false, "取在线列表失败：" + a.status.message, a.status);
+                    return;
+                }
+                std::string err;
+                std::vector<core::session::PeerInfo> list;
+                if (!core::session::decodeClientList(a.body, list, err)) {
+                    finish(false, "在线列表解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+                    return;
+                }
+                peers = std::move(list);
+
+                if (action == Action::kList) {
+                    // list 操作的契约输出：拼文本、结束。
+                    std::string text = "在线对端 " + std::to_string(peers.size()) + " 个：";
+                    for (const auto& p : peers) {
+                        text += "\n  " + p.id + "  " + p.address;
+                    }
+                    finish(true, std::move(text));
+                    return;
+                }
+
+                // 常驻会话上的刷新（refreshPeers）：报结构化列表
+                // 就走，**不结束操作**——这条连接还要继续收文件。
+                if (config.onPeerList) {
+                    std::vector<PeerEntry> entries;
+                    entries.reserve(peers.size());
+                    for (const auto& p : peers) {
+                        entries.push_back(PeerEntry{p.id, p.address});
+                    }
+                    config.onPeerList(entries);
+                }
+            });
+        if (!asked) {
+            finish(false, "在线列表请求没发出去（控制连接不可用）",
+                   Status::Fail(ErrorCode::kCancelled, "control link not ready"));
+        }
+    }
+
+    void requestFileList()
+    {
+        if (control == nullptr || !control->ready()) {
+            finish(false, "控制连接不可用", Status::Fail(ErrorCode::kCancelled, "control link not ready"));
+            return;
+        }
+        std::weak_ptr<char> token = alive;
+        const bool asked =
+            control->ask(FrameType::kAskFileList, browsePeerId, core::session::encodeAskFileList(browseRelPath),
+                         [this, token](const ControlLink::Answer& a) {
+                             if (token.expired()) {
+                                 return;
+                             }
+                             if (!a.ok) {
+                                 finish(false, "对端没有响应（可能已离线）", a.status);
+                                 return;
+                             }
+                             core::session::FileListStatus status = core::session::FileListStatus::kOk;
+                             std::vector<core::session::RemoteEntry> entries;
+                             bool roots = false;
+                             std::string err;
+                             if (!core::session::decodeAnswerFileList(a.body, status, roots, entries, err)) {
+                                 finish(false, "远端列表解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+                                 return;
+                             }
+                             listStatus = status;
+                             rootListing = roots;
+                             remoteEntries = std::move(entries);
+
+                             switch (status) {
+                             case core::session::FileListStatus::kOk:
+                                 finish(true, "远端列表 " + std::to_string(remoteEntries.size()) + " 项");
+                                 return;
+                             case core::session::FileListStatus::kTruncated:
+                                 finish(true, "远端列表已截断（只返回前 " + std::to_string(remoteEntries.size()) + " 项）");
+                                 return;
+                             case core::session::FileListStatus::kNotFound:
+                                 finish(false, "对端没有这个目录", Status::Fail(ErrorCode::kNotFound, "remote path not found"));
+                                 return;
+                             case core::session::FileListStatus::kRejected:
+                             default:
+                                 finish(false, "对端拒绝列举（未开启共享，或路径越界）",
+                                        Status::Fail(ErrorCode::kPermissionDenied, "remote list rejected"));
+                                 return;
+                             }
+                         });
+        if (!asked) {
+            finish(false, "远端列举请求没发出去", Status::Fail(ErrorCode::kCancelled, "control link not ready"));
+        }
+    }
+
+    // `op` 子命令：一条连接只做一件事，拿到应答就结束。
+    void runFileOpOnce()
+    {
+        const bool started = startFileOp(config.fileOp, [this](const Outcome& o) { finish(o.ok, o.summary, o.status); });
+        if (!started) {
+            finish(false, "远端操作请求不合法（路径为空、条数超限）",
+                   Status::Fail(ErrorCode::kProtocol, "file op request rejected"));
+        }
+    }
+
+    // 发一次远端文件操作。**不再与其他请求互斥**——上一版靠"下一个应答
+    // 就是我的"配对，所以列举/元信息/取回/操作四者只能挂一个；请求号配对
+    // 之后这条限制不存在了。
+    bool startFileOp(FileOpRequest req, std::function<void(const Outcome&)> done)
+    {
+        if (control == nullptr || !control->ready()) {
+            return false;
+        }
+
+        FrameType askType = FrameType::kAskSha256;
+        std::vector<char> body;
+        switch (req.kind) {
+        case FileOpKind::kSha256:
+            askType = FrameType::kAskSha256;
+            body = core::session::encodeAskPath(req.path);
+            break;
+        case FileOpKind::kCreateDir:
+            askType = FrameType::kAskCreateDir;
+            body = core::session::encodeAskPath(req.path);
+            break;
+        case FileOpKind::kUnarchive:
+            askType = FrameType::kAskUnarchive;
+            body = core::session::encodeAskPath(req.path);
+            break;
+        case FileOpKind::kRename:
+            askType = FrameType::kAskRename;
+            body = core::session::encodeAskRename(req.path, req.newPath);
+            break;
+        case FileOpKind::kDelete:
+            askType = FrameType::kAskDelete;
+            body = core::session::encodeAskDelete(req.paths);
+            break;
+        }
+        if (body.empty()) {
+            return false;   // 参数不合法（空路径/超长/条数超限）
+        }
+
+        opKind = req.kind;
+        opSha256Hex.clear();
+        opExtractedDir.clear();
+        opFailedPaths.clear();
+
+        // 解压要给足时间（对端在解一个大包，几十秒很正常），其余用默认 10 秒。
+        const auto timeout = (req.kind == FileOpKind::kUnarchive) ? kSlowAskTimeout : std::chrono::seconds(0);
+
+        std::weak_ptr<char> token = alive;
+        // opKind / 结果字段是**共享成员**：两个远端操作同时在飞时会互相覆盖。
+        // 所以把这一次的 kind 与结果都按值捕获，不依赖成员。
+        const FileOpKind kind = req.kind;
+        return control->ask(
+            askType, req.peerId, std::move(body),
+            [this, token, kind, done = std::move(done)](const ControlLink::Answer& a) {
+                if (token.expired()) {
+                    return;
+                }
+                Outcome o;
+                if (!a.ok) {
+                    o.ok = false;
+                    o.summary = "对端没有响应（可能已离线）";
+                    o.status = a.status;
+                    done(o);
+                    return;
+                }
+                parseFileOpAnswer(kind, a.body, o);
+                done(o);
+            },
+            timeout);
+    }
+
+    void parseFileOpAnswer(FileOpKind kind, const std::vector<char>& body, Outcome& o)
     {
         using core::session::FileOpStatus;
         std::string err;
 
-        if (opKind == FileOpKind::kSha256) {
+        if (kind == FileOpKind::kSha256) {
             FileOpStatus status = FileOpStatus::kFailed;
             std::vector<char> digest;
-            if (!core::session::decodeAnswerSha256(f.body, status, digest, err)) {
-                finishOp(false, "SHA-256 应答解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+            if (!core::session::decodeAnswerSha256(body, status, digest, err)) {
+                o.summary = "SHA-256 应答解码失败：" + err;
+                o.status = Status::Fail(ErrorCode::kProtocol, err);
                 return;
             }
-            if (status == FileOpStatus::kOk) {
+            if (status == FileOpStatus::kOk && digest.size() == 32) {
                 crypto::Sha256::Digest d{};
-                for (std::size_t i = 0; i < d.size() && i < digest.size(); ++i) {
+                for (std::size_t i = 0; i < d.size(); ++i) {
                     d[i] = static_cast<std::uint8_t>(digest[i]);
                 }
                 opSha256Hex = crypto::Sha256::hex(d);
             }
-            finishOpWithStatus(status, "SHA-256");
+            fillOpOutcome(status, "SHA-256", o);
             return;
         }
 
-        if (opKind == FileOpKind::kDelete) {
+        if (kind == FileOpKind::kDelete) {
             FileOpStatus status = FileOpStatus::kFailed;
             std::vector<std::string> failed;
-            if (!core::session::decodeAnswerDelete(f.body, status, failed, err)) {
-                finishOp(false, "删除应答解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+            if (!core::session::decodeAnswerDelete(body, status, failed, err)) {
+                o.summary = "删除应答解码失败：" + err;
+                o.status = Status::Fail(ErrorCode::kProtocol, err);
                 return;
             }
             opFailedPaths = std::move(failed);
             if (status == FileOpStatus::kOk) {
-                finishOp(true, "删除完成");
-            } else {
-                // 部分失败是常态（目录里有个文件被别人占着）。结论里带上
-                // 条数，界面再逐条列出来——"删失败了"这种话没法行动。
-                finishOp(false, "有 " + std::to_string(opFailedPaths.size()) + " 项没删掉",
-                         Status::Fail(ErrorCode::kIoError, "delete partially failed"));
+                o.ok = true;
+                o.summary = "删除完成";
+                return;
             }
+            // 部分失败是常态（目录里有个文件被别人占着）。结论里带上条数，
+            // 界面再逐条列出来——"删失败了"这种话没法行动。
+            o.ok = false;
+            o.summary = "有 " + std::to_string(opFailedPaths.size()) + " 项没删掉";
+            o.status = Status::Fail(ErrorCode::kIoError, "delete partially failed");
+            o.failedPaths = opFailedPaths;
             return;
         }
 
-        if (opKind == FileOpKind::kUnarchive) {
+        if (kind == FileOpKind::kUnarchive) {
             FileOpStatus status = FileOpStatus::kFailed;
             std::string dir;
-            if (!core::session::decodeAnswerUnarchive(f.body, status, dir, err)) {
-                finishOp(false, "解压应答解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+            if (!core::session::decodeAnswerUnarchive(body, status, dir, err)) {
+                o.summary = "解压应答解码失败：" + err;
+                o.status = Status::Fail(ErrorCode::kProtocol, err);
                 return;
             }
             opExtractedDir = std::move(dir);
-            finishOpWithStatus(status, "解压缩");
+            fillOpOutcome(status, "解压缩", o);
             return;
         }
 
         // 重命名 / 新建目录：只带状态。
         FileOpStatus status = FileOpStatus::kFailed;
-        if (!core::session::decodeAnswerFileOp(f.body, status, err)) {
-            finishOp(false, "应答解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+        if (!core::session::decodeAnswerFileOp(body, status, err)) {
+            o.summary = "应答解码失败：" + err;
+            o.status = Status::Fail(ErrorCode::kProtocol, err);
             return;
         }
-        finishOpWithStatus(status, opKind == FileOpKind::kRename ? "重命名" : "新建文件夹");
+        fillOpOutcome(status, kind == FileOpKind::kRename ? "重命名" : "新建文件夹", o);
     }
 
-    void finishOp(bool ok, std::string summary, Status status = Status{})
+    void fillOpOutcome(core::session::FileOpStatus status, const std::string& what, Outcome& o)
     {
-        if (!opActive) {
-            return;
-        }
-        opActive = false;
-        opTimer.cancel();
-        auto done = std::move(onOpDone);
-        onOpDone = nullptr;
-
-        Outcome o;
+        const bool ok = (status == core::session::FileOpStatus::kOk);
         o.ok = ok;
-        o.summary = std::move(summary);
-        o.status = std::move(status);
+        o.summary = what + "：" + core::session::fileOpStatusText(status);
+        if (!ok) {
+            o.status = Status::Fail(ErrorCode::kIoError, core::session::fileOpStatusText(status));
+        }
         o.sha256Hex = opSha256Hex;
         o.extractedDir = opExtractedDir;
         o.failedPaths = opFailedPaths;
-        if (done) {
-            done(o);
-        }
     }
 
-    // 只带状态的应答的收尾（改名 / 新建目录）。
-    void finishOpWithStatus(core::session::FileOpStatus status, std::string what)
+    // ---------------------------------------------------------------------
+    // 发送
+    // ---------------------------------------------------------------------
+
+    void startSend(const std::string& source, const std::string& remoteName, const std::string& peerDataId,
+                   std::function<void(const Outcome&)> done = {})
     {
-        const bool ok = (status == core::session::FileOpStatus::kOk);
-        std::string summary = what + "：" + core::session::fileOpStatusText(status);
-        Status st;
-        if (!ok) {
-            st = Status::Fail(ErrorCode::kIoError, core::session::fileOpStatusText(status));
-        }
-        finishOp(ok, std::move(summary), std::move(st));
-    }
-
-    bool startSendOnSession(std::string source, std::string remoteName, std::string targetPeerId,
-                            std::function<void(const Outcome&)> done)
-    {
-        if (!canSendOnSession() || sendActive) {
-            return false;
-        }
-        sendActive = true;
-        onSendDone = std::move(done);
-        sendSourcePath = std::move(source);
-        sendRemoteName = remoteName.empty() ? fileNameOf(sendSourcePath) : std::move(remoteName);
-        sendToPeerId = std::move(targetPeerId);
-
-        auto cfg = peerConfig();
-        const auto sid =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-
-        auto created = core::transfer::TransferPeer::createSender(
-            ctx, session, store, pool, sendSourcePath, sendRemoteName, sendToPeerId, sid, std::move(cfg),
-            [this](const core::transfer::TransferResult& r) { onSendResult(r); });
-        sendPeer = std::move(created);
-
-        // 源文件打不开时 createSender 会同步回调 onSendResult（sendActive
-        // 已被清、结论已上报），这里的 touch 无害。
-        touch();
-        return true;
-    }
-
-    // 一次"会话内发送"的结论。**不是**整条会话的结论：会话继续活着。
-    void finishSend(bool ok, std::string summary, Status status = Status{}, bool connectionLost = false)
-    {
-        if (!sendActive) {
-            return;
-        }
-        sendActive = false;
-
-        Outcome o;
-        o.ok = ok;
-        o.summary = std::move(summary);
-        o.status = std::move(status);
-        o.connectionLost = connectionLost;
-        if (sendPeer) {
-            const auto s = sendPeer->stats();
-            o.stats.chunksSent = s.chunksSent;
-            o.stats.chunksReceived = s.chunksReceived;
-            o.stats.chunksRetransmitted = s.chunksRetransmitted;
-            o.stats.duplicateChunks = s.duplicateChunks;
-            o.stats.acksSent = s.acksSent;
-            o.stats.acksReceived = s.acksReceived;
-        }
-
-        auto cb = std::move(onSendDone);
-        onSendDone = nullptr;
-        // 不在 TransferPeer 的完成回调栈上释放它（use-after-free 老坑），
-        // 交给下一轮事件循环。
-        asio::post(ctx, [this] {
-            if (!sendActive) {
-                sendPeer.reset();
+        if (finished || data == nullptr || !data->ready()) {
+            if (done) {
+                Outcome o;
+                o.ok = false;
+                o.summary = "数据连接不可用";
+                o.status = Status::Fail(ErrorCode::kIoError, "data link not ready");
+                done(o);
             }
-        });
-        if (cb) {
-            cb(o);
+            return;
+        }
+
+        // 落点名由这里定，不能交给下层：remoteName 为空表示"用源文件名"，
+        // 而 TransferPeer 在那种情况下会拿**完整源路径**当落点名，对端的
+        // resolveWithin 直接判越界（或落成 `<接收目录>/D:/...` 这种怪路径）。
+        const std::string name = remoteName.empty() ? fileNameOf(source) : remoteName;
+
+        const auto jobId = data->sendFile(source, name, peerDataId);
+        if (jobId == 0) {
+            if (done) {
+                Outcome o;
+                o.ok = false;
+                o.summary = "发送失败：源文件打不开，或同一文件已在发送中";
+                o.status = Status::Fail(ErrorCode::kIoError, "sendFile rejected");
+                done(o);
+            }
+            return;
+        }
+        if (done) {
+            sends[jobId] = std::move(done);
         }
     }
 
-    void onSendResult(const core::transfer::TransferResult& r)
+    // 一路传输的结论。发送与接收共用这个入口（job 的 sending 标志区分）。
+    void onJobFinished(const TransferLink::JobInfo& job, const transfer::TransferResult& r)
     {
-        switch (r.outcome) {
-        case core::transfer::TransferOutcome::kCompleted:
-            finishSend(true, "发送完成");
-            return;
+        // 这一路结束了。之后可能是"等下一个文件"（常驻接收），那段沉默
+        // 不该被空闲看门狗当成故障。
+        transferStarted = false;
 
-        case core::transfer::TransferOutcome::kPeerCancelled:
-            finishSend(false, "对端取消了传输", r.status);
-            return;
+        // 计数必须在这里取：job 一旦从 TransferLink 里摘掉就读不到了。
+        // 它们进不了 Outcome 太可惜——诊断丢包（重传了几块）全靠这几个数。
+        lastStats.chunksSent = job.chunksSent;
+        lastStats.chunksReceived = job.chunksReceived;
+        lastStats.chunksRetransmitted = job.chunksRetransmitted;
+        lastStats.duplicateChunks = job.duplicateChunks;
+        lastStats.acksSent = job.acksSent;
+        lastStats.acksReceived = job.acksReceived;
+        if (job.sending) {
+            std::function<void(const Outcome&)> done;
+            if (const auto it = sends.find(job.id); it != sends.end()) {
+                done = std::move(it->second);
+                sends.erase(it);
+            }
+            Outcome o;
+            o.ok = (r.outcome == transfer::TransferOutcome::kCompleted);
+            switch (r.outcome) {
+            case transfer::TransferOutcome::kCompleted:
+                o.summary = "发送完成";
+                break;
+            case transfer::TransferOutcome::kPeerCancelled:
+                o.summary = "对端取消了传输";
+                o.status = r.status;
+                break;
+            case transfer::TransferOutcome::kLocalCancelled:
+                o.summary = "已取消";
+                o.status = r.status;
+                break;
+            case transfer::TransferOutcome::kPeerGone:
+                o.summary = "对端已断开（传输未完成）";
+                o.status = r.status;
+                o.connectionLost = true;
+                break;
+            case transfer::TransferOutcome::kFailed:
+            default:
+                o.summary = "传输失败：" + r.status.message;
+                o.status = r.status;
+                break;
+            }
 
-        case core::transfer::TransferOutcome::kLocalCancelled:
-            finishSend(false, "已取消", r.status);
-            return;
-
-        case core::transfer::TransferOutcome::kPeerGone:
-            // 发送方看到"对端长时间没动静/连接断了"：这条会话还能不能继续
-            // 收文件由 Session 自己判（真正断开时 onClosed 会结束整个 Client），
-            // 这里只把结论上报，让上层决定要不要中止批次。
-            finishSend(false, "对端已断开（传输未完成）", r.status, true);
-            return;
-
-        case core::transfer::TransferOutcome::kFailed:
-        default:
-            finishSend(false, "传输失败：" + r.status.message, r.status);
+            if (done) {
+                done(o);
+                return;
+            }
+            // 没有等待者（对端来要文件时的推包）：CLI 的 send 动作要收尾，
+            // 常驻接收会话则继续。
+            if (action == Action::kSend && !finished) {
+                finish(o.ok, o.summary, o.status, o.connectionLost);
+            }
             return;
         }
+
+        onReceivedFile(r);
     }
 
-    void cancelSendNow()
+    void onReceivedFile(const transfer::TransferResult& r)
     {
-        if (!sendActive || !sendPeer || sendPeer->finished()) {
-            return;
-        }
-        // cancel 会同步走 onSendResult → finishSend（kLocalCancelled），
-        // 会话本身不动。
-        sendPeer->cancel("cancelled by user");
-    }
-
-    // 原地重建 receiver（仅当当前 peer 已经结束）。两个触发点共用：
-    //   - onTransferDone 里的 post：完成/失败后的常规重建；
-    //   - dispatch 里请求帧先到时的同步重建。
-    // 后者先发生时，前者**不能**再建第二个把正等数据的 receiver 顶掉
-    // （顶掉的后果是发送方发块没人收，等满 answerTimeout 才报错）。
-    void rebuildReceiver()
-    {
-        if (finished) {
-            return;
-        }
-        if (peer && !peer->finished()) {
-            return;
-        }
-        startReceiving();
-    }
-
-    void onTransferDone(const core::transfer::TransferResult& r)
-    {
-        if (finished) {
-            return;
-        }
-
-        switch (r.outcome) {
-        case core::transfer::TransferOutcome::kCompleted: {
-            // 最终进度报一次满的。否则最后一行停在"99%"，用户会怀疑
-            // 是不是没走完——虽然 onDone 已经说了成功。
-            if (onProgress && peer) {
-                const auto p = peer->progress();
+        if (r.outcome == transfer::TransferOutcome::kCompleted) {
+            // 最终进度报一次满的。否则最后一行停在"99%"，用户会怀疑是不是
+            // 没走完——虽然结论已经说了成功。
+            if (onProgress) {
                 ProgressReport rep;
-                rep.bytesDone = p.bytesTotal == 0 ? p.bytesDone : p.bytesTotal;
-                rep.bytesTotal = p.bytesTotal;
+                rep.bytesDone = lastBytes;
+                rep.bytesTotal = lastBytes;
                 rep.bytesPerSecond = lastSpeed;
                 onProgress(rep);
             }
 
-            if (action == Action::kReceive) {
-                if (config.keepReceiving) {
-                    // 常驻接收：**不 finish**。报完成回调后原地重建
-                    // receiver，继续在同一条连接上等下一个请求——服务端
-                    // 分配的 id 因此保持不变（见 ClientConfig::keepReceiving
-                    // 的注释，这是"发送方表格里的对端 id 不过期"的关键）。
-                    // 重建走 post：此刻在 TransferPeer 的完成回调栈上，
-                    // 直接替换 peer 成员是回调栈析构的老坑。
-                    // 自动解包（--unpack / 目录取回）：解成功就报目录，
-                    // 失败则照常报包——两种情况用户都能看到明确的落点。
-                    std::string reported = r.targetPath;
-                    if (config.unpackArchives) {
-                        const auto dir = unpackArchive(r.targetPath);
-                        if (!dir.empty()) {
-                            reported = dir;
-                        }
-                    }
-                    if (config.onFileReceived) {
-                        config.onFileReceived(reported);
-                    }
-                    asio::post(ctx, [this] { rebuildReceiver(); });
-                    return;
+            std::string reported = r.targetPath;
+            if (config.unpackArchives) {
+                const auto dir = unpackArchive(r.targetPath);
+                if (!dir.empty()) {
+                    reported = dir;
                 }
-                {
-                    std::string reported = r.targetPath;
-                    if (config.unpackArchives) {
-                        const auto dir = unpackArchive(r.targetPath);
-                        if (!dir.empty()) {
-                            reported = dir;
-                        }
-                    }
-                    finish(true, "接收完成：" + reported);
+            }
+
+            if (config.keepReceiving) {
+                // 常驻接收：**不结束**。报完成回调后继续等下一个请求——
+                // 服务端分配的 id 因此保持不变（见 ClientConfig::keepReceiving）。
+                if (config.onFileReceived) {
+                    config.onFileReceived(reported);
                 }
                 return;
-            } else {
-                finish(true, "发送完成");
             }
+            finish(true, "接收完成：" + reported);
             return;
         }
 
-        case core::transfer::TransferOutcome::kPeerCancelled:
-            if (action == Action::kReceive && config.keepReceiving) {
-                // 对端中途取消：连接还活着，同 kFailed 的理由原地重建
-                // （见下面 kFailed 分支的注释），否则一次取消就会让本端
-                // 换 id，发送方下次就找不到我们了。
+        switch (r.outcome) {
+        case transfer::TransferOutcome::kPeerCancelled:
+        case transfer::TransferOutcome::kFailed:
+            if (config.keepReceiving) {
+                // 常驻接收下的**局部失败**：这一次没收到，但到中继的连接还
+                // 活着（目标已存在、写盘失败、根校验不过、对端中途取消）。
+                // 不能 finish——finish 意味着断开重连，本机 id 会变，发送方
+                // 表格里的 id 立刻过期。正确动作：报失败，继续等下一个。
                 if (config.onReceiveFailed) {
-                    config.onReceiveFailed("对端取消了传输：" + r.status.message);
+                    config.onReceiveFailed(r.outcome == transfer::TransferOutcome::kPeerCancelled
+                                               ? "对端取消了传输：" + r.status.message
+                                               : "传输失败：" + r.status.message);
                 }
-                asio::post(ctx, [this] { rebuildReceiver(); });
                 return;
             }
-            finish(false, "对端取消了传输", r.status);
+            finish(false,
+                   r.outcome == transfer::TransferOutcome::kPeerCancelled ? "对端取消了传输" : "传输失败：" + r.status.message,
+                   r.status);
             return;
 
-        case core::transfer::TransferOutcome::kLocalCancelled:
+        case transfer::TransferOutcome::kLocalCancelled:
             finish(false, "已取消", r.status);
             return;
 
-        case core::transfer::TransferOutcome::kPeerGone:
-            // 这是 kill 测试里**必然**走到的分支：发送端进程消失，
-            // 接收端在 idleTimeout 后得到这个结论。目标文件是否完好
-            // 由测试断言，这里的措辞不该暗示"文件坏了"。
+        case transfer::TransferOutcome::kPeerGone:
+            // kill 测试里必然走到的分支：发送端进程消失，接收端在空闲超时后
+            // 得到这个结论。目标文件是否完好由调用方断言，这里的措辞不该
+            // 暗示"文件坏了"。
             finish(false, "对端已断开（传输未完成）", r.status, true);
             return;
 
-        case core::transfer::TransferOutcome::kFailed:
         default:
-            if (action == Action::kReceive && config.keepReceiving) {
-                // 常驻接收下的**局部失败**：这一次没收到，但到中继的连接
-                // 还活着（目标已存在、写盘失败、根校验不过、对端中途取消）。
-                // 此时不能 finish——finish 意味着断开重连，服务端会分配
-                // 新 id，发送方表格里的对端 id 立刻过期（实测：一次失败
-                // 重试 id 就从 client-17 漂到 client-23）。正确动作与收完
-                // 一个文件一样：报失败、原地重建 receiver 继续等。
-                //
-                // 连接已死（kPeerGone）和本端主动取消（kLocalCancelled，
-                // GUI 抢占/关窗走的 abort）不在这里——前者重建也没用，
-                // 后者重建会顶掉用户的取消意图，两者都走 finish。
-                if (config.onReceiveFailed) {
-                    config.onReceiveFailed("传输失败：" + r.status.message);
-                }
-                asio::post(ctx, [this] { rebuildReceiver(); });
-                return;
-            }
             finish(false, "传输失败：" + r.status.message, r.status);
             return;
         }
     }
 
     // ---------------------------------------------------------------------
-    // 帧分派
+    // 进度
     // ---------------------------------------------------------------------
 
-    void dispatch(const Frame& f)
+    void reportProgress(const TransferLink::JobInfo& job)
     {
-        // 对端的目录列举请求：**任何操作模式下都要应答**——"我正在收文件"
-        // 不妨碍回答一次列举。放在最前面，避免被 send/recv peer 的认领
-        // 逻辑漏掉（它们只认自己 sessionId 的帧）。
-        if (f.type == FrameType::kAskFileList) {
-            serveFileList(f);
+        if (!onProgress) {
             return;
         }
-
-        // 对端要文件：与列举一样，**任何操作模式下都要应答**——"我正在收
-        // 文件"不妨碍把共享目录里的东西给对方，前提是当前没有发送在跑
-        // （servePullRequest 里判）。
-        if (f.type == FrameType::kAskFilePull) {
-            servePullRequest(f);
-            return;
+        const auto now = std::chrono::steady_clock::now();
+        const auto dt = std::chrono::duration<double>(now - lastReportAt).count();
+        if (dt > 0.0 && job.bytesDone >= lastBytes) {
+            lastSpeed = static_cast<double>(job.bytesDone - lastBytes) / dt;
+        }
+        lastBytes = job.bytesDone;
+        lastReportAt = now;
+        if (job.bytesTotal > 0 || job.bytesDone > 0) {
+            // 传输真的开始了：从现在起"没有进展"就是故障，不再豁免。
+            transferStarted = true;
         }
 
-        // 目录取回：打包 + 推包，应答同样是 kAnswerFilePull。
-        if (f.type == FrameType::kAskArchivePull) {
-            serveArchivePullRequest(f);
-            return;
-        }
-
-        // 批量路径元信息：同列举，任何模式下都要答。用途是对方的发送前
-        // 检查（"我这边已经有这个文件了"），与谁正在传文件无关。
-        if (f.type == FrameType::kAskPathMeta) {
-            servePathMeta(f);
-            return;
-        }
-
-        // 远端文件操作（§11.12）：删除 / 改名 / 新建目录 / SHA-256 / 解压。
-        // 与列举一样，**任何操作模式下都要应答**——"我正在收文件"不妨碍
-        // 回答"这个文件多大"或"把那个目录删掉"。
-        if (f.type == FrameType::kAskSha256 || f.type == FrameType::kAskRename || f.type == FrameType::kAskCreateDir ||
-            f.type == FrameType::kAskDelete || f.type == FrameType::kAskUnarchive) {
-            serveFileOp(f);
-            return;
-        }
-
-        if (f.type == FrameType::kAnswerFilePull && pullActive) {
-            core::session::FilePullStatus status = core::session::FilePullStatus::kRejected;
-            std::string err;
-            if (!core::session::decodeAnswerFilePull(f.body, status, err)) {
-                finishPull(false, "取回应答解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
-                return;
-            }
-            switch (status) {
-            case core::session::FilePullStatus::kAccepted:
-                // 只是"对方接受了"。文件随后由常驻接收会话收下，那一步的
-                // 结论走正常接收路径（finish / onFileReceived），不在这里报。
-                finishPull(true, "对端已开始发送");
-                return;
-            case core::session::FilePullStatus::kNotFound:
-                finishPull(false, pullIsArchive ? "对端没有这个目录（或它不是目录）" : "对端没有这个文件（或它是目录）",
-                           Status::Fail(ErrorCode::kNotFound, "remote path not found"));
-                return;
-            case core::session::FilePullStatus::kRejected:
-            default:
-                finishPull(false, "对端拒绝取回（未开启共享、路径越界或正忙）",
-                           Status::Fail(ErrorCode::kPermissionDenied, "remote pull rejected"));
-                return;
-            }
-        }
-
-        if (f.type == FrameType::kAnswerPathMeta && metaActive) {
-            std::vector<core::session::RemoteMeta> metas;
-            std::string err;
-            if (!core::session::decodeAnswerPathMeta(f.body, metas, err)) {
-                finishMeta(false, "路径元信息解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
-                return;
-            }
-            // 条数必须与请求一致：按下标对回路径，条数不对就是整体错位，
-            // 错位的覆盖提示会让用户点到别的文件上去。
-            if (metas.size() != metaPaths.size()) {
-                finishMeta(false, "对端返回的条数与请求不一致", Status::Fail(ErrorCode::kProtocol, "path meta count mismatch"));
-                return;
-            }
-            metaResults = std::move(metas);
-            finishMeta(true, "路径元信息 " + std::to_string(metaResults.size()) + " 项");
-            return;
-        }
-
-        // 远端文件操作的应答（§11.12）。帧类型要与在飞的那次操作匹配：
-        // 超时之后才到的迟到应答不该被当成本次的结论。
-        if (opActive && ((f.type == FrameType::kAnswerSha256 && opKind == FileOpKind::kSha256) ||
-                         (f.type == FrameType::kAnswerRename && opKind == FileOpKind::kRename) ||
-                         (f.type == FrameType::kAnswerCreateDir && opKind == FileOpKind::kCreateDir) ||
-                         (f.type == FrameType::kAnswerDelete && opKind == FileOpKind::kDelete) ||
-                         (f.type == FrameType::kAnswerUnarchive && opKind == FileOpKind::kUnarchive))) {
-            onFileOpAnswer(f);
-            return;
-        }
-
-        if (f.type == FrameType::kAnswerFileList && (action == Action::kBrowse || browseActive)) {
-            core::session::FileListStatus status = core::session::FileListStatus::kOk;
-            std::vector<core::session::RemoteEntry> entries;
-            bool roots = false;
-            std::string err;
-            if (!core::session::decodeAnswerFileList(f.body, status, roots, entries, err)) {
-                finish(false, "远端列表解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
-                return;
-            }
-            listStatus = status;
-            rootListing = roots;
-            remoteEntries = std::move(entries);
-
-            if (action != Action::kBrowse) {
-                // 常驻会话上的列举：只回调这一次，会话继续。
-                const bool ok =
-                    (status == core::session::FileListStatus::kOk || status == core::session::FileListStatus::kTruncated);
-                const std::string summary =
-                    ok ? ("远端列表 " + std::to_string(remoteEntries.size()) + " 项")
-                       : (status == core::session::FileListStatus::kNotFound ? "对端没有这个目录"
-                                                                             : "对端拒绝列举（未开启共享，或路径越界）");
-                finishBrowse(ok, summary, ok ? Status{} : Status::Fail(ErrorCode::kNotFound, "remote list failed"));
-                return;
-            }
-
-            switch (status) {
-            case core::session::FileListStatus::kOk:
-                finish(true, "远端列表 " + std::to_string(remoteEntries.size()) + " 项");
-                return;
-            case core::session::FileListStatus::kTruncated:
-                finish(true, "远端列表已截断（只返回前 " + std::to_string(remoteEntries.size()) + " 项）");
-                return;
-            case core::session::FileListStatus::kNotFound:
-                finish(false, "对端没有这个目录", Status::Fail(ErrorCode::kNotFound, "remote path not found"));
-                return;
-            case core::session::FileListStatus::kRejected:
-            default:
-                finish(false, "对端拒绝列举（未开启共享，或路径越界）",
-                       Status::Fail(ErrorCode::kPermissionDenied, "remote list rejected"));
-                return;
-            }
-        }
-        // 常驻接收的重建窗口：上一次接收刚结束（成功或失败），post 的
-        // 重建还排在事件队列里，而发送方的下一个请求已经到了。此刻 peer
-        // 是 finished 状态，onFrame 必然不认；把帧丢掉的话发送方要等满
-        // answerTimeout 才知道失败。同步重建 receiver，让下面的 onFrame
-        // 能接住这个请求（rebuildReceiver 有"不顶掉活着的 receiver"的
-        // 防护，两路触发不会打架）。
-        if (action == Action::kReceive && config.keepReceiving && f.type == FrameType::kFileRequestSend &&
-            (!peer || peer->finished())) {
-            rebuildReceiver();
-        }
-
-        // 发送 peer 先认：它只认自己 sessionId 的应答/ACK 帧，接收 peer
-        // 空闲时虽然 sessionId=0，但只对 kFileRequestSend 认领（见
-        // TransferPeer::onFrame），两者不会互相吞帧。
-        if (sendActive && sendPeer && sendPeer->onFrame(f)) {
-            return;
-        }
-
-        // 再给接收 peer。它认不认是它的事（sessionId 不符会返回 false）。
-        if (peer && peer->onFrame(f)) {
-            return;
-        }
-
-        if (f.type == FrameType::kAnswerClientList) {
-            std::string err;
-            std::vector<core::session::PeerInfo> list;
-            if (!core::session::decodeClientList(f.body, list, err)) {
-                finish(false, "在线列表解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
-                return;
-            }
-            peers = std::move(list);
-
-            if (action == Action::kList) {
-                // list 操作的契约输出：拼文本、结束。临时连接到此为止。
-                std::string text = "在线对端 " + std::to_string(peers.size()) + " 个：";
-                for (const auto& p : peers) {
-                    text += "\n  " + p.id + "  " + p.address;
-                }
-                finish(true, std::move(text));
-                return;
-            }
-
-            // 常驻接收会话上的刷新（refreshPeers）：报结构化列表就走，
-            // **不结束操作**——这条连接还要继续收文件，id 也要保持稳定。
-            if (config.onPeerList) {
-                std::vector<PeerEntry> entries;
-                entries.reserve(peers.size());
-                for (const auto& p : peers) {
-                    entries.push_back(PeerEntry{p.id, p.address});
-                }
-                config.onPeerList(entries);
-            }
-            return;
-        }
-
-        // 其余帧不处理。**不报错**：中继可能发来与本操作无关的信令
-        // （心跳应答之类），把"不认识"当成失败会让工具在正常网络里
-        // 无故退出。
+        ProgressReport r;
+        r.bytesDone = job.bytesDone;
+        r.bytesTotal = job.bytesTotal;
+        r.bytesPerSecond = lastSpeed;
+        onProgress(r);
     }
 
-    void abortNow()
+    // ---------------------------------------------------------------------
+    // 常驻会话上的操作（GUI）
+    // ---------------------------------------------------------------------
+
+    // 这些方法在上一版里之所以叫 "OnSession"、之所以要判"有没有常驻会话"，
+    // 是因为新开连接会顶掉常驻接收会话、把本机 id 换掉。双连接模型下控制
+    // 连接本来就是常驻的，"新开一条连接"这件事不再存在——所以这里只剩
+    // "控制连接是否可用"一个前提。名字保持不变，免得调用方一起改。
+    bool canOperate() const noexcept
     {
-        if (finished) {
+        return !finished && control != nullptr && control->ready();
+    }
+
+    // 取回：先把数据连接与协商做完，再发请求。
+    //
+    // 为什么不能直接发请求：对端收到 §11.9 的请求后要**把文件发给我们的
+    // 数据连接**，而它得先知道那个连接叫什么。协商就是在交换这个名字。
+    void maybeStartPull()
+    {
+        if (pullStarted || config.pullFrom.empty()) {
             return;
         }
-        finished = true;
-        pumpTimer.cancel();
-        watchdog.cancel();
-        progressTimer.cancel();
-        // 同 finish()：会话级结论统一由下面这次 onDone 发出，正在进行的
-        // 搭车发送不再单独回调（避免上层收到两个结论）。
-        sendActive = false;
-        onSendDone = nullptr;
-        // 挂起的列举同理：会话结束时上层已经收到 onDone，这次列举的回调
-        // 不能再单独发（否则上层会收到两个结论）。
-        browseActive = false;
-        onBrowseDone = nullptr;
-        browseTimer.cancel();
-        // 挂起的元信息查询同理。
-        metaActive = false;
-        onMetaDone = nullptr;
-        metaTimer.cancel();
-        // 远端文件操作同理：会话没了，那一次操作不会有结论。
-        opActive = false;
-        onOpDone = nullptr;
-        opTimer.cancel();
-        if (session) {
-            session->close();
+        pullStarted = true;
+
+        const bool archive = config.pullAsArchive;
+        ensureDataLink([this, archive](bool ok) {
+            if (!ok) {
+                finish(false, "无法建立数据连接", Status::Fail(ErrorCode::kIoError, "data link failed"));
+                return;
+            }
+            negotiateDataId(config.pullFrom, [this, archive](bool ok2, std::string) {
+                if (!ok2) {
+                    finish(false, "对端的数据连接不可用（对方可能正在关闭或未升级协议）",
+                           Status::Fail(ErrorCode::kTimeout, "data channel negotiation failed"));
+                    return;
+                }
+                doPull(archive);
+            });
+        });
+    }
+
+    void doPull(bool archive)
+    {
+        std::weak_ptr<char> token = alive;
+        const bool asked = control->ask(
+            archive ? FrameType::kAskArchivePull : FrameType::kAskFilePull, config.pullFrom,
+            core::session::encodeAskFileList(config.pullPath),
+            [this, token, archive](const ControlLink::Answer& a) {
+                if (token.expired()) {
+                    return;
+                }
+                if (!a.ok) {
+                    finish(false, "取回请求没有响应（对端可能已离线）", a.status);
+                    return;
+                }
+                core::session::FilePullStatus status = core::session::FilePullStatus::kRejected;
+                std::string err;
+                if (!core::session::decodeAnswerFilePull(a.body, status, err)) {
+                    finish(false, "取回应答解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+                    return;
+                }
+                // 契约输出：e2e 靠这一行区分"对方答应了但文件慢"
+                // 和"对方根本没答应"。格式固定，不做本地化。
+                std::printf("PULL %s\n", (status == core::session::FilePullStatus::kAccepted) ? "accepted" : "failed");
+                std::fflush(stdout);
+
+                switch (status) {
+                case core::session::FilePullStatus::kAccepted:
+                    // 只是"对方接受了"。文件随后由数据连接收下，
+                    // 那一步的结论走正常的接收路径。
+                    return;
+                case core::session::FilePullStatus::kNotFound:
+                    finish(false, archive ? "对端没有这个目录（或它不是目录）" : "对端没有这个文件（或它是目录）",
+                           Status::Fail(ErrorCode::kNotFound, "remote path not found"));
+                    return;
+                case core::session::FilePullStatus::kRejected:
+                default:
+                    finish(false, "对端拒绝取回（未开启共享、路径越界或正忙）",
+                           Status::Fail(ErrorCode::kPermissionDenied, "remote pull rejected"));
+                    return;
+                }
+            },
+            archive ? kSlowAskTimeout : std::chrono::seconds(0));
+        if (!asked) {
+            finish(false, "取回请求没发出去", Status::Fail(ErrorCode::kCancelled, "control link not ready"));
         }
-        if (onDone) {
+    }
+
+    // 在控制连接上列举对端的一个目录。结论只回调一次，操作不结束。
+    void browseNow(std::string peerId, std::string relPath, std::function<void(const Outcome&)> done)
+    {
+        std::weak_ptr<char> token = alive;
+        const bool asked = control->ask(
+            FrameType::kAskFileList, std::move(peerId), core::session::encodeAskFileList(std::move(relPath)),
+            [token, done = std::move(done)](const ControlLink::Answer& a) {
+                if (token.expired()) {
+                    return;
+                }
+                Outcome o;
+                if (!a.ok) {
+                    o.ok = false;
+                    o.summary = "对端没有响应（可能已离线）";
+                    o.status = a.status;
+                    done(o);
+                    return;
+                }
+                core::session::FileListStatus status = core::session::FileListStatus::kOk;
+                std::vector<core::session::RemoteEntry> entries;
+                bool roots = false;
+                std::string err;
+                if (!core::session::decodeAnswerFileList(a.body, status, roots, entries, err)) {
+                    o.ok = false;
+                    o.summary = "远端列表解码失败：" + err;
+                    o.status = Status::Fail(ErrorCode::kProtocol, err);
+                    done(o);
+                    return;
+                }
+                o.remoteEntries = std::move(entries);
+                o.listStatus = status;
+                o.rootListing = roots;
+                o.ok = (status == core::session::FileListStatus::kOk || status == core::session::FileListStatus::kTruncated);
+                o.summary = o.ok
+                                ? ("远端列表 " + std::to_string(o.remoteEntries.size()) + " 项")
+                                : (status == core::session::FileListStatus::kNotFound ? "对端没有这个目录"
+                                                                                      : "对端拒绝列举（未开启共享，或路径越界）");
+                if (!o.ok) {
+                    o.status = Status::Fail(status == core::session::FileListStatus::kNotFound ? ErrorCode::kNotFound
+                                                                                               : ErrorCode::kPermissionDenied,
+                                            "remote list failed");
+                }
+                done(o);
+            });
+        if (!asked) {
             Outcome o;
             o.ok = false;
-            o.summary = "中止";
-            o.status = Status::Fail(ErrorCode::kCancelled, "aborted");
-            onDone(o);
+            o.summary = "控制连接不可用";
+            o.status = Status::Fail(ErrorCode::kCancelled, "control link not ready");
+            done(o);
         }
+    }
+
+    // 在控制连接上问一次在线列表（GUI 的"刷新"）。结果走 onPeerList，
+    // 操作不结束。
+    void refreshPeers()
+    {
+        if (!canOperate()) {
+            return;
+        }
+        requestPeerList();
     }
 };
 
@@ -2241,8 +2072,19 @@ Client::Client(asio::io_context& ctx, ClientConfig config, std::function<void(co
 
 Client::~Client()
 {
-    if (impl_ && impl_->session) {
-        impl_->session->close();
+    if (!impl_) {
+        return;
+    }
+    // 顺序不能反：先关连接会让 onClosed 走回上层的回调链，而那时 Impl
+    // 正在析构、上层对象可能已经没了。
+    impl_->destroying = true;
+    impl_->finished = true;
+    impl_->alive.reset();
+    if (impl_->data) {
+        impl_->data->close();
+    }
+    if (impl_->control) {
+        impl_->control->close();
     }
 }
 
@@ -2285,81 +2127,335 @@ void Client::runFileOp(FileOpRequest req)
 
 void Client::refreshPeers()
 {
-    // 只对常驻接收会话有意义。前提不满足时静默返回而不是报错：调用方
-    // （CoreService）只会在会话活着时走到这里，多余的错误路径只会诱导
-    // 上层做无意义的分支。
     impl_->refreshPeers();
 }
 
 bool Client::sendOnSession(std::string sourcePath, std::string remoteName, std::string toPeerId,
                            std::function<void(const Outcome&)> done)
 {
-    return impl_->startSendOnSession(std::move(sourcePath), std::move(remoteName), std::move(toPeerId), std::move(done));
+    if (!impl_->canOperate()) {
+        return false;
+    }
+    Impl* p = impl_.get();
+    std::weak_ptr<char> token = impl_->alive;
+    p->ensureDataLink([p, token, sourcePath, remoteName, toPeerId, done = std::move(done)](bool ok) {
+        if (token.expired()) {
+            return;
+        }
+        if (!ok) {
+            if (done) {
+                Outcome o;
+                o.ok = false;
+                o.summary = "数据连接不可用";
+                o.status = Status::Fail(ErrorCode::kIoError, "data link failed");
+                done(o);
+            }
+            return;
+        }
+        p->negotiateDataId(toPeerId, [p, token, sourcePath, remoteName, done](bool ok2, std::string peerDataId) {
+            if (token.expired()) {
+                return;
+            }
+            if (!ok2) {
+                if (done) {
+                    Outcome o;
+                    o.ok = false;
+                    o.summary = "对端的数据连接不可用";
+                    o.status = Status::Fail(ErrorCode::kTimeout, "data channel negotiation failed");
+                    done(o);
+                }
+                return;
+            }
+            p->startSend(sourcePath, remoteName, peerDataId, done);
+        });
+    });
+    return true;
 }
 
 bool Client::browseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome&)> done)
 {
-    return impl_->startBrowseOnSession(std::move(peerId), std::move(relPath), std::move(done));
+    if (!impl_->canOperate()) {
+        return false;
+    }
+    impl_->browseNow(std::move(peerId), std::move(relPath), std::move(done));
+    return true;
 }
 
 bool Client::askPathMetaOnSession(std::string peerId, std::vector<std::string> absPaths, std::function<void(const Outcome&)> done)
 {
-    return impl_->startAskPathMetaOnSession(std::move(peerId), std::move(absPaths), std::move(done));
+    if (!impl_->canOperate() || absPaths.empty()) {
+        return false;
+    }
+    auto body = core::session::encodeAskPathMeta(absPaths);
+    if (body.empty()) {
+        return false;
+    }
+
+    std::weak_ptr<char> token = impl_->alive;
+    const auto requested = absPaths.size();
+    return impl_->control->ask(FrameType::kAskPathMeta, std::move(peerId), std::move(body),
+                               [token, requested, done = std::move(done)](const ControlLink::Answer& a) {
+                                   if (token.expired()) {
+                                       return;
+                                   }
+                                   Outcome o;
+                                   if (!a.ok) {
+                                       o.ok = false;
+                                       o.summary = "对端没有响应（可能已离线）";
+                                       o.status = a.status;
+                                       done(o);
+                                       return;
+                                   }
+                                   std::vector<core::session::RemoteMeta> metas;
+                                   std::string err;
+                                   if (!core::session::decodeAnswerPathMeta(a.body, metas, err)) {
+                                       o.ok = false;
+                                       o.summary = "路径元信息解码失败：" + err;
+                                       o.status = Status::Fail(ErrorCode::kProtocol, err);
+                                       done(o);
+                                       return;
+                                   }
+                                   // 条数必须与请求一致：按下标对回路径，条数不对就是整体错位，
+                                   // 错位的覆盖提示会让用户点到别的文件上去。
+                                   if (metas.size() != requested) {
+                                       o.ok = false;
+                                       o.summary = "对端返回的条数与请求不一致";
+                                       o.status = Status::Fail(ErrorCode::kProtocol, "path meta count mismatch");
+                                       done(o);
+                                       return;
+                                   }
+                                   o.ok = true;
+                                   o.summary = "路径元信息 " + std::to_string(metas.size()) + " 项";
+                                   o.remoteMetas = std::move(metas);
+                                   done(o);
+                               });
 }
 
 bool Client::fileOpOnSession(FileOpRequest req, std::function<void(const Outcome&)> done)
 {
-    return impl_->startFileOpOnSession(std::move(req), std::move(done));
+    if (!impl_->canOperate()) {
+        return false;
+    }
+    return impl_->startFileOp(std::move(req), std::move(done));
 }
+
+bool Client::pullOnSession(std::string peerId, std::string relPath, bool archive, std::function<void(const Outcome&)> done)
+{
+    if (!impl_->canOperate()) {
+        return false;
+    }
+
+    Impl* p = impl_.get();
+    std::weak_ptr<char> token = impl_->alive;
+
+    // 两步：让对端知道我们的数据连接（协商），再发取回请求。
+    // done 只看"对方接不接受"，文件随后由数据连接收下、走接收回调。
+    p->ensureDataLink([p, token, peerId, relPath, archive, done = std::move(done)](bool ok) {
+        if (token.expired()) {
+            return;
+        }
+        if (!ok) {
+            Outcome o;
+            o.ok = false;
+            o.summary = "数据连接不可用";
+            o.status = Status::Fail(ErrorCode::kIoError, "data link failed");
+            done(o);
+            return;
+        }
+        p->negotiateDataId(peerId, [p, token, peerId, relPath, archive, done](bool ok2, std::string) {
+            if (token.expired()) {
+                return;
+            }
+            if (!ok2) {
+                Outcome o;
+                o.ok = false;
+                o.summary = "对端的数据连接不可用（对方可能正在关闭或未升级协议）";
+                o.status = Status::Fail(ErrorCode::kTimeout, "data channel negotiation failed");
+                done(o);
+                return;
+            }
+            const bool asked = p->control->ask(
+                archive ? FrameType::kAskArchivePull : FrameType::kAskFilePull, peerId, core::session::encodeAskFileList(relPath),
+                [token, archive, done](const ControlLink::Answer& a) {
+                    if (token.expired()) {
+                        return;
+                    }
+                    Outcome o;
+                    if (!a.ok) {
+                        o.ok = false;
+                        o.summary = "取回请求没有响应（对端可能已离线）";
+                        o.status = a.status;
+                        done(o);
+                        return;
+                    }
+                    core::session::FilePullStatus status = core::session::FilePullStatus::kRejected;
+                    std::string err;
+                    if (!core::session::decodeAnswerFilePull(a.body, status, err)) {
+                        o.ok = false;
+                        o.summary = "取回应答解码失败：" + err;
+                        o.status = Status::Fail(ErrorCode::kProtocol, err);
+                        done(o);
+                        return;
+                    }
+                    switch (status) {
+                    case core::session::FilePullStatus::kAccepted:
+                        o.ok = true;
+                        o.summary = "对端已开始发送";
+                        done(o);
+                        return;
+                    case core::session::FilePullStatus::kNotFound:
+                        o.ok = false;
+                        o.summary = archive ? "对端没有这个目录（或它不是目录）" : "对端没有这个文件（或它是目录）";
+                        o.status = Status::Fail(ErrorCode::kNotFound, "remote path not found");
+                        done(o);
+                        return;
+                    case core::session::FilePullStatus::kRejected:
+                    default:
+                        o.ok = false;
+                        o.summary = "对端拒绝取回（未开启共享、路径越界或正忙）";
+                        o.status = Status::Fail(ErrorCode::kPermissionDenied, "remote pull rejected");
+                        done(o);
+                        return;
+                    }
+                },
+                archive ? kSlowAskTimeout : std::chrono::seconds(0));
+            if (!asked) {
+                Outcome o;
+                o.ok = false;
+                o.summary = "取回请求发送失败（控制连接不可用）";
+                o.status = Status::Fail(ErrorCode::kCancelled, "control link not ready");
+                done(o);
+            }
+        });
+    });
+    return true;
+}
+
+bool Client::setReceiveDirOnSession(std::string targetPath)
+{
+    if (impl_->action != Action::kReceive || impl_->finished) {
+        return false;
+    }
+    // 只改内存里的落点，**不重连**（重连会换 id，那正是常驻要避免的事）。
+    impl_->targetPath = std::move(targetPath);
+    if (impl_->data) {
+        impl_->data->setReceiveDir(impl_->targetPath);
+    }
+    return true;
+}
+
+void Client::cancelSend()
+{
+    // 先拷出 id 再取消：cancel 会同步触发 onFinished，而那个回调会 erase
+    // sends 里的项——直接遍历 map 会踩失效的迭代器。
+    std::vector<std::uint64_t> ids;
+    ids.reserve(impl_->sends.size());
+    for (const auto& [id, done] : impl_->sends) {
+        (void)done;
+        ids.push_back(id);
+    }
+    for (const auto id : ids) {
+        if (impl_->data) {
+            (void)impl_->data->cancel(id, "cancelled by user");
+        }
+    }
+}
+
+void Client::abort()
+{
+    if (!impl_ || impl_->finished) {
+        return;
+    }
+    impl_->finished = true;
+    impl_->watchdog.cancel();
+    impl_->sends.clear();
+    if (impl_->data) {
+        impl_->data->close();
+    }
+    if (impl_->control) {
+        impl_->control->close();
+    }
+    if (impl_->onDone) {
+        Outcome o;
+        o.ok = false;
+        o.summary = "中止";
+        o.status = Status::Fail(ErrorCode::kCancelled, "aborted");
+        auto cb = std::move(impl_->onDone);
+        impl_->onDone = nullptr;
+        cb(o);
+    }
+}
+
+const std::string& Client::assignedId() const noexcept
+{
+    return impl_->assignedId;
+}
+
+// ---------------------------------------------------------------------------
+// 本地归档（不联网）
+// ---------------------------------------------------------------------------
 
 bool Client::createArchive(const std::vector<std::string>& sources, const std::string& archivePath, std::string& err)
 {
+    filestore::StdFileStore store;
     std::vector<filestore::ArchiveItem> items;
     for (const auto& src : sources) {
         std::error_code ec;
         const std::filesystem::path p(src);
-        if (!std::filesystem::exists(p, ec)) {
-            err = "路径不存在：" + src;
-            return false;
+        const auto name = p.filename().string();
+        if (name.empty()) {
+            continue;
         }
-        // 相对**父目录**：包内有顶层目录，解压时配 unpackArchive(path, false)。
-        const auto base = p.parent_path();
+
+        // 目录要展开成条目：archiver 只认 (sourcePath, entryName) 列表。
+        // 包内路径相对**各源的父目录**，所以包里有顶层目录——与"取回目录"
+        // 那种无顶层的包形状相反，解压时要配 unpackArchive(path, false)。
         if (std::filesystem::is_directory(p, ec)) {
-            std::error_code iterEc;
-            for (auto it = std::filesystem::recursive_directory_iterator(
-                     p, std::filesystem::directory_options::skip_permission_denied, iterEc);
-                 it != std::filesystem::recursive_directory_iterator(); it.increment(iterEc)) {
-                if (iterEc) {
-                    break;
+            filestore::ArchiveItem dirItem;
+            dirItem.sourcePath = src;
+            dirItem.entryName = name + "/";
+            items.push_back(std::move(dirItem));
+
+            std::function<void(const std::string&, const std::string&)> walk = [&](const std::string& absDir,
+                                                                                   const std::string& prefix) {
+                std::vector<filestore::DirEntry> sub;
+                if (!store.list(absDir, false, sub).ok()) {
+                    return;
                 }
-                // lexically_relative 是**纯字符串计算**，不访问文件系统：
-                // std::filesystem::relative 会去查真实路径（还带 ec 出参），
-                // 一旦它失败，整个循环就把所有条目都 continue 掉了——表现
-                // 成"没有可压缩的内容"，而目录明明是好的。
-                const auto rel = it->path().lexically_relative(base);
-                if (rel.empty()) {
-                    continue;
+                for (const auto& e : sub) {
+                    const std::string childAbs = store.join(absDir, e.name);
+                    const std::string childRel = prefix + "/" + e.name;
+                    if (e.isDir) {
+                        filestore::ArchiveItem d;
+                        d.sourcePath = childAbs;
+                        d.entryName = childRel + "/";
+                        items.push_back(std::move(d));
+                        walk(childAbs, childRel);
+                        continue;
+                    }
+                    filestore::ArchiveItem f;
+                    f.sourcePath = childAbs;
+                    f.entryName = childRel;
+                    items.push_back(std::move(f));
                 }
-                filestore::ArchiveItem item;
-                item.sourcePath = it->path().string();
-                item.entryName = rel.generic_string() + (it->is_directory() ? "/" : "");
-                items.push_back(std::move(item));
-            }
-        } else {
-            items.push_back(filestore::ArchiveItem{src, p.filename().string()});
+            };
+            walk(src, name);
+            continue;
         }
+
+        filestore::ArchiveItem item;
+        item.sourcePath = src;
+        item.entryName = name;
+        items.push_back(std::move(item));
     }
 
     if (items.empty()) {
-        err = "没有可压缩的内容";
+        err = "没有可压缩的条目";
         return false;
     }
 
-    filestore::StdFileStore store;
     filestore::TarXzArchiver archiver(store);
     filestore::ArchiveOptions options;
-    // 与 §11.10.3 同一条理由：传输/存储场景里，压缩比的边际收益不值多等。
-    options.compressionLevel = 1;
     std::vector<std::string> skipped;
     const auto st = archiver.create(archivePath, items, options, skipped);
     if (!st.ok()) {
@@ -2374,62 +2470,25 @@ std::string Client::unpackArchive(const std::string& archivePath, bool intoSubdi
     static const std::string kSuffix = ".tar.xz";
     if (archivePath.size() <= kSuffix.size() ||
         archivePath.compare(archivePath.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0) {
-        return std::string();   // 不是我们的包，什么都不做
+        return {};
     }
 
+    filestore::StdFileStore store;
     const std::filesystem::path pack(archivePath);
     const std::string name = pack.filename().string();
     const std::string dirName = name.substr(0, name.size() - kSuffix.size());
     const auto dest = intoSubdir ? (pack.parent_path() / dirName) : pack.parent_path();
 
-    // 用局部 store：解包是"一次性文件操作"，不该为此在类里再挂一个成员。
-    // StdFileStore 本身很轻（只是路径到系统调用的映射）。
-    filestore::StdFileStore store;
     filestore::TarXzArchiver archiver(store);
     filestore::ArchiveOptions options;
     std::vector<std::string> extracted;
     std::vector<std::string> skipped;
     if (!archiver.extract(archivePath, dest.string(), options, extracted, skipped).ok()) {
-        // 失败保留包：用户还能自己解，总比"包被删了又没解开"好。
-        return std::string();
+        return {};
     }
-
     std::error_code ec;
     std::filesystem::remove(archivePath, ec);   // 包已经用完，留着只会越积越多
     return dest.string();
-}
-
-bool Client::pullOnSession(std::string peerId, std::string relPath, bool archive, std::function<void(const Outcome&)> done)
-{
-    return impl_->startPullOnSession(std::move(peerId), std::move(relPath), archive, std::move(done));
-}
-
-bool Client::setReceiveDirOnSession(std::string targetPath)
-{
-    // 判据与 canSendOnSession 一致：会话在、已认证、当前动作就是接收。
-    // 不看 pullActive/sendActive——改落点本身不发帧，与在飞的操作不冲突；
-    // 反而正是"取回请求已经在路上"时才需要它（见 GUI 的行级下载）。
-    Impl* p = impl_.get();
-    if (p == nullptr || p->finished || !p->authenticated || !p->session || p->action != Action::kReceive) {
-        return false;
-    }
-    p->targetPath = std::move(targetPath);
-    return true;
-}
-
-void Client::cancelSend()
-{
-    impl_->cancelSendNow();
-}
-
-void Client::abort()
-{
-    impl_->abortNow();
-}
-
-const std::string& Client::assignedId() const noexcept
-{
-    return impl_->assignedId;
 }
 
 }   // namespace relayer::cli

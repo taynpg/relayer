@@ -269,8 +269,18 @@ void Server::handleLocal(session::Session& self, const Frame& frame)
         return;
     }
 
+    // 在线列表只列**人**，不列内部连接。每个客户端的数据连接也注册在表里
+    // （转发要靠它），但用户看不出那是自己的第二条连接，只会疑惑"怎么多了
+    // 一个陌生对端"（DESIGN.md §3.3）。
+    std::vector<session::PeerInfo> visible;
+    for (auto& p : peers_.list()) {
+        if (!session::isInternalPeerId(p.id)) {
+            visible.push_back(std::move(p));
+        }
+    }
+
     std::vector<char> body;
-    if (!session::encodeClientList(peers_.list(), body).ok()) {
+    if (!session::encodeClientList(visible, body).ok()) {
         return;
     }
 
@@ -318,6 +328,15 @@ void Server::handleClaimId(session::Session& self, const Frame& frame)
         return;
     }
 
+    // `~` 前缀是**保留给内部连接**的命名空间（PROTOCOL.md §11.7）：客户端
+    // 的数据连接用它声明固定名字（`<控制连接 id>~d`），服务端照样分配、
+    // 照样按 id 转发，只是不把它列进在线列表——用户看到的"在线对端"是人，
+    // 不该多出一条自己的数据连接。
+    //
+    // 于是这里**放行** `~` 前缀。代价是客户端也可以借此声明一个不出现在
+    // 列表里的身份（隐身）。单用户自用工具里这无害：列表是给自己看的，
+    // 隐掉自己不会让谁失去什么。真要做多租户，这里要换成认证阶段带
+    // "连接用途"字段，而不是靠命名约定。
     if (!session::isValidPeerId(id) || id == config_.serverId) {
         // 撞服务端 id 必须单独拦：planRoute 里"to == 服务端 id"优先于
         // "to == 自己 id"，一个叫 relayerd 的客户端永远收不到转发帧，

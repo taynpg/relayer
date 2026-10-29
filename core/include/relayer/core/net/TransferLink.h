@@ -60,12 +60,32 @@ public:
         // 对端推来的文件落在这下面。
         std::string receiveDir;
 
+        // 要不要挂常驻接收。默认挂——数据连接的意义之一就是"随时能收"。
+        //
+        // 关掉它的场景：只发不收的客户端（CLI 的 send）。挂着接收意味着
+        // 任何知道本机数据连接 id 的对端都能往 receiveDir 里写文件，而
+        // 纯发送方没有理由接受这件事。
+        bool acceptIncoming = true;
+
         // 发送方的分块大小。0 = 引擎默认（256 KiB）。
         std::uint32_t chunkSize = 0;
 
         // 接收方目标已存在时覆盖。默认拒绝——"要不要覆盖用户的文件"是
         // 上层策略（GUI 的发送前检查已经把这件事问完了）。
         bool overwriteExisting = false;
+
+        // 传输开始后的空闲上限：多久没有任何进展就判对端失联。
+        //
+        // 语义是"空闲"而不是"总时长"——1GB 在慢盘上可能跑很久，用总时长
+        // 会误杀正常传输。默认 60 秒与旧的单连接实现一致。
+        std::chrono::milliseconds idleTimeout{60000};
+
+        // 请求帧发出后等 kAnswerSend 的时限。
+        //
+        // 与 idleTimeout 分开：这一段只覆盖"请求发出到对方接受"。目标不在线
+        // 时中继**静默丢帧**（协议没有投递失败这一类），所以发错 id 的唯一
+        // 现象就是干等。AnswerSend 在对端在线时是毫秒级，10 秒已经很宽裕。
+        std::chrono::milliseconds answerTimeout{10000};
 
         // 推进引擎的间隔。10ms 与单连接时代一致：重传判定是秒级，
         // ACK 是 20ms 级，再密也不会有额外收益。
@@ -84,6 +104,18 @@ public:
         std::string path;
         std::uint64_t bytesDone = 0;
         std::uint64_t bytesTotal = 0;
+
+        // 传输层计数，在 onFinished 时是最终值（进度回调里是过程值）。
+        //
+        // 为什么带在这里而不是让上层再去问：job 在 onFinished 之后就可能
+        // 被销毁，那时读不到计数了。而这些数字是"这次传得怎么样"的唯一
+        // 证据（重传了几块、有没有重复块），诊断丢包时必须能看到。
+        std::uint64_t chunksSent = 0;
+        std::uint64_t chunksReceived = 0;
+        std::uint64_t chunksRetransmitted = 0;
+        std::uint64_t duplicateChunks = 0;
+        std::uint64_t acksSent = 0;
+        std::uint64_t acksReceived = 0;
     };
 
     struct Handler {
@@ -184,6 +216,7 @@ private:
     std::uint64_t nextJobId_ = 1;
     bool ready_ = false;
     bool closing_ = false;
+    bool claimSent_ = false;
     std::string assignedId_;
 };
 

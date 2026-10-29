@@ -61,19 +61,7 @@ std::shared_ptr<ControlLink> ControlLink::connect(asio::io_context& ctx, Config 
     auto cfg = self->config_;
     self->session_ = session::Session::connect(ctx, cfg.host, cfg.port, makeSessionConfig(cfg), std::move(sh));
 
-    if (self->session_ != nullptr && !cfg.requestedId.empty()) {
-        // 声明身份必须在认证之后。Session 的 connect 是异步的，这里排一次
-        // 到事件循环里，等 onAuthenticated 到了再发——用 weak 保证连接
-        // 已经没了时不动作。
-        std::weak_ptr<ControlLink> w2 = self;
-        asio::post(ctx, [w2] {
-            auto link = w2.lock();
-            if (link == nullptr || link->session_ == nullptr || !link->session_->authenticated()) {
-                return;
-            }
-            (void)link->session_->claimPeerId(link->config_.requestedId);
-        });
-    }
+    // 身份声明（requestedId）在 onSessionReady 里做，见那里的注释。
     return self;
 }
 
@@ -85,6 +73,20 @@ void ControlLink::onSessionReady(std::string assignedId)
     if (!assignedId.empty()) {
         assignedId_ = std::move(assignedId);
     }
+    // 身份声明必须**等认证真正完成**，而 connect() 里的 asio::post 排得太早：
+    // Session::connect 是异步的，那个 post 轮到时握手通常还没走完，
+    // 于是 claim 永远不会发出——声明了 --id 却仍拿到 client-N，看起来像
+    // "声明没生效"，实际是一次没执行的调用。
+    //
+    // 放在 onSessionReady 里就没有这个问题：它由 Session 的 onAuthenticated
+    // 触发，那一刻认证一定完成了。claimSent_ 挡住重复声明（Session 会通知
+    // 两次：先是空 id，再是真实 id）。
+    if (!config_.requestedId.empty() && !claimSent_ && session_ != nullptr && session_->authenticated() &&
+        assignedId_ != config_.requestedId) {
+        claimSent_ = true;
+        (void)session_->claimPeerId(config_.requestedId);
+    }
+
     if (handler_.onReady) {
         handler_.onReady(assignedId_);
     }
@@ -147,7 +149,7 @@ void ControlLink::onSessionClosed(Status why)
     }
 }
 
-bool ControlLink::ask(FrameType askType, std::string to, std::vector<char> body, AnswerFn done)
+bool ControlLink::ask(FrameType askType, std::string to, std::vector<char> body, AnswerFn done, std::chrono::seconds timeout)
 {
     if (!ready_ || closing_ || session_ == nullptr) {
         return false;
@@ -172,7 +174,7 @@ bool ControlLink::ask(FrameType askType, std::string to, std::vector<char> body,
     }
 
     auto p = std::make_shared<Pending>(ctx_, *expected, std::move(done));
-    p->timer.expires_after(config_.askTimeout);
+    p->timer.expires_after(timeout.count() > 0 ? timeout : config_.askTimeout);
 
     std::weak_ptr<ControlLink> weak = weak_from_this();
     p->timer.async_wait([weak, id](const std::error_code& ec) {
