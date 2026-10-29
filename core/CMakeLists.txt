@@ -33,6 +33,7 @@ add_library(relayer_core STATIC
     src/session/Session.cpp
     src/session/PeerTable.cpp
     src/session/FileList.cpp
+    src/session/PathMeta.cpp
 )
 
 target_include_directories(relayer_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

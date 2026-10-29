@@ -342,6 +342,35 @@ Status StdFileStore::mkdirs(std::string_view dir) const
     return Status::Ok();
 }
 
+std::vector<std::string> StdFileStore::roots() const
+{
+    std::vector<std::string> out;
+#if defined(_WIN32)
+    // 用 GetLogicalDrives 而不是遍历 'A'..'Z' 判存在：后者会把映射过但
+    // 已断开的网络驱动器也列出来（exists 对断开的映射返回 false，但
+    // 每次探测都要等一次网络超时，盘符一多界面就卡住）。
+    const DWORD mask = GetLogicalDrives();
+    for (int i = 0; i < 26; ++i) {
+        if ((mask & (1UL << i)) == 0) {
+            continue;
+        }
+        std::string root;
+        root.push_back(static_cast<char>('A' + i));
+        root += ":\\";
+        out.push_back(std::move(root));
+    }
+#else
+    out.emplace_back("/");
+#endif
+    // 家目录不是"根"，但把它放进根列表是给用户的快捷键：绝大多数远端
+    // 浏览都是从家目录开始，而不是从 / 或 C:\ 一层层点下去。
+    const auto home = detail::homeDirectory();
+    if (!home.empty()) {
+        out.push_back(home);
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // 变更
 // ---------------------------------------------------------------------------

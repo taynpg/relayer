@@ -76,10 +76,6 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo& conn)
     // 声明本机标识（PROTOCOL.md §11.7）：空则由中继分配 client-N。
     cfg.requestedId = fromQt(conn.requestedId);
 
-    // 共享目录（PROTOCOL.md §11.8）：对端能列举的范围。空 = 不响应。
-    // 只对接收会话有意义，但设在 cfg 上成本为零（list/send 用不到）。
-    cfg.shareRoot = fromQt(QSettings().value(relayer::app::settings::kReceiverShareRoot).toString());
-
     // 记下这组参数（GUI 线程），供 refreshPeers 判断会话是否对应表单地址。
     activeConnKey_ = conn.host + QStringLiteral(":") + QString::number(conn.port) + QStringLiteral(":") +
                      (conn.noAuth ? QStringLiteral("N") : QStringLiteral("P")) + QStringLiteral(":") + conn.password;
@@ -113,14 +109,18 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo& conn)
         emit receiveFailed(toQt(message));
     };
 
-    // 接收覆盖：GUI 的落点是用户自己选的接收目录，"同一个文件反复发到
-    // 同一个目录"是核心场景——默认拒绝覆盖会让第二次发送起永远失败，
-    // 还会诱发接收端反复重试换 id（两者实测都发生过）。CLI 侧保持默认
-    // 拒绝、由 --overwrite 显式打开；GUI 侧默认打开，用户可在日志菜单
-    // 里关掉（设置持久化，见 LogControl 的菜单项）。
-    const QSettings settings;
-    cfg.overwriteExisting =
-        settings.value(relayer::app::settings::kReceiverOverwrite, relayer::app::settings::kReceiverOverwriteDefault).toBool();
+    // 接收端覆盖策略：**总是覆盖**（v1 语义）。
+    //
+    // 覆盖与否的决策已经整体挪到发送方的"发送前检查"里（见
+    // MainWindow::onTransTaskRun）：发送方先问对方这些路径在不在，用户在
+    // 一个普通对话框里逐项回答，被跳过的文件根本不会发出来。所以接收端
+    // 此刻收到的一切都是对方明确要发的，再拒绝一次只会让"我明明点了覆盖"
+    // 变成一次传输失败。
+    //
+    // 为什么不做成"接收时弹窗询问"：那个决策点在 TransferPeer 的 io 线程
+    // 上，应答帧正压在那里，弹窗等用户点击会饿死心跳（空闲 20s 发 ping、
+    // 10s 未答判死），只能加一个"用户还没点就超时"的兜底——那比不弹更糟。
+    cfg.overwriteExisting = true;
 
     cfg.onIdAssigned = [this](const std::string& id) {
         // io 线程。同一个 id 只发一次：服务端重复通知不该让界面闪两下。
@@ -429,7 +429,7 @@ bool CoreService::browsePeerOnSession(const QString& peerId, const QString& relP
 
     runOnIo([this, peer = fromQt(peerId), path = fromQt(relPath)] {
         if (!client_) {
-            emit remoteBrowseFinished(false, QStringLiteral("没有可用的常驻会话"), {});
+            emit remoteBrowseFinished(false, false, QStringLiteral("没有可用的常驻会话"), {});
             return;
         }
         const bool started = client_->browseOnSession(peer, path, [this](const cli::Outcome& o) {
@@ -445,10 +445,52 @@ bool CoreService::browsePeerOnSession(const QString& peerId, const QString& relP
             }
             // 从 io 线程 emit
             // 跨线程信号是安全的（QueuedConnection）。
-            emit remoteBrowseFinished(o.ok, toQt(o.summary), rows);
+            emit remoteBrowseFinished(o.ok, o.rootListing, toQt(o.summary), rows);
         });
         if (!started) {
-            emit remoteBrowseFinished(false, QStringLiteral("当前不能列举（正在传输或会话不可用）"), {});
+            emit remoteBrowseFinished(false, false, QStringLiteral("当前不能列举（正在传输或会话不可用）"), {});
+        }
+    });
+    return true;
+}
+
+bool CoreService::askPathMeta(const QString& peerId, const QStringList& absPaths)
+{
+    if (peerId.isEmpty() || absPaths.isEmpty()) {
+        return false;
+    }
+    if (!busy_) {
+        return false;   // 与列举同理：不回落成新连接
+    }
+
+    std::vector<std::string> paths;
+    paths.reserve(static_cast<std::size_t>(absPaths.size()));
+    for (const auto& p : absPaths) {
+        paths.push_back(fromQt(p));
+    }
+
+    runOnIo([this, peer = fromQt(peerId), paths = std::move(paths)] {
+        if (!client_) {
+            emit pathMetaFinished(false, QStringLiteral("没有可用的常驻会话"), {});
+            return;
+        }
+        const bool started = client_->askPathMetaOnSession(peer, paths, [this](const cli::Outcome& o) {
+            QList<relayer::app::RemoteMetaRow> rows;
+            rows.reserve(static_cast<qsizetype>(o.remoteMetas.size()));
+            for (const auto& m : o.remoteMetas) {
+                relayer::app::RemoteMetaRow r;
+                r.exists = m.exists;
+                r.isDir = m.isDir;
+                r.size = m.size;
+                r.mtimeMs = m.mtime > 0 ? m.mtime * 1000 : 0;
+                r.fingerprint = toQt(m.fingerprint);
+                rows.append(r);
+            }
+            // 从 io 线程 emit 跨线程信号是安全的（QueuedConnection）。
+            emit pathMetaFinished(o.ok, toQt(o.summary), rows);
+        });
+        if (!started) {
+            emit pathMetaFinished(false, QStringLiteral("当前不能查询（正在传输或会话不可用）"), {});
         }
     });
     return true;

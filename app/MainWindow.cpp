@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include <QAbstractButton>
 #include <QCloseEvent>
 #include <QDir>
 #include <QDirIterator>
@@ -7,6 +8,7 @@
 #include <QFileInfo>
 #include <QGroupBox>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QSettings>
 #include <QSplitter>
 #include <QStandardPaths>
@@ -17,6 +19,7 @@
 
 #include "Base/InfoDrop.h"
 #include "model/ProgressTracker.h"
+#include "relayer/filestore/StdFileStore.h"
 #include "ui/ConnectorControl.h"
 #include "ui/Control/ComparisonControl.h"
 #include "ui/Control/ExplorerControl.h"
@@ -34,6 +37,8 @@ using relayer::app::settings::kReceiverRetryInterval;
 using relayer::app::settings::kReceiverRetryMax;
 using relayer::app::settings::kRetryIntervalDefault;
 using relayer::app::settings::kRetryMaxDefault;
+using relayer::app::settings::kSendCheckBeforeSend;
+using relayer::app::settings::kSendCheckDefault;
 
 namespace {
 // humanBytes 已收拢到 app/model/ProgressTracker.h（原与 RelayTaskControl
@@ -166,7 +171,7 @@ void MainWindow::wireSignals()
             [this](const QString& peer, const QString& relPath, bool asArchive) {
                 if (!core_->pullFileFromPeer(peer, relPath, asArchive)) {
                     log_->appendLog(QStringLiteral("[取回] %1：当前不能取回（未连接或正在传输）\n").arg(relPath));
-                    remoteExplorer_->applyRemoteEntries(false, QStringLiteral("当前不能取回（会话不可用或正在传输）"), {});
+                    remoteExplorer_->applyRemoteEntries(false, false, QStringLiteral("当前不能取回（会话不可用或正在传输）"), {});
                 }
             });
     connect(core_, &relayer::app::CoreService::archiveExtracted, this,
@@ -191,9 +196,12 @@ void MainWindow::wireSignals()
                 }
             });
     connect(core_, &relayer::app::CoreService::remotePullFinished, this, &MainWindow::onRemotePullFinished);
+
+    // 发送前检查的回程（kAskPathMeta 的应答）。
+    connect(core_, &relayer::app::CoreService::pathMetaFinished, this, &MainWindow::onPreCheckMetaFinished);
     connect(remoteExplorer_, &ExplorerControl::remoteListRequested, this, [this](const QString& peer, const QString& relPath) {
         if (!core_->browsePeerOnSession(peer, relPath)) {
-            remoteExplorer_->applyRemoteEntries(false, QStringLiteral("当前不能列举（会话不可用或正在传输）"), {});
+            remoteExplorer_->applyRemoteEntries(false, false, QStringLiteral("当前不能列举（会话不可用或正在传输）"), {});
         }
     });
 
@@ -209,7 +217,7 @@ void MainWindow::wireSignals()
             return;
         }
         const QString peer = remoteExplorer_->remotePeerId();
-        const QString relFrom = drop.from;   // 远端相对目录（载荷 from）
+        const QString relFrom = drop.from;   // 远端绝对目录（载荷 from）
 
         relayer::app::RelayTaskItems items;
         for (const auto& it : drop.items) {
@@ -223,7 +231,7 @@ void MainWindow::wireSignals()
         }
         log_->appendLog(QStringLiteral("[拖拽] 下载 %1 项：%2 → %3\n")
                             .arg(items.size())
-                            .arg(relFrom.isEmpty() ? QStringLiteral("<共享根>") : relFrom, explorer_->currentPath()));
+                            .arg(relFrom.isEmpty() ? QStringLiteral("<根>") : relFrom, explorer_->currentPath()));
         onDownloadRequested(items);
     });
 
@@ -259,7 +267,7 @@ void MainWindow::wireSignals()
             QStringLiteral("[拖拽] 上传 %1 项：%2 → %3:%4\n")
                 .arg(items.size())
                 .arg(localFrom, peer,
-                     remoteExplorer_->currentPath().isEmpty() ? QStringLiteral("<共享根>") : remoteExplorer_->currentPath()));
+                     remoteExplorer_->currentPath().isEmpty() ? QStringLiteral("<根>") : remoteExplorer_->currentPath()));
         onTransTaskRun(items);
     });
 
@@ -686,13 +694,14 @@ void MainWindow::onDownloadRequested(const relayer::app::RelayTaskItems& items)
         job.peer = peer;
         job.name = it.name;
         job.isDir = it.isDir;
-        // 相对路径统一用 '/'：协议里的路径是 POSIX 形状，而行里的相对目录
-        // 是用户手填的（Windows 上很可能写成反斜杠）。
+        // 分隔符统一成 '/'：协议里的路径是 POSIX 形状，而行里的远端目录是
+        // 用户手填的（Windows 上很可能写成反斜杠）。
+        //
+        // **不能去掉开头的 '/'**：那会把绝对路径打成相对的，落点从
+        // `D:/photos/a.jpg` 变成"接收目录/photos/a.jpg"。老代码这么干过，
+        // 是相对路径时代的残留。
         QString rel = it.relDir;
         rel.replace(QLatin1Char('\\'), QLatin1Char('/'));
-        while (rel.startsWith(QLatin1Char('/'))) {
-            rel.remove(0, 1);
-        }
         while (rel.endsWith(QLatin1Char('/'))) {
             rel.chop(1);
         }
@@ -824,7 +833,8 @@ void MainWindow::nextRemoteCheck()
     log_->appendLog(QStringLiteral("[检查] 结束\n"));
 }
 
-void MainWindow::onRemoteBrowseFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteRow>& rows)
+void MainWindow::onRemoteBrowseFinished(bool ok, bool rootListing, const QString& summary,
+                                        const QList<relayer::app::RemoteRow>& rows)
 {
     // 三个消费者，按优先级：一次性的比对 > 检查队列 > 远端面板（默认落点）。
     if (compareActive_) {
@@ -848,7 +858,7 @@ void MainWindow::onRemoteBrowseFinished(bool ok, const QString& summary, const Q
     if (remoteCheckIndex_ < 0 || remoteCheckIndex_ >= remoteChecks_.size()) {
         // 不是检查队列要的，那就是远端面板的——**必须回填**，否则浏览
         // 请求有去无回，面板永远停在"正在读取"、表格永远是空的。
-        remoteExplorer_->applyRemoteEntries(ok, summary, rows);
+        remoteExplorer_->applyRemoteEntries(ok, rootListing, summary, rows);
         return;
     }
     const auto rc = remoteChecks_.at(remoteCheckIndex_);
@@ -941,9 +951,214 @@ void MainWindow::onTransTaskRun(const relayer::app::RelayTaskItems& items)
         }
     }
 
+    // 发送前检查（v1 的基本检查 + 覆盖提示）。默认开：直接照发意味着
+    // 静默覆盖对方机器上的同名文件，而这是不可撤销的。
+    const bool checkFirst = QSettings().value(kSendCheckBeforeSend, kSendCheckDefault).toBool();
+    if (checkFirst) {
+        startSendPreCheck(items, lastConn_, defaultPeer);
+    } else {
+        sendBatch(items, lastConn_, defaultPeer);
+    }
+}
+
+void MainWindow::sendBatch(const relayer::app::RelayTaskItems& items, const relayer::app::ConnInfo& conn,
+                           const QString& defaultPeerId)
+{
     // 批次直接搭在常驻会话上发（不新建连接 → id 不变，接收也不中断），
     // 所以不再需要"接收让位"。
-    taskControl_->startTasks(items, lastConn_, defaultPeer);
+    taskControl_->startTasks(items, conn, defaultPeerId);
+}
+
+// 目标绝对路径：对照表的 relDir 就是**对端视角的绝对目录**（DESIGN.md
+// §3.8）。留空 = 落到对端接收目录，这时给相对路径 `name`。
+static QString remoteTargetPath(const relayer::app::RelayTaskItem& item)
+{
+    if (item.relDir.isEmpty()) {
+        return item.name;
+    }
+    QString dir = item.relDir;
+    while (dir.endsWith(QLatin1Char('/')) || dir.endsWith(QLatin1Char('\\'))) {
+        dir.chop(1);
+    }
+    return dir + QLatin1Char('/') + item.name;
+}
+
+// 本地文件的 quickFingerprint（与对端算指纹时同一份算法）。空 = 算不出来。
+static QString localFingerprint(const QString& path)
+{
+    relayer::filestore::StdFileStore store;
+    return QString::fromStdString(store.quickFingerprint(path.toStdString()));
+}
+
+void MainWindow::startSendPreCheck(const relayer::app::RelayTaskItems& items, const relayer::app::ConnInfo& conn,
+                                   const QString& defaultPeerId)
+{
+    preCheckItems_ = items;
+    preCheckConn_ = conn;
+    preCheckDefaultPeer_ = defaultPeerId;
+    preCheckQueue_.clear();
+    preCheckResults_.clear();
+    preCheckIndex_ = -1;
+
+    // 按对端分组：一次请求只能问一个对端，而一批任务可能跨多个对端。
+    QHash<QString, int> byPeer;   // peerId -> preCheckQueue_ 下标
+    for (int i = 0; i < items.size(); ++i) {
+        const auto& item = items.at(i);
+        const QString peer = item.peerId.isEmpty() ? defaultPeerId : item.peerId;
+        if (peer.isEmpty()) {
+            continue;   // 没对端的行由任务表标"已跳过"，不必问
+        }
+        const QString path = remoteTargetPath(item);
+        auto it = byPeer.find(peer);
+        if (it == byPeer.end()) {
+            SendPreCheck req;
+            req.peerId = peer;
+            preCheckQueue_.append(req);
+            it = byPeer.insert(peer, static_cast<int>(preCheckQueue_.size()) - 1);
+        }
+        SendPreCheck& req = preCheckQueue_[it.value()];
+        req.paths << path;
+        req.itemIndexes << i;
+    }
+
+    if (preCheckQueue_.isEmpty()) {
+        sendBatch(preCheckItems_, preCheckConn_, preCheckDefaultPeer_);
+        return;
+    }
+
+    int total = 0;
+    for (const auto& req : preCheckQueue_) {
+        total += static_cast<int>(req.paths.size());
+    }
+    log_->appendLog(
+        QStringLiteral("[检查] 正在向 %1 个对端确认 %2 个目标路径是否已存在…\n").arg(preCheckQueue_.size()).arg(total));
+    issueNextPreCheck();
+}
+
+void MainWindow::issueNextPreCheck()
+{
+    ++preCheckIndex_;
+    if (preCheckIndex_ >= preCheckQueue_.size()) {
+        promptOverwriteThenSend();
+        return;
+    }
+    const auto& req = preCheckQueue_.at(preCheckIndex_);
+    if (!core_->askPathMeta(req.peerId, req.paths)) {
+        // 会话不可用/正在传输：检查做不了不是"发送失败"，如实说一句然后
+        // 照发。硬拦在这里会让"明明能发"变成不能发。
+        log_->appendLog(QStringLiteral("[检查] 无法查询 %1（会话不可用），跳过检查直接发送\n").arg(req.peerId));
+        ++preCheckIndex_;
+        issueNextPreCheck();
+    }
+}
+
+void MainWindow::onPreCheckMetaFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteMetaRow>& rows)
+{
+    if (preCheckIndex_ < 0 || preCheckIndex_ >= preCheckQueue_.size()) {
+        return;   // 迟到的应答（检查已被取消）
+    }
+    const auto& req = preCheckQueue_.at(preCheckIndex_);
+    if (!ok) {
+        log_->appendLog(QStringLiteral("[检查] %1 的检查失败：%2（跳过检查直接发送）\n").arg(req.peerId, summary));
+        ++preCheckIndex_;
+        issueNextPreCheck();
+        return;
+    }
+
+    for (int i = 0; i < rows.size() && i < static_cast<int>(req.paths.size()); ++i) {
+        preCheckResults_.insert(req.peerId + QStringLiteral("|") + req.paths.at(i), rows.at(i));
+    }
+    ++preCheckIndex_;
+    issueNextPreCheck();
+}
+
+void MainWindow::promptOverwriteThenSend()
+{
+    relayer::app::RelayTaskItems kept;
+    kept.reserve(preCheckItems_.size());
+
+    bool overwriteAll = false;
+    bool skipAll = false;
+    int conflicts = 0;
+    int skipped = 0;
+
+    for (int i = 0; i < preCheckItems_.size(); ++i) {
+        const auto& item = preCheckItems_.at(i);
+        const QString peer = item.peerId.isEmpty() ? preCheckDefaultPeer_ : item.peerId;
+        const QString path = remoteTargetPath(item);
+        const auto it = preCheckResults_.constFind(peer + QStringLiteral("|") + path);
+        const bool exists = (it != preCheckResults_.constEnd()) && it->exists;
+
+        if (!exists) {
+            kept.append(item);
+            continue;
+        }
+        ++conflicts;
+
+        if (skipAll) {
+            ++skipped;
+            log_->appendLog(QStringLiteral("[检查] 跳过（已存在）：%1\n").arg(path));
+            continue;
+        }
+        if (overwriteAll) {
+            kept.append(item);
+            continue;
+        }
+
+        // 内容粗判（v1 的"粗判一致/不一致"）：对端在元信息里带了
+        // quickFingerprint，本地算同一份比对即可。大小不同、或任一侧
+        // 算不出来，一律按"不一致"——宁可多问一次，也不要替用户判定
+        // "一样，覆盖也没关系"。
+        bool same = false;
+        if (!item.isDir) {
+            const QString localPath = QDir(item.localDir).filePath(item.name);
+            const QString localFp = localFingerprint(localPath);
+            same = !localFp.isEmpty() && !it->fingerprint.isEmpty() && localFp == it->fingerprint;
+        }
+
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Warning);
+        box.setWindowTitle(QStringLiteral("目标已存在"));
+        box.setText(same ? QStringLiteral("内容粗判一致，是否覆盖？\n%1").arg(path)
+                         : QStringLiteral("内容不一致，是否覆盖？\n%1").arg(path));
+        box.setInformativeText(item.isDir ? QStringLiteral("远端已有同名目录，其中的同名文件会被覆盖。")
+                                          : QStringLiteral("远端文件 %1 会被替换。").arg(humanBytes(it->size)));
+        auto* bYes = box.addButton(QStringLiteral("覆盖"), QMessageBox::AcceptRole);
+        auto* bAll = box.addButton(QStringLiteral("全部覆盖"), QMessageBox::YesRole);
+        auto* bNo = box.addButton(QStringLiteral("跳过"), QMessageBox::RejectRole);
+        auto* bAllNo = box.addButton(QStringLiteral("全部跳过"), QMessageBox::NoRole);
+        box.setDefaultButton(bNo);   // 回车不覆盖：默认动作必须是"不动用户的文件"
+        box.exec();
+
+        if (box.clickedButton() == bYes) {
+            kept.append(item);
+        } else if (box.clickedButton() == bAll) {
+            overwriteAll = true;
+            kept.append(item);
+        } else if (box.clickedButton() == bAllNo) {
+            skipAll = true;
+            ++skipped;
+            log_->appendLog(QStringLiteral("[检查] 跳过（已存在）：%1\n").arg(path));
+        } else if (box.clickedButton() == bNo) {
+            ++skipped;
+            log_->appendLog(QStringLiteral("[检查] 跳过（已存在）：%1\n").arg(path));
+        } else {
+            // 关掉对话框 = 取消整批。这是唯一能"反悔"的出口，不能当成跳过。
+            log_->appendLog(QStringLiteral("[检查] 已取消本次发送\n"));
+            return;
+        }
+    }
+
+    if (conflicts == 0) {
+        log_->appendLog(QStringLiteral("[检查] 目标都还不存在，直接发送\n"));
+    } else {
+        log_->appendLog(QStringLiteral("[检查] 共 %1 项已存在，跳过 %2 项\n").arg(conflicts).arg(skipped));
+    }
+    if (kept.isEmpty()) {
+        log_->appendLog(QStringLiteral("[任务] 全部被跳过，没有要发的内容\n"));
+        return;
+    }
+    sendBatch(kept, preCheckConn_, preCheckDefaultPeer_);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

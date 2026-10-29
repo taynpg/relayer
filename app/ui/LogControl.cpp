@@ -9,8 +9,8 @@
 #include "ui_LogControl.h"
 
 using relayer::app::settings::kReceiverDir;
-using relayer::app::settings::kReceiverOverwrite;
-using relayer::app::settings::kReceiverOverwriteDefault;
+using relayer::app::settings::kSendCheckBeforeSend;
+using relayer::app::settings::kSendCheckDefault;
 
 namespace {
 // 日志控件最大保留行数，超出后最早的日志被挤掉（与 v1 一致）。
@@ -53,22 +53,20 @@ void LogControl::initMenu()
         emit receiveDirChanged(dir);
     });
 
-    // 共享目录**不在这里**：它是"给别人看什么"，与"往哪写"是两个概念，
-    // 入口统一放在「设定」对话框（Setting.ui 的 gbShare），避免同一设置
-    // 两个入口、改了一处以为生效。
-
-    // 接收覆盖开关。默认开：反复把同一个文件发到对方同一目录是核心
-    // 场景，拒绝覆盖会让第二次发送起永远失败。关掉则恢复"目标已存在
-    // 就拒绝"的保护行为。与 CoreService::makeConfig 读的是同一个键。
+    // 发送前检查（v1 的"基本检查 + 覆盖提示"）。与「设定」对话框里的
+    // 同名选项共用 kSendCheckBeforeSend 一个键，两处入口同步。
+    //
+    // 接收端没有"覆盖开关"了：覆盖与否由发送方在传输开始前问完，接收端
+    // 收到什么就是对方明确要发的（CoreService::makeConfig）。
     QSettings settings;
-    auto* acOverwrite = menu->addAction(QStringLiteral("覆盖已存在的文件"));
-    acOverwrite->setCheckable(true);
-    acOverwrite->setChecked(settings.value(kReceiverOverwrite, kReceiverOverwriteDefault).toBool());
-    connect(acOverwrite, &QAction::toggled, this, [this](bool checked) {
+    auto* acSendCheck = menu->addAction(QStringLiteral("发送前检查目标是否已存在"));
+    acSendCheck->setCheckable(true);
+    acSendCheck->setChecked(settings.value(kSendCheckBeforeSend, kSendCheckDefault).toBool());
+    connect(acSendCheck, &QAction::toggled, this, [this](bool checked) {
         QSettings s;
-        s.setValue(kReceiverOverwrite, checked);
-        appendLog(checked ? QStringLiteral("[接收] 已开启覆盖：目标已存在时删旧收新\n")
-                          : QStringLiteral("[接收] 已关闭覆盖：目标已存在时拒绝接收\n"));
+        s.setValue(kSendCheckBeforeSend, checked);
+        appendLog(checked ? QStringLiteral("[发送] 已开启发送前检查：对端已有同名文件时会逐项询问\n")
+                          : QStringLiteral("[发送] 已关闭发送前检查：直接发送，对端已有文件会被覆盖\n"));
     });
 
     auto* acClear = menu->addAction(QStringLiteral("清空"));

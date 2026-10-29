@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <asio/post.hpp>
+#include <filesystem>
 #include <utility>
 #include <vector>
 
@@ -412,16 +413,26 @@ void TransferPeer::handleRequestSend(const Frame& frame)
     const auto targetStat = store_.stat(targetPath_);
     const bool treatAsDir = targetStat.exists && targetStat.isDir;
 
+    // root 是绝对路径 = 发送方直接指定了落点（v1 的全路径语义，DESIGN.md §3.8）。
+    //
+    // 这是取消共享根之后的必然结果：对照表里那一列写的就是对端的绝对
+    // 目录，落点不再由本端配置拼出来。判定用本机平台语义——路径最终是在
+    // 本机文件系统上打开的，跨平台对端给的字符串必须按"我能解析成绝对
+    // 路径"来判断。
+    const bool rootIsAbsolute = !desc.root.empty() && std::filesystem::path(desc.root).is_absolute();
+
     if (!desc.root.empty()) {
-        // 无论最终用不用，都要先验一遍 root：即使落到用户指定的文件名，
-        // 一个含 `..` 的 root 也说明对端的行为不可信，该在握手期就拒掉。
-        const auto resolved = store_.resolveWithin(store_.normalize(targetPath_), desc.root);
+        // 相对 root 仍要验：即使落到用户指定的文件名，一个含 `..` 的 root
+        // 也说明对端的行为不可信，该在握手期就拒掉。绝对 root 不进
+        // resolveWithin——它会因为"绝对路径"被直接判越界。
+        const auto resolved =
+            rootIsAbsolute ? store_.normalize(desc.root) : store_.resolveWithin(store_.normalize(targetPath_), desc.root);
         if (resolved.empty()) {
             sendAnswerSend(AnswerStatus::kBadDesc, 0, "path escapes the target directory");
             ++stats_.protocolErrors;
             return;
         }
-        if (treatAsDir) {
+        if (treatAsDir || rootIsAbsolute) {
             target = resolved;
 
             // desc.root 允许带目录段（"sub/name.txt"）——这是"发送方指定

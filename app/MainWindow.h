@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QHash>
 #include <QWidget>
 
 #include "bridge/CoreService.h"
@@ -65,14 +66,14 @@ private slots:
     // 文件**比。v1 的语义是跨面板比，v2 的两个面板正好是左本地、右远端。
     void onCompareRequested(const QString& name, bool wantTime);
     void onBrowsePeerRequested(const QString& peerId, const QString& peerName);
-    void onRemoteBrowseFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteRow>& rows);
+    void onRemoteBrowseFinished(bool ok, bool rootListing, const QString& summary, const QList<relayer::app::RemoteRow>& rows);
 
 private:
     void buildLayout();
     void wireSignals();
     void startAutoReceive();
 
-    // 把远端面板切到某个对端的某一层（空 = 共享根）。
+    // 把远端面板切到某个对端的某一层（空 = 根列表）。
     // 两个入口共用：对端表右键「浏览此对端的目录」、对照表右键「访问对端目录」。
     void switchRemotePeer(const QString& peerId, const QString& peerName, const QString& relPath = QString());
 
@@ -88,6 +89,38 @@ private:
     QList<RemoteCheck> remoteChecks_;
     int remoteCheckIndex_ = -1;
 
+    // ------------------------------------------------------------------
+    // 发送前检查（v1 的"基本检查 + 覆盖提示"）
+    // ------------------------------------------------------------------
+    //
+    // 流程：把这一批要发的目标绝对路径**一次性**问对端（每个对端一次
+    // kAskPathMeta），拿回结果后在一个普通模态对话框里逐项问用户要不要
+    // 覆盖，最后按回答过滤掉跳过的项再真正开任务。
+    //
+    // 为什么不在传输中弹窗：那个决策点在 TransferPeer 的 io 线程上，应答
+    // 帧压在那里，等用户点按钮会饿死心跳（空闲 20s 发 ping、10s 未答判
+    // 死），只能加"用户还没点就超时"的兜底。放到传输之前就没有这个问题。
+    struct SendPreCheck {
+        QString peerId;
+        QStringList paths;   // 对端视角的绝对路径
+        QList<int> itemIndexes;
+    };
+
+    void sendBatch(const relayer::app::RelayTaskItems& items, const relayer::app::ConnInfo& conn, const QString& defaultPeerId);
+    void startSendPreCheck(const relayer::app::RelayTaskItems& items, const relayer::app::ConnInfo& conn,
+                           const QString& defaultPeerId);
+    void issueNextPreCheck();
+    void onPreCheckMetaFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteMetaRow>& rows);
+    void promptOverwriteThenSend();
+
+    relayer::app::RelayTaskItems preCheckItems_;
+    relayer::app::ConnInfo preCheckConn_;
+    QString preCheckDefaultPeer_;
+    QList<SendPreCheck> preCheckQueue_;
+    int preCheckIndex_ = -1;
+    // key = 对端 id + "|" + 绝对路径
+    QHash<QString, relayer::app::RemoteMetaRow> preCheckResults_;
+
     // "下载到本地目录"的逐行队列（对照表右键）。
     //
     // 为什么要排队：协议上一次只允许一个取回请求在飞（Client 的 pullActive），
@@ -98,7 +131,7 @@ private:
     // 接受了"）是不够的：文件还在传，下一行的请求会被对端以"正忙"拒掉。
     struct DownloadJob {
         QString peer;
-        QString relPath;   // 对端共享根下的相对路径（relDir/name）
+        QString relPath;   // 对端绝对路径（relDir/name）
         QString name;      // 期望收到的名字（认领 fileReceived 用）
         bool isDir = false;
         QString into;   // 落点：该行的本地目录；空 = 全局接收目录

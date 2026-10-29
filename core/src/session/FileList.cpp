@@ -6,6 +6,7 @@ namespace relayer::core::session {
 
 namespace {
 using detail::putI64;
+using detail::putU16;
 using detail::putU32;
 using detail::putU64;
 using detail::putU8;
@@ -37,27 +38,28 @@ bool isSingleSegmentName(std::string_view name)
 }
 }   // namespace
 
-std::vector<char> encodeAskFileList(std::string_view relPath)
+std::vector<char> encodeAskFileList(std::string_view absPath)
 {
+    // 路径长度用 u16，不用路由字段那种 u8：v1 的共享根模型下路径是相对的
+    // 短串，改成绝对路径之后 255 字节根本不够（Windows 上 MAX_PATH 就是
+    // 260，深目录轻易超）。超长返回空体——解码侧判"缺 count"失败，
+    // 不会把截断后的路径当成另一个目录。
     std::vector<char> out;
-    // 与路由字段同用 u8 长度（§9.1）：同一个"路径"概念不该有两套长度编码。
-    // 超过 255 字节的相对路径直接截断是危险的，所以由调用方保证长度；
-    // 这里超长时给空体（解码侧会判成"空路径 = 根"，不会误解成别的目录）。
-    if (relPath.size() > 255) {
+    if (absPath.size() > 0xFFFF) {
         return out;
     }
-    putU8(out, static_cast<std::uint8_t>(relPath.size()));
-    out.insert(out.end(), relPath.begin(), relPath.end());
+    putU16(out, static_cast<std::uint16_t>(absPath.size()));
+    out.insert(out.end(), absPath.begin(), absPath.end());
     return out;
 }
 
-bool decodeAskFileList(const std::vector<char>& body, std::string& relPath, std::string& err)
+bool decodeAskFileList(const std::vector<char>& body, std::string& absPath, std::string& err)
 {
-    relPath.clear();
+    absPath.clear();
     Reader r(body);
-    const auto len = r.u8();
+    const auto len = r.u16();
     if (!r.ok()) {
-        err = "ask_file_list truncated: missing length byte";
+        err = "ask_file_list truncated: missing length field";
         return false;
     }
     if (r.remaining() != len) {
@@ -66,7 +68,7 @@ bool decodeAskFileList(const std::vector<char>& body, std::string& relPath, std:
         err = "ask_file_list length mismatch";
         return false;
     }
-    relPath = r.str(len);
+    absPath = r.str(len);
     if (!r.ok()) {
         err = "ask_file_list truncated: missing path bytes";
         return false;
@@ -74,10 +76,12 @@ bool decodeAskFileList(const std::vector<char>& body, std::string& relPath, std:
     return true;
 }
 
-Status encodeAnswerFileList(FileListStatus status, const std::vector<RemoteEntry>& entries, std::vector<char>& out)
+Status encodeAnswerFileList(FileListStatus status, bool rootListing, const std::vector<RemoteEntry>& entries,
+                            std::vector<char>& out)
 {
     out.clear();
     putU8(out, static_cast<std::uint8_t>(status));
+    putU8(out, rootListing ? 1 : 0);
 
     // 拒绝/不存在时也发 count=0，而不是省掉这个字段：解码侧不必为
     // "有没有 count"分两种结构。
@@ -99,10 +103,11 @@ Status encodeAnswerFileList(FileListStatus status, const std::vector<RemoteEntry
             // 静默截断——截断后的名字指向的是另一个文件。
             return Status::Fail(ErrorCode::kProtocol, "file list entry name is too long");
         }
-        if (!isSingleSegmentName(e.name)) {
-            // 与解码侧同一条规则：名字必须是单段。编码处出现这种值说明
-            // 本地列举的实现有问题（DirEntry.name 不该含分隔符），早失败
-            // 比发出去让对方拒收更靠近肇事点。
+        if (!rootListing && !isSingleSegmentName(e.name)) {
+            // 与解码侧同一条规则：普通列表的条目名必须是单段。编码处出现
+            // 这种值说明本地列举的实现有问题（DirEntry.name 不该含分隔符），
+            // 早失败比发出去让对方拒收更靠近肇事点。根列表例外——那里
+            // 名字就是完整路径。
             return Status::Fail(ErrorCode::kProtocol, "file list entry name is not a single path segment");
         }
         putU8(out, static_cast<std::uint8_t>(e.name.size()));
@@ -114,16 +119,18 @@ Status encodeAnswerFileList(FileListStatus status, const std::vector<RemoteEntry
     return Status::Ok();
 }
 
-bool decodeAnswerFileList(const std::vector<char>& body, FileListStatus& status, std::vector<RemoteEntry>& entries,
-                          std::string& err)
+bool decodeAnswerFileList(const std::vector<char>& body, FileListStatus& status, bool& rootListing,
+                          std::vector<RemoteEntry>& entries, std::string& err)
 {
     status = FileListStatus::kNotFound;
+    rootListing = false;
     entries.clear();
 
     Reader r(body);
     const auto rawStatus = r.u8();
+    const auto rawFlags = r.u8();
     if (!r.ok()) {
-        err = "answer_file_list truncated: missing status byte";
+        err = "answer_file_list truncated: missing header";
         return false;
     }
     if (rawStatus > static_cast<std::uint8_t>(FileListStatus::kTruncated)) {
@@ -133,6 +140,7 @@ bool decodeAnswerFileList(const std::vector<char>& body, FileListStatus& status,
         return false;
     }
     status = static_cast<FileListStatus>(rawStatus);
+    rootListing = (rawFlags & 1U) != 0;
 
     const auto count = r.u32();
     if (!r.ok()) {
@@ -166,7 +174,7 @@ bool decodeAnswerFileList(const std::vector<char>& body, FileListStatus& status,
         // 整份拒绝而不是跳过这一条：合法对端不可能发出这种名字，出现即
         // 说明对端有 bug 或被动过，此时整份列表都不值得信。放过坏条目、
         // 只丢一条会变成"目录里莫名少了个文件"，比明确报错更难查。
-        if (!isSingleSegmentName(e.name)) {
+        if (!rootListing && !isSingleSegmentName(e.name)) {
             err = "answer_file_list entry name is not a single path segment";
             entries.clear();
             return false;

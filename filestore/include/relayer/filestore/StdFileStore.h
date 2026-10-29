@@ -41,6 +41,7 @@ public:
     std::unique_ptr<IWriteStream> openWrite(std::string_view path, bool truncate, Status& st) const override;
 
     Status list(std::string_view dir, bool recursive, std::vector<DirEntry>& out) const override;
+    [[nodiscard]] std::vector<std::string> roots() const override;
     Status mkdirs(std::string_view dir) const override;
 
     Status remove(std::string_view path) const override;

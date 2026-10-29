@@ -10,6 +10,7 @@
 
 #include "relayer/common/Status.h"
 #include "relayer/core/session/FileList.h"
+#include "relayer/core/session/PathMeta.h"
 #include "relayer/core/session/Session.h"
 #include "relayer/core/transfer/WorkerPool.h"
 #include "relayer/filestore/StdFileStore.h"
@@ -81,6 +82,12 @@ struct Outcome {
     // status 为 kRejected / kNotFound 时 entries 为空，summary 说明原因。
     std::vector<core::session::RemoteEntry> remoteEntries;
     core::session::FileListStatus listStatus = core::session::FileListStatus::kOk;
+    // 本次列举是不是"根列表"（条目名是完整路径，不是单段名）。
+    bool rootListing = false;
+
+    // askPathMeta 的结果：与请求里的路径**一一对应、顺序相同**。
+    // 其他操作为空。
+    std::vector<core::session::RemoteMeta> remoteMetas;
 };
 
 // 进度回调。bytesPerSecond 由 Client 自己算——传原始计数让每个调用方
@@ -196,6 +203,9 @@ struct ClientConfig {
     // 退出条件含糊。
     bool selfBrowse = false;
 
+    // selfBrowse 要列的绝对路径。空 = 根列表。
+    std::string selfBrowsePath;
+
     // 远端取回（recv --pull-from / --pull-path，PROTOCOL.md §11.9）。
     //
     // 做成"recv + 搭车请求"而不是独立子命令，理由和 --self-send 一样：请求
@@ -204,7 +214,7 @@ struct ClientConfig {
     //
     // pullFrom 为空表示不做取回。
     std::string pullFrom;
-    std::string pullPath;   // 相对对端共享根
+    std::string pullPath;   // 对端的绝对路径
 
     // true 表示 pullPath 指向**目录**，请对端打包成 tar.xz 再发（PROTOCOL.md
     // §11.10）。收到的是包本身，不会自动解包。
@@ -216,12 +226,12 @@ struct ClientConfig {
     // 就想要的那个包，擅自解开会让"东西呢"变成一个问题。
     bool unpackArchives = false;
 
-    // 远端目录列举的共享根（PROTOCOL.md §11.8）。空 = **不响应**列举请求。
+    // 远端目录列举/取回**不再有共享根**（DESIGN.md §3.8）。
     //
-    // 只有这个目录之下的内容能被对端看到：请求里的路径一律按"相对该根"
-    // 解释并过 resolveWithin，绝对路径与 `..` 逃逸都会被拒绝。默认关闭是
-    // 有意的——"能被别人看目录"必须是显式决定，不能靠忘记配置来默认开启。
-    std::string shareRoot;
+    // 单用户自用工具，v1 就是全路径访问。少了这一层，远端浏览可以直接
+    // 从盘符/家目录开始导航，不必先配置"我要共享哪个目录"再浏览。
+    // 代价是"能连上中继并知道本机 id 的人可以列举本机路径"——这是有意的
+    // 取舍，别再偷偷把它当安全边界（PROTOCOL.md §11.8.1）。
 
     // 传输参数。chunkSize 在命令行可调，主要用于把"小文件测不出多块"
     // 这条路堵上（见 TransferPeer::Config 的注释）。
@@ -283,7 +293,7 @@ public:
 
     // 问对端要一次目录列举（PROTOCOL.md §11.8）。
     //
-    // relPath 是**相对对端共享根**的路径，空表示根目录本身。对端没开共享
+    // absPath 是**对端视角的绝对路径**，空表示根列表（盘符 + 家目录）。
     // 或路径越界时结果为失败（kRejected），不是崩溃。
     void browsePeer(std::string peerId, std::string relPath);
 
@@ -316,6 +326,17 @@ public:
     // 返回 false = 当前没有可用的常驻会话（没连上 / 正在跑别的操作），
     // 调用方应提示"先连接"而不是偷偷降级成新连接。
     bool browseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome&)> done);
+
+    // 在**现有常驻会话**上批量查询一批绝对路径的元信息（PROTOCOL.md §11.11）。
+    //
+    // 用途：图形界面的"发送前检查"——先问对方这些目标路径是否已存在、
+    // 多大、内容指纹是否一致，再在一个普通对话框里逐项问用户要不要覆盖。
+    // 决策被整体挪到传输开始**之前**，因此不存在"传输中阻塞 io 线程等
+    // 用户点按钮"的问题（那条路会饿死心跳，只能加超时兜底）。
+    //
+    // 结果按请求顺序落在 Outcome::remoteMetas；对端返回的条数不匹配时
+    // 整批判失败（按下标对不上就是错位，错位的覆盖提示会让用户点错文件）。
+    bool askPathMetaOnSession(std::string peerId, std::vector<std::string> absPaths, std::function<void(const Outcome&)> done);
 
     // 在**现有常驻会话**上请对端把某个文件发过来（PROTOCOL.md §11.9）。
     //

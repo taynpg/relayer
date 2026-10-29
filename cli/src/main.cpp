@@ -56,13 +56,12 @@ void printUsage()
                 "                           （与 --password 互斥；不自动推断，防止漏填口令静默降级）\n"
                 "      --id <name>          声明本机标识（重连后保持不变；被别人占用则连接失败）\n"
                 "      --self-send <file>   自检：recv 时把这个文件发给自己（验完整链路）\n"
-                "      --self-browse        自检：recv 时在接收会话上列一次自己的共享根\n"
+                "      --self-browse        自检：recv 时在接收会话上列一次本机根目录\n"
                 "      --pull-from <id>     取回：recv 时请这个对端把文件发过来\n"
-                "      --pull-path <rel>    取回的文件（相对对端共享根）\n"
-                "      --pull-dir <rel>     取回的目录（对端打包成 tar.xz，收到后自动解开）\n"
+                "      --pull-path <path>   取回的文件（对端的绝对路径）\n"
+                "      --pull-dir <path>    取回的目录（对端打包成 tar.xz，收到后自动解开）\n"
                 "      --unpack             收到 .tar.xz 就解开并删除包\n"
-                "      --share <dir>        recv 时允许对端列举这个目录（不给则不响应）\n"
-                "      --path <rel>         ls 的相对路径（相对对端共享根，默认根目录）\n"
+                "      --path <path>        ls 的绝对路径（不给 = 列出根：盘符 + 家目录）\n"
                 "      --chunk-size <bytes> 分块大小（默认 256 KiB，上限 4 MiB）\n"
                 "      --idle-timeout <sec> 传输开始后多久没有进展就判定对端失联（默认 60）\n"
                 "                           传输开始前不计时：recv 会一直等，除非给 --hard-timeout\n"
@@ -335,11 +334,6 @@ ParseResult parseArgs(int argc, char** argv)
             if (!takeValue(a, r.args.path)) {
                 return r;
             }
-        } else if (a == "--share") {
-            // 允许对端列举哪个目录（PROTOCOL.md §11.8）。不给 = 不响应。
-            if (!takeValue(a, r.args.config.shareRoot)) {
-                return r;
-            }
         } else if (a == "--overwrite") {
             // 接收目标已存在时删旧收新。默认拒绝覆盖（保护用户文件），
             // "反复发同一个文件到同一目录"的场景需要显式打开。
@@ -364,9 +358,11 @@ ParseResult parseArgs(int argc, char** argv)
         r.error = "ls 需要 --to 指定要列举哪个对端";
         return r;
     }
-    if (r.args.command == "ls" && !r.args.config.shareRoot.empty()) {
-        r.error = "--share 是接收方选项，ls 只需要 --path";
-        return r;
+
+    if (r.args.config.selfBrowse && !r.args.path.empty()) {
+        // --self-browse 默认列根列表；给了 --path 就列那个绝对路径。
+        r.args.config.selfBrowsePath = r.args.path;
+        r.args.path.clear();   // 免得 ls 的校验把它当命令参数
     }
 
     if (!r.args.config.selfSendPath.empty() && r.args.command != "recv") {

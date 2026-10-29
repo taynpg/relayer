@@ -234,6 +234,10 @@ std::string_view toString(FrameType t) noexcept
         return "answer_file_pull";
     case FrameType::kAskArchivePull:
         return "ask_archive_pull";
+    case FrameType::kAskPathMeta:
+        return "ask_path_meta";
+    case FrameType::kAnswerPathMeta:
+        return "answer_path_meta";
 
     case FrameType::kFileRequestSend:
         return "file_request_send";

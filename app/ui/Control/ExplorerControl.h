@@ -33,9 +33,9 @@ class QComboBox;
 // 的意义。差异只在三处，都有明确理由：
 //   1. 远端是**只读**：重命名/删除/新建文件夹都是本地文件系统操作，远端没有
 //      对应帧（要做得先有协议）；远端模式不显示这些动作。
-//   2. 远端的拖拽载荷是**相对共享根**而不是本地绝对路径，所以拖出时多打一个
+//   2. 远端的拖拽载荷是**对端绝对路径**而不是本地绝对路径，所以拖出时多打一个
 //      标记 MIME，对照表的本地目录列据此拒收（见 InfoDrop.h）。
-//   3. 远端路径是**相对共享根**（可能是另一个系统的路径规则），显示成
+//   3. 远端路径是**对端绝对路径**（可能是另一个系统的路径规则），显示成
 //      `peer:/rel`，且不可手输。
 //
 // 与 v1 的另一处差异：不用 WorkerThread/BaseAskDF/WaitDialog。本地列举同步
@@ -53,7 +53,7 @@ public:
 
     explicit ExplorerControl(QWidget* parent = nullptr);
 
-    // 切到远端：browse 该对端的共享根。同一个控件，UI 不变（v1 语义）。
+    // 切到远端：browse 该对端的某个绝对路径。同一个控件，UI 不变（v1 语义）。
     //
     // relPath 非空时直接进那一层（对照表"访问远程目录"：那一行说的就是
     // peer:relDir，跳过去才看得出"到底传到了对方哪个目录"）。不能先
@@ -70,7 +70,7 @@ public:
     }
 
     // 远端模式下当前浏览的对端 id（本地面板为空），以及当前所在路径
-    // （本地为绝对路径、远端为相对共享根）。校验用它俩发列举请求。
+    // （两侧都是绝对路径，只是分属不同机器）。校验用它俩发列举请求。
     [[nodiscard]] QString remotePeerId() const
     {
         return peerId_;
@@ -82,7 +82,8 @@ public:
 
     // 远端列举的结果（MainWindow 从 CoreService 送回来）。
     // ok=false 时 summary 说明原因（未开共享 / 目录不存在 / 会话不可用）。
-    void applyRemoteEntries(bool ok, const QString& summary, const QList<relayer::app::RemoteRow>& rows);
+    // rootListing = 这次是根列表（条目名是完整路径，双击时直接用）。
+    void applyRemoteEntries(bool ok, bool rootListing, const QString& summary, const QList<relayer::app::RemoteRow>& rows);
 
     // 当前浏览的目录（空 = 尚未进入任何目录）。
     QString currentPath() const
@@ -116,7 +117,7 @@ signals:
     // 目录浏览失败的提示（进入失败、删除失败等）。MainWindow 转发到日志。
     void notice(const QString& msg);
 
-    // 远端模式下的列举请求（relPath 相对对端共享根，空 = 根）。
+    // 远端模式下的列举请求（absPath 是对端的绝对路径，空 = 根列表）。
     // 本控件不碰网络：只发请求，结果由 applyRemoteEntries 送回。
     void remoteListRequested(const QString& peerId, const QString& relPath);
 
@@ -184,6 +185,10 @@ private:
     // 远端模式下把 relPath 显示成 `peer:/rel`（用户要能一眼看出这是远端）。
     [[nodiscard]] QString displayPath() const;
 
+    // 当前这张远端表是不是"根列表"（盘符 + 家目录）。根列表的条目名是
+    // 完整路径，双击/取回时不能当单段名去拼。
+    bool remoteRootListing_ = false;
+
     // 把路径写进 cbPath。**不能用 setCurrentText**：远端模式 cbPath 不可编辑，
     // 非可编辑的 QComboBox 只会在已有项里查找，找不到就什么都不做——这正是
     // "点了浏览但控件毫无变化"的根因（路径框停在旧值，表格本来就是空的）。
@@ -192,7 +197,7 @@ private:
     // 当前选中的本地绝对路径（去重、保持表格顺序）。远端模式返回空。
     [[nodiscard]] QStringList selectedLocalPaths() const;
 
-    // 当前所在路径。本地是绝对路径，远端是相对共享根——由调用方
+    // 当前所在路径。本地是本机绝对路径，远端是**对端**的绝对路径——由调用方
     // （MainWindow）按 source() 判断是哪一种。
     // 状态行。每一次列举都必须留下可见结果（读取中 / 共 N 项 / 失败原因），
     // 否则失败与"没反应"在界面上无法区分。

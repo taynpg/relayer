@@ -45,6 +45,16 @@ struct RemoteRow {
     qint64 mtime = 0;
 };
 
+// 批量路径查询的单条结果（PROTOCOL.md §11.11）。与请求的路径一一对应、
+// 顺序相同——按下标对回发送任务的每一项。
+struct RemoteMetaRow {
+    bool exists = false;
+    bool isDir = false;
+    quint64 size = 0;
+    qint64 mtimeMs = 0;    // 0 = 没有（不存在或取不到）
+    QString fingerprint;   // 空 = 无法粗判内容
+};
+
 // 一次连接所需的全部参数。收拢成结构体而不是继续给每个方法加参数：
 // sendFile 已经 6 个参数，且这三项在所有操作里总是一起出现。
 struct ConnInfo {
@@ -154,18 +164,27 @@ public:
     //
     // 返回 false = 没有可用的常驻会话（没连接、或正在传输）。**不回落成
     // 新连接**：那会顶掉接收会话、换掉本机 id，是文档里反复警告的回归。
-    bool browsePeerOnSession(const QString& peerId, const QString& relPath);
+    // absPath 是**对端视角的绝对路径**（DESIGN.md §3.8）。空 = 根列表
+    // （盘符 + 家目录）。
+    bool browsePeerOnSession(const QString& peerId, const QString& absPath);
 
     // 在常驻会话上请对端把某个文件发过来（PROTOCOL.md §11.9）。
-    // relPath 相对对端共享根。文件会落到本机的接收目录——落点由本机配置
-    // 决定，共享方无权指定（协议里这条是写死的）。
-    // asArchive=true：relPath 指向**目录**，请对端打包成 tar.xz（§11.10）。
+    // absPath 是**对端视角的绝对路径**。文件落到本机的接收目录或 intoDir
+    // ——落点由本机决定，对方无权指定（协议里这条是写死的）。
+    // asArchive=true：absPath 指向**目录**，请对端打包成 tar.xz（§11.10）。
     // 归档请求要等对端压缩完才回应答，超时是 120 秒。
     //
     // intoDir 非空 = 这一次收到的东西落到那里，收完**自动恢复**成全局接收
     // 目录（对照表的行级下载：每行有自己的本地目录，不能一次下载就把整个
     // 会话的落点永久改掉）。空 = 用全局接收目录。
-    bool pullFileFromPeer(const QString& peerId, const QString& relPath, bool asArchive, const QString& intoDir = QString());
+    bool pullFileFromPeer(const QString& peerId, const QString& absPath, bool asArchive, const QString& intoDir = QString());
+
+    // 批量查对端一批绝对路径的元信息（PROTOCOL.md §11.11）。
+    //
+    // 用途：发送前检查。结果按**请求顺序**回在 pathMetaFinished 里，
+    // 条数与请求一致（不一致时整批失败——按下标对不上就是错位，错位的
+    // 覆盖提示会让用户点到别的文件上）。
+    bool askPathMeta(const QString& peerId, const QStringList& absPaths);
 
     // 中止当前操作（硬停：不发 cancel 帧，与 CLI 的 abort 同语义）。
     void cancelCurrent();
@@ -209,7 +228,12 @@ signals:
 
     // 远端列举的结果（browsePeerOnSession 的回程）。一次请求一次信号，
     // 会话不结束。
-    void remoteBrowseFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteRow>& rows);
+    // rootListing=true 表示这是一次根列表（条目名是完整路径，不是单段名）。
+    void remoteBrowseFinished(bool ok, bool rootListing, const QString& summary, const QList<relayer::app::RemoteRow>& rows);
+
+    // 批量路径查询的结果（askPathMeta 的回程）。rows 与请求的路径一一对应、
+    // 顺序相同；ok=false 时 rows 为空，summary 说明原因。
+    void pathMetaFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteMetaRow>& rows);
 
     // 取回请求的结论（收到对端应答时触发，**不是**文件传完）。
     // ok=true 只表示"对方接受了"，文件随后由接收路径报告落点。

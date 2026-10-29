@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
@@ -66,6 +67,27 @@ std::string fromNative(const std::string& native)
 }
 
 #endif
+
+std::string homeDirectory()
+{
+    // 两个平台都先看标准环境变量；Windows 上再退到 HOMEDRIVE+HOMEPATH
+    // （老系统/某些服务账户不设 USERPROFILE）。
+#ifdef _WIN32
+    if (const char* p = std::getenv("USERPROFILE"); p != nullptr && *p != '\0') {
+        return p;
+    }
+    const char* drive = std::getenv("HOMEDRIVE");
+    const char* rest = std::getenv("HOMEPATH");
+    if (drive != nullptr && rest != nullptr && *drive != '\0' && *rest != '\0') {
+        return std::string(drive) + rest;
+    }
+#else
+    if (const char* p = std::getenv("HOME"); p != nullptr && *p != '\0') {
+        return p;
+    }
+#endif
+    return {};
+}
 
 // fopen 的可移植包装：Windows 走 _wfopen 以支持中文/emoji 路径，
 // 其它平台直接 fopen。所有打开文件的地方都必须经过这里，

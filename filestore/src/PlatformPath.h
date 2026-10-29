@@ -22,6 +22,10 @@ using NativePath = std::string;
 NativePath toNative(const std::string& utf8);
 std::string fromNative(const NativePath& native);
 
+// 当前用户的家目录（UTF-8）。取不到时返回空串。
+// 用途：远端浏览的根列表里放一个"家目录"快捷入口（IFileStore::roots）。
+std::string homeDirectory();
+
 // 以 UTF-8 路径打开 C 流。Windows 上内部走 _wfopen。
 // 约定：本模块内所有文件打开都必须经由此函数，不要直接调 std::fopen。
 std::FILE* openNativeFile(const std::string& utf8Path, const char* mode);

@@ -18,10 +18,11 @@ inline constexpr const char* kConnectorMyId = "connector/myId";
 
 // 接收
 inline constexpr const char* kReceiverDir = "receiver/dir";
-inline constexpr const char* kReceiverOverwrite = "receiver/overwrite";
 // 共享目录（对端可列举的范围，PROTOCOL.md §11.8）。空 = 不响应列举。
-inline constexpr const char* kReceiverShareRoot = "receiver/shareRoot";
-inline constexpr bool kReceiverOverwriteDefault = true;
+// 发送前检查（对端已有同名文件时逐项询问是否覆盖）。默认开——v1 的
+// 基本检查就是默认行为，关掉它意味着"照发不误、静默覆盖对方的文件"。
+inline constexpr const char* kSendCheckBeforeSend = "sender/checkBeforeSend";
+inline constexpr bool kSendCheckDefault = true;
 // 自动接收失败重试（Setting 对话框；MainWindow 消费）
 inline constexpr const char* kReceiverAutoRetry = "receiver/autoRetry";           // bool
 inline constexpr const char* kReceiverRetryInterval = "receiver/retryInterval";   // 秒

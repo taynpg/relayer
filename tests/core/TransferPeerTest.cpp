@@ -580,6 +580,51 @@ TEST_CASE("peer overwrites an existing target when the policy allows it", "[peer
     h.requireEveryFrameAddressed();
 }
 
+TEST_CASE("peer lands on an absolute root path instead of the receive directory", "[peer][integration]")
+{
+    // 全路径语义（DESIGN.md §3.8）：desc.root 是绝对路径时，落点就是它，
+    // 不再拼接收目录。对照表的"远端目录"那一列靠这条活着——它写的是
+    // 对端的绝对目录。
+    test::TempDir srcDir;
+    test::TempDir dstDir;
+    Harness h;
+
+    const auto content = makeContent(4 * kChunk + 7);
+    const auto srcPath = srcDir.utf8() + "/abs-src.bin";
+    const auto inbox = dstDir.utf8() + "/inbox";
+    REQUIRE(writeAllStore(h.storeA, srcPath, content));
+    REQUIRE(h.storeB.mkdirs(inbox));
+
+    // 目标绝对路径，中间目录还不存在：接收方要在打开文件前建齐。
+    const std::string absTarget = dstDir.utf8() + "/deep/nested/abs-dst.bin";
+
+    connectPair(h, [&] {
+        h.receiver = TransferPeer::createReceiver(h.ctx, h.server, h.storeB, h.recvPool, inbox, 6, peerConfig(),
+                                                  [sink = h.receiverSink](const TransferResult& r) {
+                                                      ++sink->calls;
+                                                      sink->result = r;
+                                                  });
+        h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, absTarget, "client-1", 6,
+                                              peerConfig(), [sink = h.senderSink](const TransferResult& r) {
+                                                  ++sink->calls;
+                                                  sink->result = r;
+                                              });
+    });
+
+    REQUIRE(driveUntil(h, [&] { return h.senderSink->calls > 0 && h.receiverSink->calls > 0; }));
+
+    REQUIRE(h.receiverSink->result.outcome == TransferOutcome::kCompleted);
+    REQUIRE(h.senderSink->result.outcome == TransferOutcome::kCompleted);
+
+    // 落在绝对路径上，内容一致，接收目录里不多出东西。
+    REQUIRE(readAllStore(h.storeB, absTarget) == content);
+    std::vector<relayer::filestore::DirEntry> inInbox;
+    REQUIRE(h.storeB.list(inbox, true, inInbox).ok());
+    REQUIRE(inInbox.empty());
+
+    h.requireEveryFrameAddressed();
+}
+
 // ===========================================================================
 // 取消
 // ===========================================================================

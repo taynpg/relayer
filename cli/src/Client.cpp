@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "relayer/core/session/FileList.h"
+#include "relayer/core/session/PathMeta.h"
 #include "relayer/core/session/PeerTable.h"
 #include "relayer/core/transfer/TransferPeer.h"
 #include "relayer/filestore/TarXzArchiver.h"
@@ -106,6 +107,16 @@ struct Client::Impl {
     bool browseActive = false;
     std::function<void(const Outcome&)> onBrowseDone;
 
+    // 常驻会话上的批量路径元信息（GUI 的发送前检查）。
+    // 与列举、取回共用"会话不结束、只回调这一次结论"的模式；三者互斥
+    // ——同一时刻只有一个请求在等应答，否则应答回来分不清是哪一笔的。
+    bool metaActive = false;
+    std::string metaPeerId;
+    std::vector<std::string> metaPaths;
+    std::vector<core::session::RemoteMeta> metaResults;
+    std::function<void(const Outcome&)> onMetaDone;
+    asio::steady_timer metaTimer{ctx};
+
     // 会话内的一次"取回请求"（PROTOCOL.md §11.9）。只等到 kAnswerFilePull
     // 为止——真正的文件由常驻接收会话收下，走的是普通接收路径。
     bool pullActive = false;
@@ -156,6 +167,9 @@ struct Client::Impl {
     // 远端列举的结果（kAnswerFileList 的内容）。由 finish() 搬进 Outcome。
     std::vector<core::session::RemoteEntry> remoteEntries;
     core::session::FileListStatus listStatus = core::session::FileListStatus::kOk;
+    // 本次列举是不是根列表（条目名是完整路径）。解码时带出，回填给 UI
+    // 决定"双击时是拼相对路径还是直接用这条的完整路径"。
+    bool rootListing = false;
 
     // ---------------------------------------------------------------------
     // 收尾
@@ -184,6 +198,10 @@ struct Client::Impl {
         browseActive = false;
         onBrowseDone = nullptr;
         browseTimer.cancel();
+        // 挂起的元信息查询同理。
+        metaActive = false;
+        onMetaDone = nullptr;
+        metaTimer.cancel();
 
         if (!ok) {
             // 失败时**不**调 session->close()：先让调用方看到结论，关闭
@@ -215,6 +233,7 @@ struct Client::Impl {
             } else if (action == Action::kBrowse || browseDone) {
                 o.remoteEntries = remoteEntries;
                 o.listStatus = listStatus;
+                o.rootListing = rootListing;
             }
             onDone(o);
         }
@@ -510,7 +529,7 @@ struct Client::Impl {
             // 与应答都绕回本连接，所以一个进程就把服务端应答侧也验了。
             if (action == Action::kReceive && identityFinal && config.selfBrowse && !selfBrowseStarted) {
                 selfBrowseStarted = true;
-                const bool started = startBrowseOnSession(assignedId, std::string(), [this](const Outcome& o) {
+                const bool started = startBrowseOnSession(assignedId, config.selfBrowsePath, [this](const Outcome& o) {
                     // 列完就结束：这是自检，不是长期接收。
                     finish(o.ok, o.summary, o.status, false);
                 });
@@ -638,7 +657,12 @@ struct Client::Impl {
         });
     }
 
-    // 对端来问目录：按共享根解析、列一层、回一条。**只服务这一个根**。
+    // 对端来问目录：按**绝对路径**列一层、回一条。
+    //
+    // 没有共享根了（DESIGN.md §3.8）：本工具是单用户自用，v1 就是全路径
+    // 访问，多一层"相对根"只会让"看 D:\照片"变成先配置再浏览两步。代价是
+    // 任何能连上中继、知道本机 id 的人都能列举本机路径——这一点写在
+    // PROTOCOL.md §11.8.1，不要在别处偷偷把它当安全边界。
     //
     // 目录列举是同步做的：一次 readdir 在该规模下是毫秒级，而引入工作线程
     // 会把"谁保证 store 生命周期"的问题带进来。真遇到网络盘这类慢列举，
@@ -652,58 +676,116 @@ struct Client::Impl {
 
         std::vector<core::session::RemoteEntry> out;
         auto status = core::session::FileListStatus::kOk;
+        bool isRootList = false;
 
-        std::string rel;
+        std::string path;
         std::string err;
-        if (!core::session::decodeAskFileList(req.body, rel, err)) {
+        if (!core::session::decodeAskFileList(req.body, path, err)) {
             status = core::session::FileListStatus::kRejected;
-        } else if (config.shareRoot.empty()) {
-            // 没开共享：明确拒绝。静默不回会让对方等满应答超时，
-            // 看起来像网络问题。
-            status = core::session::FileListStatus::kRejected;
-        } else {
-            const std::string target = rel.empty() ? config.shareRoot : store.resolveWithin(config.shareRoot, rel);
-            if (target.empty()) {
-                status = core::session::FileListStatus::kRejected;   // 绝对路径 / 越界
+        } else if (path.empty()) {
+            // 空路径 = 要根列表：盘符 + 家目录。没有这一层，请求方在
+            // 绝对路径模型下就没有起点，只能靠猜盘符。
+            isRootList = true;
+            const auto roots = store.roots();
+            if (roots.empty()) {
+                status = core::session::FileListStatus::kNotFound;
             } else {
-                const auto st = store.stat(target);
-                if (!st.exists || !st.isDir) {
+                out.reserve(roots.size());
+                for (const auto& r : roots) {
+                    core::session::RemoteEntry e;
+                    e.name = r;
+                    e.isDir = true;
+                    const auto st = store.stat(r);
+                    if (st.exists) {
+                        e.mtime = st.mtime;
+                    }
+                    out.push_back(std::move(e));
+                }
+            }
+        } else {
+            const auto st = store.stat(path);
+            if (!st.exists || !st.isDir) {
+                status = core::session::FileListStatus::kNotFound;
+            } else {
+                std::vector<filestore::DirEntry> raw;
+                if (!store.list(path, false, raw).ok()) {
                     status = core::session::FileListStatus::kNotFound;
                 } else {
-                    std::vector<filestore::DirEntry> raw;
-                    if (!store.list(target, false, raw).ok()) {
-                        status = core::session::FileListStatus::kNotFound;
-                    } else {
-                        // 目录在前、同类型按名字排：列表是给人看的，顺序稳定
-                        // 比"文件系统返回什么算什么"重要（也方便测试断言）。
-                        std::sort(raw.begin(), raw.end(), [](const filestore::DirEntry& a, const filestore::DirEntry& b) {
-                            if (a.isDir != b.isDir) {
-                                return a.isDir;
-                            }
-                            return a.name < b.name;
-                        });
-                        if (raw.size() > core::session::kMaxListEntries) {
-                            raw.resize(core::session::kMaxListEntries);
-                            status = core::session::FileListStatus::kTruncated;
+                    // 目录在前、同类型按名字排：列表是给人看的，顺序稳定
+                    // 比"文件系统返回什么算什么"重要（也方便测试断言）。
+                    std::sort(raw.begin(), raw.end(), [](const filestore::DirEntry& a, const filestore::DirEntry& b) {
+                        if (a.isDir != b.isDir) {
+                            return a.isDir;
                         }
-                        out.reserve(raw.size());
-                        for (const auto& e : raw) {
-                            core::session::RemoteEntry r;
-                            r.name = e.name;
-                            r.isDir = e.isDir;
-                            r.size = e.size;
-                            r.mtime = e.mtime;
-                            out.push_back(std::move(r));
-                        }
+                        return a.name < b.name;
+                    });
+                    if (raw.size() > core::session::kMaxListEntries) {
+                        raw.resize(core::session::kMaxListEntries);
+                        status = core::session::FileListStatus::kTruncated;
+                    }
+                    out.reserve(raw.size());
+                    for (const auto& e : raw) {
+                        core::session::RemoteEntry r;
+                        r.name = e.name;
+                        r.isDir = e.isDir;
+                        r.size = e.size;
+                        r.mtime = e.mtime;
+                        out.push_back(std::move(r));
                     }
                 }
             }
         }
 
-        if (const auto st = core::session::encodeAnswerFileList(status, out, answer.body); !st.ok()) {
+        if (const auto st = core::session::encodeAnswerFileList(status, isRootList, out, answer.body); !st.ok()) {
             return;   // 编码失败只可能是内部 bug，没必要再回一个坏帧
         }
         (void)session->send(answer);
+    }
+
+    // 对端来问"这几个绝对路径在不在、多大、什么时候改的、指纹是多少"。
+    //
+    // 一次 stat + 一次 quickFingerprint（只读前 64KB）逐条处理。指纹是给
+    // 发送方的覆盖提示用的：它拿本地文件的指纹一比就知道"内容是否一致"，
+    // 不必再单独发一轮采样请求（v1 的 AskFileSamplesBatch 就省掉了）。
+    void servePathMeta(const Frame& req)
+    {
+        Frame answer;
+        answer.type = FrameType::kAnswerPathMeta;
+        answer.to = req.from;
+
+        std::vector<std::string> paths;
+        std::string err;
+        std::vector<core::session::RemoteMeta> metas;
+        if (!core::session::decodeAskPathMeta(req.body, paths, err)) {
+            // 请求结构坏了：回 0 条而不是不回。不发应答会让对端等到超时，
+            // 那看起来像网络问题。
+            if (const auto st = core::session::encodeAnswerPathMeta(metas, answer.body); st.ok()) {
+                (void)session->send(answer);
+            }
+            return;
+        }
+
+        metas.reserve(paths.size());
+        for (const auto& p : paths) {
+            core::session::RemoteMeta m;
+            const auto st = store.stat(p);
+            if (st.exists) {
+                m.exists = true;
+                m.isDir = st.isDir;
+                m.size = st.size;
+                m.mtime = st.mtime;
+                if (!st.isDir) {
+                    // 指纹为空只表示"算不出来"（读失败/没权限），调用方
+                    // 按"无法粗判"处理，不能让整批失败。
+                    m.fingerprint = store.quickFingerprint(p);
+                }
+            }
+            metas.push_back(std::move(m));
+        }
+
+        if (const auto st = core::session::encodeAnswerPathMeta(metas, answer.body); st.ok()) {
+            (void)session->send(answer);
+        }
     }
 
     void refreshPeers()
@@ -829,7 +911,7 @@ struct Client::Impl {
         Frame f;
         f.type = archive ? FrameType::kAskArchivePull : FrameType::kAskFilePull;
         f.to = std::move(peerId);
-        // 请求体与 kAskFileList 同构（相对共享根的路径），复用同一套编解码。
+        // 请求体与 kAskFileList 同构（对端绝对路径），复用同一套编解码。
         f.body = core::session::encodeAskFileList(relPath);
 
         touch();
@@ -951,7 +1033,7 @@ struct Client::Impl {
         return path.string();
     }
 
-    // 对端来要文件（B 侧）：校验共享根 → 回 status → 用普通"推"流程发送。
+    // 对端来要文件（B 侧）：校验绝对路径 → 回 status → 用普通"推"流程发送。
     void servePullRequest(const Frame& req)
     {
         Frame answer;
@@ -959,34 +1041,28 @@ struct Client::Impl {
         // 请求方的身份由服务端在转发时绑定，可以直接当回信地址。
         answer.to = req.from;
 
-        std::string rel;
+        std::string path;
         std::string err;
         auto status = core::session::FilePullStatus::kRejected;
         std::string target;
 
-        if (!core::session::decodeAskFileList(req.body, rel, err)) {
+        if (!core::session::decodeAskFileList(req.body, path, err)) {
             status = core::session::FilePullStatus::kRejected;
-        } else if (config.shareRoot.empty()) {
-            // 没开共享：明确拒绝。静默不回会让对方等满超时，看起来像网络问题。
+        } else if (path.empty()) {
+            // 空路径没有意义（根不是文件），明确拒绝。
             status = core::session::FilePullStatus::kRejected;
         } else if (!canStartSendOnSession()) {
             // 自己正在发别的：明确拒绝而不是排进队列。排队会让请求方看到
             // 一个不动的进度条，而它并不知道前面还有别人在传。
             status = core::session::FilePullStatus::kRejected;
         } else {
-            const std::string resolved = rel.empty() ? config.shareRoot : store.resolveWithin(config.shareRoot, rel);
-            if (resolved.empty()) {
-                status = core::session::FilePullStatus::kRejected;   // 绝对路径 / 越界
+            const auto st = store.stat(path);
+            if (!st.exists || st.isDir) {
+                // 目录不支持：目录请走 §11.10 的打包取回。
+                status = core::session::FilePullStatus::kNotFound;
             } else {
-                const auto st = store.stat(resolved);
-                if (!st.exists || st.isDir) {
-                    // 目录不支持：打包归档还没实现，递归取回语义也不清楚
-                    // （PROTOCOL.md §11.9.5）。
-                    status = core::session::FilePullStatus::kNotFound;
-                } else {
-                    status = core::session::FilePullStatus::kAccepted;
-                    target = resolved;
-                }
+                status = core::session::FilePullStatus::kAccepted;
+                target = path;
             }
         }
 
@@ -1013,33 +1089,27 @@ struct Client::Impl {
         answer.type = FrameType::kAnswerFilePull;
         answer.to = req.from;
 
-        std::string rel;
+        std::string path;
         std::string err;
         auto status = core::session::FilePullStatus::kRejected;
         std::string packPath;
 
-        if (!core::session::decodeAskFileList(req.body, rel, err)) {
+        if (!core::session::decodeAskFileList(req.body, path, err)) {
             status = core::session::FilePullStatus::kRejected;
-        } else if (config.shareRoot.empty() || rel.empty()) {
-            // 空路径 = 整个共享根。不打包它：多半是点错了，而且一个根目录
-            // 打包出来对方也不知道该解到哪。
+        } else if (path.empty()) {
+            // 空路径 = 根，不打包它：多半是点错了，而且把整个盘打包出来
+            // 对方也不知道该解到哪。
             status = core::session::FilePullStatus::kRejected;
         } else if (!canStartSendOnSession()) {
             status = core::session::FilePullStatus::kRejected;
         } else {
-            const std::string resolved = store.resolveWithin(config.shareRoot, rel);
-            if (resolved.empty()) {
-                status = core::session::FilePullStatus::kRejected;   // 绝对路径 / 越界
+            const auto st = store.stat(path);
+            if (!st.exists || !st.isDir) {
+                status = core::session::FilePullStatus::kNotFound;   // 文件请走 §11.9
             } else {
-                const auto st = store.stat(resolved);
-                if (!st.exists || !st.isDir) {
-                    status = core::session::FilePullStatus::kNotFound;   // 文件请走 §11.9
-                } else {
-                    std::string packErr;
-                    packPath = packDirectory(resolved, rel, packErr);
-                    status =
-                        packPath.empty() ? core::session::FilePullStatus::kRejected : core::session::FilePullStatus::kAccepted;
-                }
+                std::string packErr;
+                packPath = packDirectory(path, std::string(), packErr);
+                status = packPath.empty() ? core::session::FilePullStatus::kRejected : core::session::FilePullStatus::kAccepted;
             }
         }
 
@@ -1052,9 +1122,11 @@ struct Client::Impl {
             return;
         }
 
-        // 包名用目录名，让对方一眼知道落到本地的是什么（§11.10.3）。
-        const auto slash = rel.find_last_of('/');
-        const std::string dirName = (slash == std::string::npos) ? rel : rel.substr(slash + 1);
+        // 包名用目录最后一段，让对方一眼知道落到本地的是什么（§11.10.3）。
+        // 绝对路径上分隔符可能是 `/` 也可能是 `\`，两个都要认——否则
+        // C:\foo 会被当成整串名字，包名变成 `C:\foo.tar.xz`（非法文件名）。
+        const auto slash = path.find_last_of("/\\");
+        const std::string dirName = (slash == std::string::npos) ? path : path.substr(slash + 1);
         const std::string packName = dirName + ".tar.xz";
 
         const bool started = startSendOnSession(packPath, packName, req.from, [packPath](const Outcome&) {
@@ -1124,6 +1196,75 @@ struct Client::Impl {
         o.status = std::move(status);
         o.remoteEntries = remoteEntries;
         o.listStatus = listStatus;
+        o.rootListing = rootListing;
+        if (done) {
+            done(o);
+        }
+    }
+
+    // 会话上批量问路径元信息（PROTOCOL.md §11.11）。
+    bool startAskPathMetaOnSession(std::string peerId, std::vector<std::string> absPaths,
+                                   std::function<void(const Outcome&)> done)
+    {
+        if (!canSendOnSession() || metaActive || browseActive || pullActive) {
+            // 与列举、取回互斥：三者都靠"下一个应答就是我的"来配对，
+            // 同时挂两个就分不清应答是谁的。
+            return false;
+        }
+        if (absPaths.empty()) {
+            return false;
+        }
+        metaActive = true;
+        metaPaths = absPaths;
+        metaResults.clear();
+        onMetaDone = std::move(done);
+        metaPeerId = std::move(peerId);
+
+        Frame f;
+        f.type = FrameType::kAskPathMeta;
+        f.to = metaPeerId;
+        f.body = core::session::encodeAskPathMeta(metaPaths);
+        if (f.body.empty()) {
+            finishMeta(false, "要查的路径太多或为空，请分批",
+                       Status::Fail(ErrorCode::kInvalidPath, "path meta request is empty"));
+            return false;
+        }
+
+        touch();
+        if (const auto st = session->send(f); !st.ok()) {
+            finishMeta(false, "路径元信息请求发送失败", st);
+            return false;
+        }
+
+        // 10 秒与列举一致：对端要逐条 stat + 读 64KB 算指纹，正常几百条也在
+        // 毫秒级；超过这个时限基本就是掉线了。
+        metaTimer.expires_after(std::chrono::seconds(10));
+        metaTimer.async_wait([this](const std::error_code& ec) {
+            if (ec || !metaActive) {
+                return;
+            }
+            finishMeta(false, "对端没有响应（可能已离线）", Status::Fail(ErrorCode::kTimeout, "path meta answer timeout"));
+        });
+        return true;
+    }
+
+    void finishMeta(bool ok, std::string summary, Status status = Status{})
+    {
+        if (!metaActive) {
+            return;
+        }
+        metaActive = false;
+        metaTimer.cancel();
+        auto done = std::move(onMetaDone);
+        onMetaDone = nullptr;
+
+        Outcome o;
+        o.ok = ok;
+        o.summary = std::move(summary);
+        o.status = std::move(status);
+        if (ok) {
+            o.remoteMetas = metaResults;
+        }
         if (done) {
             done(o);
         }
@@ -1384,6 +1525,13 @@ struct Client::Impl {
             return;
         }
 
+        // 批量路径元信息：同列举，任何模式下都要答。用途是对方的发送前
+        // 检查（"我这边已经有这个文件了"），与谁正在传文件无关。
+        if (f.type == FrameType::kAskPathMeta) {
+            servePathMeta(f);
+            return;
+        }
+
         if (f.type == FrameType::kAnswerFilePull && pullActive) {
             core::session::FilePullStatus status = core::session::FilePullStatus::kRejected;
             std::string err;
@@ -1409,15 +1557,35 @@ struct Client::Impl {
             }
         }
 
+        if (f.type == FrameType::kAnswerPathMeta && metaActive) {
+            std::vector<core::session::RemoteMeta> metas;
+            std::string err;
+            if (!core::session::decodeAnswerPathMeta(f.body, metas, err)) {
+                finishMeta(false, "路径元信息解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+                return;
+            }
+            // 条数必须与请求一致：按下标对回路径，条数不对就是整体错位，
+            // 错位的覆盖提示会让用户点到别的文件上去。
+            if (metas.size() != metaPaths.size()) {
+                finishMeta(false, "对端返回的条数与请求不一致", Status::Fail(ErrorCode::kProtocol, "path meta count mismatch"));
+                return;
+            }
+            metaResults = std::move(metas);
+            finishMeta(true, "路径元信息 " + std::to_string(metaResults.size()) + " 项");
+            return;
+        }
+
         if (f.type == FrameType::kAnswerFileList && (action == Action::kBrowse || browseActive)) {
             core::session::FileListStatus status = core::session::FileListStatus::kOk;
             std::vector<core::session::RemoteEntry> entries;
+            bool roots = false;
             std::string err;
-            if (!core::session::decodeAnswerFileList(f.body, status, entries, err)) {
+            if (!core::session::decodeAnswerFileList(f.body, status, roots, entries, err)) {
                 finish(false, "远端列表解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
                 return;
             }
             listStatus = status;
+            rootListing = roots;
             remoteEntries = std::move(entries);
 
             if (action != Action::kBrowse) {
@@ -1527,6 +1695,10 @@ struct Client::Impl {
         browseActive = false;
         onBrowseDone = nullptr;
         browseTimer.cancel();
+        // 挂起的元信息查询同理。
+        metaActive = false;
+        onMetaDone = nullptr;
+        metaTimer.cancel();
         if (session) {
             session->close();
         }
@@ -1604,6 +1776,11 @@ bool Client::sendOnSession(std::string sourcePath, std::string remoteName, std::
 bool Client::browseOnSession(std::string peerId, std::string relPath, std::function<void(const Outcome&)> done)
 {
     return impl_->startBrowseOnSession(std::move(peerId), std::move(relPath), std::move(done));
+}
+
+bool Client::askPathMetaOnSession(std::string peerId, std::vector<std::string> absPaths, std::function<void(const Outcome&)> done)
+{
+    return impl_->startAskPathMetaOnSession(std::move(peerId), std::move(absPaths), std::move(done));
 }
 
 bool Client::createArchive(const std::vector<std::string>& sources, const std::string& archivePath, std::string& err)

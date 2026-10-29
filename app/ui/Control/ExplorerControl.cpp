@@ -28,9 +28,20 @@
 namespace {
 // 远端路径一律用 `a/b`（协议里也是这个形式），不套用本地平台规则：
 // 对端可能是另一个系统，本地规则未必适用。
-QString joinRel(const QString& base, const QString& name)
+// 远端绝对路径拼接。
+//
+// 统一用 '/' 拼，不用平台分隔符：对端可能是 Windows 也可能是 Unix，而
+// responder 那边的 stat/list 走 std::filesystem——Windows 接受正斜杠，
+// Unix 不认反斜杠。发 '/' 两边都对。
+QString joinAbs(const QString& base, const QString& name)
 {
-    return base.isEmpty() ? name : base + QLatin1Char('/') + name;
+    if (base.isEmpty()) {
+        return name;   // 根列表的条目自带完整路径
+    }
+    if (base.endsWith(QLatin1Char('/'))) {
+        return base + name;
+    }
+    return base + QLatin1Char('/') + name;
 }
 
 // 条目名能不能当成"一个目录名"往当前路径上拼。
@@ -38,7 +49,7 @@ QString joinRel(const QString& base, const QString& name)
 // core 的 decodeAnswerFileList 已经拦了空名 / `.` / `..` / 含 `/` 的条目
 // （那是协议层的输入合法性，所有消费者都受保护）。这里补的是**本平台的**
 // 分隔符语义：Windows 上反斜杠也是分隔符，而 Unix 允许文件名含它。
-// 不按平台区分的话，要么 Windows 上会把名字拆成两段（可能走到共享根之外），
+// 不按平台区分的话，要么 Windows 上会把名字拆成两段（走到别的目录去），
 // 要么 Unix 上点不进一个合法目录。
 bool isPathLikeName(const QString& name)
 {
@@ -87,10 +98,29 @@ QString fileSha256(const QString& path)
     return QString::fromStdString(relayer::crypto::Sha256::hex(hash.digest()));
 }
 
-QString parentRel(const QString& path)
+// 远端绝对路径的上一级。返回空串 = 回到根列表（盘符 / 家目录）。
+QString parentAbs(const QString& path)
 {
-    const auto slash = path.lastIndexOf(QLatin1Char('/'));
-    return slash < 0 ? QString() : path.left(slash);
+    if (path.isEmpty()) {
+        return {};
+    }
+    QString p = path;
+    // 去掉尾部分隔符，但 "D:/" 与 "/" 这种根要保留
+    while (p.size() > 1 && (p.endsWith(QLatin1Char('/')) || p.endsWith(QLatin1Char('\\')))) {
+        p.chop(1);
+    }
+    const auto slash = p.lastIndexOf(QLatin1Char('/'));
+    if (slash < 0) {
+        return {};   // "D:" 之类：没有更上一级，回根列表
+    }
+    const QString up = p.left(slash);
+    if (up.isEmpty()) {
+        return {};   // "/a" 的上一级是根列表，不是空路径的目录
+    }
+    if (up.size() == 2 && up.at(1) == QLatin1Char(':')) {
+        return up + QLatin1Char('/');   // "D:/a" -> "D:/"
+    }
+    return up;
 }
 
 // 后缀筛选里代表"无后缀文件"的特殊标签。
@@ -210,17 +240,20 @@ void ExplorerControl::enterPath(const QString& path)
             return;
         }
         // 远端：异步。只发请求，等 applyRemoteEntries 回来才动 currentPath_。
-        const QString rel = path;
-        remotePendingPath_ = rel;
+        //
+        // 路径是**对端视角的绝对路径**（DESIGN.md §3.8）；空串 = 根列表
+        // （盘符 + 家目录），这是绝对路径模型下唯一的"起点"。
+        const QString abs = path;
+        remotePendingPath_ = abs;
         // 先显示"要去的地方"，回来再以 currentPath_ 为准（失败时停在原地）。
         // 用 showPath 而不是 setCurrentText：后者在不可编辑的 QComboBox 上
         // 对不存在的项是静默空操作，界面会看起来毫无反应。
-        showPath(QStringLiteral("%1:/%2").arg(peerId_, rel));
+        showPath(abs.isEmpty() ? QStringLiteral("%1:/").arg(peerId_) : QStringLiteral("%1:%2").arg(peerId_, abs));
         table_->setRowCount(0);
-        setStatus(
-            QStringLiteral("正在读取 %1 …（对端离线时约 10 秒后超时）").arg(rel.isEmpty() ? QStringLiteral("<共享根>") : rel));
-        emit notice(QStringLiteral("[浏览] 读取 %1:%2 …").arg(peerId_, rel.isEmpty() ? QStringLiteral("<共享根>") : rel));
-        emit remoteListRequested(peerId_, rel);
+        const QString what = abs.isEmpty() ? QStringLiteral("<根：盘符与家目录>") : abs;
+        setStatus(QStringLiteral("正在读取 %1 …（对端离线时约 10 秒后超时）").arg(what));
+        emit notice(QStringLiteral("[浏览] 读取 %1:%2 …").arg(peerId_, what));
+        emit remoteListRequested(peerId_, abs);
         return;
     }
 
@@ -253,7 +286,7 @@ void ExplorerControl::enterPath(const QString& path)
 void ExplorerControl::onEnter()
 {
     if (source_ == Source::Remote) {
-        // 远端路径不可手输：它相对对端共享根，手敲绝对路径没有意义。
+        // 远端路径不可手输：它是**对端**的绝对路径，在本机敲没有意义。
         // 导航靠双击、上一级与"根目录"按钮。
         return;
     }
@@ -263,7 +296,7 @@ void ExplorerControl::onEnter()
 void ExplorerControl::onHome()
 {
     if (source_ == Source::Remote) {
-        // 远端模式下这个按钮是"回到共享根"（按钮文字在 setRemotePeer 里改）。
+        // 远端模式下这个按钮是"回到根"（盘符 + 家目录，文字在 setRemotePeer 里改）。
         enterPath(QString());
         return;
     }
@@ -283,9 +316,9 @@ void ExplorerControl::onUp()
 {
     if (source_ == Source::Remote) {
         if (currentPath_.isEmpty()) {
-            return;   // 已在根
+            return;   // 已在根列表
         }
-        enterPath(parentRel(currentPath_));
+        enterPath(parentAbs(currentPath_));
         return;
     }
     if (currentPath_.isEmpty()) {
@@ -309,13 +342,19 @@ void ExplorerControl::onDoubleClick(int row)
     }
     if (source_ == Source::Remote) {
         const QString name = nameItem->text();
+        if (remoteRootListing_) {
+            // 根列表的条目名本来就是完整路径（盘符 / 家目录），直接用。
+            // 这里不做"单段名"检查——它天生带分隔符。
+            enterPath(name);
+            return;
+        }
         if (isPathLikeName(name)) {
-            // 拒绝进入而不是"尽力拼一下"：拼出来的路径可能指向共享根之外，
+            // 拒绝进入而不是"尽力拼一下"：拼出来的路径可能指向别处，
             // 服务端会再拒一次，但客户端不该把这种请求发出去。
             emit notice(QStringLiteral("[浏览] 条目名不是单段，拒绝进入：%1").arg(name));
             return;
         }
-        enterPath(joinRel(currentPath_, name));
+        enterPath(joinAbs(currentPath_, name));
         return;
     }
     enterPath(QDir(currentPath_).filePath(nameItem->text()));
@@ -324,7 +363,7 @@ void ExplorerControl::onDoubleClick(int row)
 QStringList ExplorerControl::selectedLocalPaths() const
 {
     if (source_ != Source::Local) {
-        return {};   // 远端条目的"路径"相对共享根，不是本地路径
+        return {};   // 远端条目的"路径"是对端的绝对路径，不是本地路径
     }
     QSet<int> rowSet;
     for (auto* it : table_->selectedItems()) {
@@ -366,7 +405,8 @@ QString ExplorerControl::displayPath() const
     if (peerId_.isEmpty()) {
         return QStringLiteral("<未选择对端>");
     }
-    return QStringLiteral("%1:/%2").arg(peerId_, currentPath_);
+    // 根列表（currentPath_ 为空）显示成 peer:/，具体盘符在表格里。
+    return currentPath_.isEmpty() ? QStringLiteral("%1:/").arg(peerId_) : QStringLiteral("%1:%2").arg(peerId_, currentPath_);
 }
 
 void ExplorerControl::setRemotePeer(const QString& peerId, const QString& peerName, const QString& relPath)
@@ -385,7 +425,7 @@ void ExplorerControl::setRemotePeer(const QString& peerId, const QString& peerNa
     table_->setRemoteSource(true);
     ui_->cbPath->setEditable(false);
     ui_->btnEnter->setEnabled(false);
-    ui_->btnHome->setText(QStringLiteral("共享根"));
+    ui_->btnHome->setText(QStringLiteral("根"));
     ui_->filterWidget->setVisible(ui_->btnFilter->isChecked());
 
     showPath(displayPath());
@@ -419,7 +459,8 @@ void ExplorerControl::useLocalSource()
     onHome();
 }
 
-void ExplorerControl::applyRemoteEntries(bool ok, const QString& summary, const QList<relayer::app::RemoteRow>& rows)
+void ExplorerControl::applyRemoteEntries(bool ok, bool rootListing, const QString& summary,
+                                         const QList<relayer::app::RemoteRow>& rows)
 {
     if (source_ != Source::Remote) {
         return;   // 用户已经切回本地，迟到的应答丢掉
@@ -435,6 +476,7 @@ void ExplorerControl::applyRemoteEntries(bool ok, const QString& summary, const 
     }
 
     currentPath_ = remotePendingPath_;
+    remoteRootListing_ = rootListing;
     entries_.clear();
     entries_.reserve(rows.size());
     for (const auto& r : rows) {
@@ -680,24 +722,24 @@ void ExplorerControl::onTableContextMenu(const QPoint& pos)
         // 文件走 §11.9（原样发），目录走 §11.10（对端打包成 tar.xz）。
         // 分两项而不是一项自适应：两者的结果不一样——目录拿到的是一个包，
         // 用户需要知道这件事，否则会以为文件没解压。
+        // 目标绝对路径：根列表里那一行本身就是完整路径，普通列表要拼。
+        const QString absPath = remoteRootListing_ ? name : joinAbs(currentPath_, name);
         if (isFile) {
             auto* pull = menu.addAction(QStringLiteral("下载到接收目录"));
-            pull->setEnabled(!isPathLikeName(name));
+            pull->setEnabled(singleRow && !isPathLikeName(absPath));
             pull->setToolTip(QStringLiteral("文件会落到本机的接收目录"));
-            connect(pull, &QAction::triggered, this, [this, peer, name]() {
-                const QString rel = joinRel(currentPath_, name);
-                emit remotePullRequested(peer, rel, false);
-                setStatus(QStringLiteral("已请求取回 %1 …").arg(rel));
+            connect(pull, &QAction::triggered, this, [this, peer, absPath]() {
+                emit remotePullRequested(peer, absPath, false);
+                setStatus(QStringLiteral("已请求取回 %1 …").arg(absPath));
             });
         } else {
             auto* pullDir = menu.addAction(QStringLiteral("下载目录（打包为 tar.xz）"));
-            pullDir->setEnabled(singleRow && !isPathLikeName(name));
+            pullDir->setEnabled(singleRow && !remoteRootListing_);
             pullDir->setToolTip(QStringLiteral("对端会把它压缩成一个 .tar.xz 发过来，\n"
                                                "落到接收目录；本版不自动解包"));
-            connect(pullDir, &QAction::triggered, this, [this, peer, name]() {
-                const QString rel = joinRel(currentPath_, name);
-                emit remotePullRequested(peer, rel, true);
-                setStatus(QStringLiteral("已请求打包 %1（对方压缩中，可能要几秒）…").arg(rel));
+            connect(pullDir, &QAction::triggered, this, [this, peer, absPath]() {
+                emit remotePullRequested(peer, absPath, true);
+                setStatus(QStringLiteral("已请求打包 %1（对方压缩中，可能要几秒）…").arg(absPath));
             });
         }
 

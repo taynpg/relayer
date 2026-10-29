@@ -62,7 +62,7 @@ const BatchColumn kBatchColumns[] = {
     {ComColumn::Name, "名称"},
     {ComColumn::LocalDir, "本地目录"},
     {ComColumn::Peer, "对端"},
-    {ComColumn::RelDir, "相对目录"},
+    {ComColumn::RelDir, "远端目录"},
 };
 
 QString markForName(const QString& name, bool isDir)

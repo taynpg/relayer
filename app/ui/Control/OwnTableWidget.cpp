@@ -77,7 +77,7 @@ void ComDropTable::ensureRowComplete(int row)
 void ComDropTable::dragEnterEvent(QDragEnterEvent* event)
 {
     if (!event->mimeData()->hasFormat(MY_MIME_DROP_TYPE) || event->mimeData()->hasFormat(MY_MIME_DROP_REMOTE_MARK)) {
-        // 远端来的载荷里 from 是"相对共享根"，不是本地路径——落进本地目录列
+        // 远端来的载荷里 from 是"对端的绝对路径"，不是本地路径——落进本地目录列
         // 只会写出一句谁都认不出的路径。整个拒收，比落进去再报错好。
         event->ignore();
         return;

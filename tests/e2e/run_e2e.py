@@ -733,10 +733,11 @@ def remote_list(workdir: Path, bin_dir: Path) -> None:
     全靠三条：只暴露一个共享根、路径必须过 resolveWithin、默认不共享。
 
     四条断言：
-      1. 共享根能列出来（目录在前、名字有序），条目与盘上一致；
-      2. 子目录能列（相对路径解析正确）；
-      3. `..` 越界被拒（**这条是安全看门测试**，退出码必须非 0）；
-      4. 没开共享的实例明确拒绝，而不是静默超时。
+      1. 不带路径 = 根列表（盘符 + 家目录），绝对路径模型下唯一的起点；
+      2. 绝对目录能列出来（目录在前、名字有序），条目与盘上一致；
+      3. 子目录用绝对路径能列（路径是"对端视角的绝对路径"）；
+      4. **不需要任何共享配置**：没加任何开关的实例一样能列 —— 这是
+         取消共享根之后的有意行为（PROTOCOL.md §11.8.1 写明了代价）。
     """
     c = Cluster(workdir, free_port(), bin_dir=bin_dir)
     try:
@@ -746,36 +747,44 @@ def remote_list(workdir: Path, bin_dir: Path) -> None:
         (share / "a.txt").write_bytes(b"hello")
         (share / "sub" / "b.txt").write_bytes(b"world!")
 
-        # 共享方：recv 挂着等文件，同时开共享。hard-timeout 让它最后自己退出。
         bob = c.cli("recv-bob", "recv", "--to-dir", str(c.dst), *c.cli_common(), "--id", "bob",
-                    "--share", str(share), "--hard-timeout", "30")
+                    "--hard-timeout", "30")
         bob.wait_for(ASSIGNED_PREFIX, 20.0)
 
-        lister = c.cli("ls-bob", "ls", "--to", "bob", *c.cli_common(), "--id", "alice")
-        expect_eq(lister.wait_exit(30), 0, "列举共享根的退出码")
+        # --- 根列表：不给 --path ---
+        roots = c.cli("ls-roots", "ls", "--to", "bob", *c.cli_common(), "--id", "alice")
+        expect_eq(roots.wait_exit(30), 0, "列举根的退出码")
+        root_out = "\n".join(roots.pill())
+        expect("REMOTE_LIST status=0" in root_out, f"根列表没有结论行：{root_out}")
+        expect("count=0" not in root_out, f"根列表竟然是空的：{root_out}")
+
+        # --- 绝对目录 ---
+        lister = c.cli("ls-bob", "ls", "--to", "bob", "--path", str(share), *c.cli_common(), "--id", "alice1")
+        expect_eq(lister.wait_exit(30), 0, "列举绝对目录的退出码")
         out = "\n".join(lister.pill())
         expect("REMOTE_LIST status=0 count=2" in out, f"列举汇总不对：{out}")
         # 目录在前、文件在后（顺序稳定，UI 才不闪）。
         expect("D  sub" in out, f"没列到子目录：{out}")
         expect("F  5  a.txt" in out, f"没列到文件或大小不对：{out}")
 
-        sub = c.cli("ls-sub", "ls", "--to", "bob", "--path", "sub", *c.cli_common(), "--id", "alice2")
+        sub = c.cli("ls-sub", "ls", "--to", "bob", "--path", str(share / "sub"), *c.cli_common(), "--id", "alice2")
         expect_eq(sub.wait_exit(30), 0, "列举子目录的退出码")
         sub_out = "\n".join(sub.pill())
         expect("b.txt" in sub_out, f"子目录内容不对：{sub_out}")
 
-        # --- 安全看门：路径穿越必须被拒 ---
-        bad = c.cli("ls-escape", "ls", "--to", "bob", "--path", "../", *c.cli_common(), "--id", "alice3")
-        expect(bad.wait_exit(30) != 0, "`..` 越界竟然列举成功——共享根形同虚设")
-        expect("拒绝" in bad.tail(), f"越界失败的原因没说清：{bad.tail()}")
+        # --- 路径不存在：明确报"没有这个目录"，不是静默超时 ---
+        bad = c.cli("ls-missing", "ls", "--to", "bob", "--path", str(share / "nope"), *c.cli_common(),
+                    "--id", "alice3")
+        expect(bad.wait_exit(30) != 0, "列一个不存在的目录竟然成功")
+        expect("没有这个目录" in bad.tail(), f"失败原因没说清：{bad.tail()}")
 
-        # --- 默认不共享 ---
+        # --- 没有共享配置的实例一样能列（取消共享根之后的有意行为） ---
         carol = c.cli("recv-carol", "recv", "--to-dir", str(c.dst), *c.cli_common(), "--id", "carol",
                       "--hard-timeout", "30")
         carol.wait_for(ASSIGNED_PREFIX, 20.0)
-        nob = c.cli("ls-carol", "ls", "--to", "carol", *c.cli_common(), "--id", "alice4")
-        expect(nob.wait_exit(30) != 0, "没开共享的实例竟然能列举——默认暴露了目录")
-        expect("拒绝" in nob.tail(), f"未共享的失败原因没说清：{nob.tail()}")
+        nob = c.cli("ls-carol", "ls", "--to", "carol", "--path", str(share), *c.cli_common(), "--id", "alice4")
+        expect_eq(nob.wait_exit(30), 0, "没做任何配置的实例应当仍能列举绝对路径（PROTOCOL.md §11.8.1）")
+        expect("a.txt" in "\n".join(nob.pill()), "绝对路径列举没拿到内容")
         carol.kill()
     finally:
         c.shutdown()
@@ -800,7 +809,7 @@ def self_browse(workdir: Path, bin_dir: Path) -> None:
         (share / "a.txt").write_bytes(b"hello")
 
         proc = c.cli("self-browse", "recv", "--to-dir", str(c.dst), *c.cli_common(), "--id", "me",
-                     "--share", str(share), "--self-browse", "--hard-timeout", "20")
+                     "--self-browse", "--path", str(share), "--hard-timeout", "20")
         expect_eq(proc.wait_exit(40), 0, "自检列举的退出码")
         out = "\n".join(proc.pill())
         # 与 ls 同一套契约输出：证明这条路给出的结果和一次性连接那条一致。
@@ -820,10 +829,11 @@ def pull_file(workdir: Path, bin_dir: Path) -> None:
     场景同时也验证了"拉"与"推"能拼在一起而不打架。
 
     四条断言：
-      1. 存在的文件能取回，内容逐字节一致；
+      1. 绝对路径的存在的文件能取回，内容逐字节一致；
       2. 不存在的文件明确报 kNotFound（不是超时）；
-      3. `..` 越界被拒（**安全看门**）；
-      4. 目录被明确拒绝（打包还没实现，不能含糊过去）。
+      3. 目录被明确拒绝（要目录请走 §11.10）；
+      4. **任何绝对路径都能取**——不在某个"共享根"之外的也照样能拿。
+         这是取消共享根之后的有意行为（PROTOCOL.md §11.8.1 记录了代价）。
     """
     c = Cluster(workdir, free_port(), bin_dir=bin_dir)
     try:
@@ -833,9 +843,9 @@ def pull_file(workdir: Path, bin_dir: Path) -> None:
         payload = b"pull-me-please" * 7
         (share / "a.txt").write_bytes(payload)
 
-        # 共享方：常驻，等着被取回。idle/hard 都给大一点，别在断言中途掉线。
+        # 常驻，等着被取回。idle/hard 都给大一点，别在断言中途掉线。
         bob = c.cli("recv-bob", "recv", "--to-dir", str(c.dst), *c.cli_common(), "--id", "bob",
-                    "--share", str(share), "--hard-timeout", "120", "--idle-timeout", "120")
+                    "--hard-timeout", "120", "--idle-timeout", "120")
         bob.wait_for(ASSIGNED_PREFIX, 20.0)
 
         dst_a = workdir / "dst-a"
@@ -847,24 +857,27 @@ def pull_file(workdir: Path, bin_dir: Path) -> None:
             rc = p.wait_exit(45)
             return rc, "\n".join(p.pill())
 
-        rc, out = pull("pull-ok", "a.txt")
+        rc, out = pull("pull-ok", str(share / "a.txt"))
         expect_eq(rc, 0, f"取回存在的文件应当成功：{out}")
         expect("PULL accepted" in out, f"没看到接受应答：{out}")
         got = (dst_a / "a.txt").read_bytes()
         expect(got == payload, f"取回的内容不一致：期望 {len(payload)} 字节，实际 {len(got)}")
 
-        # --- 三种拒绝都必须是明确应答，不能退化成"等满超时" ---
-        rc, out = pull("pull-missing", "nope.txt")
+        # --- 拒绝都必须是明确应答，不能退化成"等满超时" ---
+        rc, out = pull("pull-missing", str(share / "nope.txt"))
         expect(rc != 0, "取回不存在的文件竟然成功")
         expect("对端没有这个文件" in out, f"不存在的文件应当报 kNotFound：{out}")
 
-        rc, out = pull("pull-escape", "../server-does-not-matter")
-        expect(rc != 0, "`..` 越界竟然取回成功——共享根形同虚设")
-        expect("拒绝取回" in out, f"越界应当报 kRejected：{out}")
-
-        rc, out = pull("pull-on-dir", "sub")
-        expect(rc != 0, "取回目录竟然成功（归档还没实现）")
+        rc, out = pull("pull-on-dir", str(share / "sub"))
+        expect(rc != 0, "取回目录竟然成功（目录要走 --pull-dir）")
         expect("对端没有这个文件" in out, f"目录应当报 kNotFound：{out}")
+
+        # --- 全路径访问：不在任何"共享根"里的文件也能取（有意的取舍） ---
+        outsider = workdir / "outside-share.txt"
+        outsider.write_bytes(b"outside")
+        rc, out = pull("pull-outside", str(outsider))
+        expect_eq(rc, 0, f"绝对路径应当总能取回（PROTOCOL.md §11.8.1）：{out}")
+        expect((dst_a / "outside-share.txt").read_bytes() == b"outside", "共享根之外的文件内容不一致")
     finally:
         c.shutdown()
 
@@ -894,7 +907,7 @@ def pull_dir(workdir: Path, bin_dir: Path) -> None:
         (sub / "nested" / "b.bin").write_bytes(b"beta-content-123")
 
         bob = c.cli("recv-bob", "recv", "--to-dir", str(c.dst), *c.cli_common(), "--id", "bob",
-                    "--share", str(share), "--hard-timeout", "120", "--idle-timeout", "120")
+                    "--hard-timeout", "120", "--idle-timeout", "120")
         bob.wait_for(ASSIGNED_PREFIX, 20.0)
 
         dst_a = workdir / "dst-a"
@@ -905,7 +918,7 @@ def pull_dir(workdir: Path, bin_dir: Path) -> None:
                       "--pull-from", "bob", "--pull-dir", path, "--hard-timeout", "40")
             return p.wait_exit(60), "\n".join(p.pill())
 
-        rc, out = pull_dir_cmd("dir-ok", "sub")
+        rc, out = pull_dir_cmd("dir-ok", str(sub))
         expect_eq(rc, 0, f"取回目录应当成功：{out}")
 
         # 目录取回现在会自动解包：用户看到的是目录，不是一个 .tar.xz
@@ -922,13 +935,13 @@ def pull_dir(workdir: Path, bin_dir: Path) -> None:
         expect(not (dst_a / "a.txt").exists(), "解包把内容散到了接收目录，少了 sub/ 这一层")
 
         # --- 拒绝路径 ---
-        rc, out = pull_dir_cmd("dir-on-file", "sub/a.txt")
+        rc, out = pull_dir_cmd("dir-on-file", str(sub / "a.txt"))
         expect(rc != 0, "对一个文件请求目录取回竟然成功")
         expect("对端没有这个目录" in out, f"指向文件时应当报 kNotFound（并说清是目录）：{out}")
 
-        rc, out = pull_dir_cmd("dir-escape", "../outside")
-        expect(rc != 0, "`..` 越界竟然打包成功——共享根形同虚设")
-        expect("拒绝取回" in out, f"越界应当报 kRejected：{out}")
+        rc, out = pull_dir_cmd("dir-missing", str(share / "nope"))
+        expect(rc != 0, "对不存在的目录请求取回竟然成功")
+        expect("对端没有这个目录" in out, f"不存在时应当报 kNotFound：{out}")
     finally:
         c.shutdown()
 

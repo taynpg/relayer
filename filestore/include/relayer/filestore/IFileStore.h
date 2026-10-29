@@ -172,6 +172,17 @@ public:
     virtual Status list(std::string_view dir, bool recursive, std::vector<DirEntry>& out) const = 0;
     virtual Status mkdirs(std::string_view dir) const = 0;
 
+    // 本机能访问的顶层位置：Windows 是各盘符根，Unix 是 `/`。
+    // 远端浏览的"根"要靠它——没有共享根之后，请求方得先知道
+    // 对端有哪些盘才能开始导航（PROTOCOL.md §11.8.2）。
+    //
+    // 默认实现返回空：内存实现没有"盘"这个概念，调用方拿到空列表时
+    // 按"没有可浏览的根"处理即可，不必为此写一个空实现。
+    [[nodiscard]] virtual std::vector<std::string> roots() const
+    {
+        return {};
+    }
+
     // ---- 变更 ----
     virtual Status remove(std::string_view path) const = 0;
     virtual Status resize(std::string_view path, std::uint64_t size) const = 0;
