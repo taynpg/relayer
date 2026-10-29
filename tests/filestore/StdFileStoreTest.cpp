@@ -1,6 +1,7 @@
 #include "relayer/filestore/StdFileStore.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -245,6 +246,28 @@ TEST_CASE("list 非递归只返回直接子项", "[filestore][dir]")
     }
     REQUIRE(sawDir);
     REQUIRE(sawFile);
+}
+
+TEST_CASE("list 返回每个条目的修改时间", "[filestore][dir]")
+{
+    // 回归：emit 曾漏填 mtime，远端列表的修改时间一路是 0，
+    // GUI 显示成 1970。文件与目录都要有值——目录在内容变化时也会更新。
+    TempDir dir;
+    StdFileStore fs;
+    REQUIRE(fs.mkdirs(dir.path("sub")));
+    REQUIRE(writeFile(dir.path("f.bin"), "x"));
+
+    const auto before = static_cast<std::int64_t>(std::time(nullptr)) - 60;
+    const auto after = static_cast<std::int64_t>(std::time(nullptr)) + 60;
+
+    std::vector<DirEntry> entries;
+    REQUIRE(fs.list(dir.utf8(), false, entries));
+    REQUIRE(entries.size() == 2);
+    for (const auto& e : entries) {
+        INFO("entry: " << e.name << " mtime=" << e.mtime);
+        REQUIRE(e.mtime >= before);
+        REQUIRE(e.mtime <= after);
+    }
 }
 
 TEST_CASE("list 递归返回全部后代", "[filestore][dir]")

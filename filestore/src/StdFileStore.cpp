@@ -54,6 +54,21 @@ ErrorCode errnoToCode(int err)
     return ErrorCode::kIoError;
 }
 
+// file_time_type 到 Unix epoch 秒的换算。
+//
+// C++17 的 file_time_type 纪元未标准化（MSVC 是 1601，libstdc++ 是 2174），
+// 没有直接换算公式。用"同一时刻在两种时钟下的差"绕过去：delta 是文件时间
+// 相对当前时刻的偏移，套回 system_clock 就得到 Unix 时间。精度受两次 now()
+// 的调用间隔影响（微秒级），对秒级 mtime 绰绰有余。
+std::int64_t toUnixTime(std::filesystem::file_time_type ftime)
+{
+    const auto sysNow = std::chrono::system_clock::now();
+    const auto fileNow = std::filesystem::file_time_type::clock::now();
+    const auto delta = ftime - fileNow;
+    const auto sysTime = sysNow + std::chrono::duration_cast<std::chrono::system_clock::duration>(delta);
+    return static_cast<std::int64_t>(std::chrono::system_clock::to_time_t(sysTime));
+}
+
 // 统一的失败构造：附上路径与系统提示，日志里能直接定位
 Status fromSystem(const std::error_code& ec, const char* op, const std::string& path)
 {
@@ -151,14 +166,7 @@ FileStat StdFileStore::stat(std::string_view path) const
         }
         const auto ftime = fs::last_write_time(p, ec);
         if (!ec) {
-            // C++17 的 file_time_type 纪元未标准化，用 duration 相对值换算到 Unix epoch。
-            // 这里取的是"距实现纪元秒数减去系统当前时刻距 Unix epoch 的差"，
-            // 结果对同一实现内的一致性判断够用（续传只比较相等性）。
-            const auto sysNow = std::chrono::system_clock::now();
-            const auto fileNow = fs::file_time_type::clock::now();
-            const auto delta = ftime - fileNow;
-            const auto sysTime = sysNow + std::chrono::duration_cast<std::chrono::system_clock::duration>(delta);
-            out.mtime = std::chrono::system_clock::to_time_t(sysTime);
+            out.mtime = toUnixTime(ftime);
         }
     }
 
@@ -280,6 +288,13 @@ Status StdFileStore::list(std::string_view dir, bool recursive, std::vector<DirE
         if (!e.isDir) {
             const auto size = entry.file_size(inner);
             e.size = inner ? 0 : size;
+        }
+        // mtime 对目录也有意义（内容变化即更新）。取不到（权限/竞态删除）
+        // 就留 0，让上层显示"未知"而不是报错——列举是读操作，别因单条
+        // 元信息失败丢掉整个列表。
+        const auto ftime = entry.last_write_time(inner);
+        if (!inner) {
+            e.mtime = toUnixTime(ftime);
         }
         out.push_back(std::move(e));
     };
