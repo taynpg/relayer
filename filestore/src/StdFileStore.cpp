@@ -354,9 +354,12 @@ std::vector<std::string> StdFileStore::roots() const
         if ((mask & (1UL << i)) == 0) {
             continue;
         }
+        // 统一输出 `C:/`：远端路径在协议与界面里一律 '/' 分隔
+        // （core/session/PathText 的约定）。Windows 的 stat/list 两种都认，
+        // 但混着写会在界面上显示成 `D://` 与 `D:/x` 并存。
         std::string root;
         root.push_back(static_cast<char>('A' + i));
-        root += ":\\";
+        root += ":/";
         out.push_back(std::move(root));
     }
 #else

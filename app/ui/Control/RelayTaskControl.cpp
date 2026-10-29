@@ -10,6 +10,7 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 
+#include "model/PathText.h"
 #include "model/ProgressTracker.h"
 
 namespace relayer::app {
@@ -149,19 +150,21 @@ void RelayTaskControl::startTasks(const RelayTaskItems& items, const ConnInfo& c
                 filePath = QDir(filePath).filePath(item.name);
             }
             QFileInfo info(filePath);
-            const QString rel = item.relDir.isEmpty() ? item.name : item.relDir + QStringLiteral("/") + item.name;
+            // 远端落点统一走 joinRemotePath：relDir 可能是手填的
+            // `D://Download//` 或粘来的混合写法，自己拼会得到 `D:///name`。
+            const QString rel = relayer::app::joinRemotePath(item.relDir, item.name);
             rows_.push_back({info.fileName(), filePath, peer, rel, static_cast<quint64>(info.size()), kWait});
             continue;
         }
 
-        const QString rootRel = item.relDir.isEmpty() ? item.name : item.relDir + QStringLiteral("/") + item.name;
+        const QString rootRel = relayer::app::joinRemotePath(item.relDir, item.name);
         QDirIterator it(item.localDir, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
         while (it.hasNext()) {
             const QString abs = it.next();
             const QString rel = QDir(item.localDir).relativeFilePath(abs);
             QFileInfo info(abs);
-            rows_.push_back(
-                {info.fileName(), abs, peer, rootRel + QStringLiteral("/") + rel, static_cast<quint64>(info.size()), kWait});
+            rows_.push_back({info.fileName(), abs, peer, relayer::app::joinRemotePath(rootRel, rel),
+                             static_cast<quint64>(info.size()), kWait});
         }
     }
 

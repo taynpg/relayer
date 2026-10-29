@@ -20,6 +20,7 @@
 
 #include "Base/MenuIcons.h"
 #include "ReplaceArea.h"
+#include "model/PathText.h"
 #include "ui_ComparisonControl.h"
 
 using relayer::app::RelayTaskItem;
@@ -252,7 +253,8 @@ void ComparisonControl::loadConfig(const QString& name)
             }
             r.localDir = o.value(QStringLiteral("localDir")).toString();
             r.peer = o.value(QStringLiteral("peer")).toString();
-            r.relDir = o.value(QStringLiteral("relDir")).toString();
+            // 老配置里可能是反斜杠写法，载入时一并规范化（保存后即回写）。
+            r.relDir = relayer::app::normalizeRemotePath(o.value(QStringLiteral("relDir")).toString());
             rows_.push_back(std::move(r));
         }
     }
@@ -461,7 +463,10 @@ void ComparisonControl::syncRowFromItem(QTableWidgetItem* item)
         r.peer = text;
         break;
     case ComColumn::RelDir:
-        r.relDir = text;
+        // 存进模型前就规范化：用户从资源管理器粘过来的 `D://Download`、
+        // 带尾斜杠的、混写的 `D:///Download`，统一成 `D:/Download`。
+        // 在这里做一次，显示与发送就都不会再看到混合作物。
+        r.relDir = relayer::app::normalizeRemotePath(text);
         break;
     default:
         break;   // Id/Type/Mark 只读

@@ -9,6 +9,7 @@
 
 #include "relayer/core/session/FileList.h"
 #include "relayer/core/session/PathMeta.h"
+#include "relayer/core/session/PathText.h"
 #include "relayer/core/session/PeerTable.h"
 #include "relayer/core/transfer/TransferPeer.h"
 #include "relayer/filestore/TarXzArchiver.h"
@@ -703,6 +704,7 @@ struct Client::Impl {
                 }
             }
         } else {
+            path = core::session::normalizePathText(path);
             const auto st = store.stat(path);
             if (!st.exists || !st.isDir) {
                 status = core::session::FileListStatus::kNotFound;
@@ -766,7 +768,10 @@ struct Client::Impl {
         }
 
         metas.reserve(paths.size());
-        for (const auto& p : paths) {
+        for (const auto& raw : paths) {
+            // 规范化只看文本，不改语义；对端发的反斜杠写法在这里统一掉，
+            // 免得 stat 与 quickFingerprint 各解释一遍。
+            const auto p = core::session::normalizePathText(raw);
             core::session::RemoteMeta m;
             const auto st = store.stat(p);
             if (st.exists) {
@@ -1056,6 +1061,7 @@ struct Client::Impl {
             // 一个不动的进度条，而它并不知道前面还有别人在传。
             status = core::session::FilePullStatus::kRejected;
         } else {
+            path = core::session::normalizePathText(path);
             const auto st = store.stat(path);
             if (!st.exists || st.isDir) {
                 // 目录不支持：目录请走 §11.10 的打包取回。
@@ -1103,6 +1109,7 @@ struct Client::Impl {
         } else if (!canStartSendOnSession()) {
             status = core::session::FilePullStatus::kRejected;
         } else {
+            path = core::session::normalizePathText(path);
             const auto st = store.stat(path);
             if (!st.exists || !st.isDir) {
                 status = core::session::FilePullStatus::kNotFound;   // 文件请走 §11.9

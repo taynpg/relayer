@@ -20,29 +20,15 @@
 #include <QUrl>
 #include <algorithm>
 
+#include "model/PathText.h"
 #include "relayer/cli/Client.h"
 #include "relayer/common/crypto/Sha256.h"
 #include "ui/FileMetaInfo.h"
 #include "ui_ExplorerControl.h"
 
 namespace {
-// 远端路径一律用 `a/b`（协议里也是这个形式），不套用本地平台规则：
-// 对端可能是另一个系统，本地规则未必适用。
-// 远端绝对路径拼接。
-//
-// 统一用 '/' 拼，不用平台分隔符：对端可能是 Windows 也可能是 Unix，而
-// responder 那边的 stat/list 走 std::filesystem——Windows 接受正斜杠，
-// Unix 不认反斜杠。发 '/' 两边都对。
-QString joinAbs(const QString& base, const QString& name)
-{
-    if (base.isEmpty()) {
-        return name;   // 根列表的条目自带完整路径
-    }
-    if (base.endsWith(QLatin1Char('/'))) {
-        return base + name;
-    }
-    return base + QLatin1Char('/') + name;
-}
+// 远端路径的规范化与拼接统一走 app/model/PathText.h（规则实现与单测在
+// core/session/PathText）。这里只留本文件真正私有的辅助件。
 
 // 条目名能不能当成"一个目录名"往当前路径上拼。
 //
@@ -96,31 +82,6 @@ QString fileSha256(const QString& path)
         hash.update(buffer.constData(), static_cast<std::size_t>(n));
     }
     return QString::fromStdString(relayer::crypto::Sha256::hex(hash.digest()));
-}
-
-// 远端绝对路径的上一级。返回空串 = 回到根列表（盘符 / 家目录）。
-QString parentAbs(const QString& path)
-{
-    if (path.isEmpty()) {
-        return {};
-    }
-    QString p = path;
-    // 去掉尾部分隔符，但 "D:/" 与 "/" 这种根要保留
-    while (p.size() > 1 && (p.endsWith(QLatin1Char('/')) || p.endsWith(QLatin1Char('\\')))) {
-        p.chop(1);
-    }
-    const auto slash = p.lastIndexOf(QLatin1Char('/'));
-    if (slash < 0) {
-        return {};   // "D:" 之类：没有更上一级，回根列表
-    }
-    const QString up = p.left(slash);
-    if (up.isEmpty()) {
-        return {};   // "/a" 的上一级是根列表，不是空路径的目录
-    }
-    if (up.size() == 2 && up.at(1) == QLatin1Char(':')) {
-        return up + QLatin1Char('/');   // "D:/a" -> "D:/"
-    }
-    return up;
 }
 
 // 后缀筛选里代表"无后缀文件"的特殊标签。
@@ -243,7 +204,9 @@ void ExplorerControl::enterPath(const QString& path)
         //
         // 路径是**对端视角的绝对路径**（DESIGN.md §3.8）；空串 = 根列表
         // （盘符 + 家目录），这是绝对路径模型下唯一的"起点"。
-        const QString abs = path;
+        // 先规范化：根列表给的是 `D://` 这种写法，直接留着会和后面的
+        // 拼接打架（`D://` + "/" + name = `D:///name`）。
+        const QString abs = relayer::app::normalizeRemotePath(path);
         remotePendingPath_ = abs;
         // 先显示"要去的地方"，回来再以 currentPath_ 为准（失败时停在原地）。
         // 用 showPath 而不是 setCurrentText：后者在不可编辑的 QComboBox 上
@@ -318,7 +281,7 @@ void ExplorerControl::onUp()
         if (currentPath_.isEmpty()) {
             return;   // 已在根列表
         }
-        enterPath(parentAbs(currentPath_));
+        enterPath(relayer::app::parentRemotePath(currentPath_));
         return;
     }
     if (currentPath_.isEmpty()) {
@@ -354,7 +317,7 @@ void ExplorerControl::onDoubleClick(int row)
             emit notice(QStringLiteral("[浏览] 条目名不是单段，拒绝进入：%1").arg(name));
             return;
         }
-        enterPath(joinAbs(currentPath_, name));
+        enterPath(relayer::app::joinRemotePath(currentPath_, name));
         return;
     }
     enterPath(QDir(currentPath_).filePath(nameItem->text()));
@@ -481,7 +444,9 @@ void ExplorerControl::applyRemoteEntries(bool ok, bool rootListing, const QStrin
     entries_.reserve(rows.size());
     for (const auto& r : rows) {
         FileEntry e;
-        e.name = r.name;
+        // 根列表的条目名就是完整路径（`D://`、`/home/me`），显示成
+        // `D:/` 这种统一形式——否则同一列里盘符是反斜杠、子目录是斜杠。
+        e.name = rootListing ? relayer::app::normalizeRemotePath(r.name) : r.name;
         e.isDir = r.isDir;
         e.size = static_cast<qint64>(r.size);
         e.modifiedMs = r.mtime > 0 ? r.mtime * 1000 : 0;
@@ -723,7 +688,7 @@ void ExplorerControl::onTableContextMenu(const QPoint& pos)
         // 分两项而不是一项自适应：两者的结果不一样——目录拿到的是一个包，
         // 用户需要知道这件事，否则会以为文件没解压。
         // 目标绝对路径：根列表里那一行本身就是完整路径，普通列表要拼。
-        const QString absPath = remoteRootListing_ ? name : joinAbs(currentPath_, name);
+        const QString absPath = remoteRootListing_ ? name : relayer::app::joinRemotePath(currentPath_, name);
         if (isFile) {
             auto* pull = menu.addAction(QStringLiteral("下载到接收目录"));
             pull->setEnabled(singleRow && !isPathLikeName(absPath));

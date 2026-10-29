@@ -18,6 +18,7 @@
 #include <algorithm>
 
 #include "Base/InfoDrop.h"
+#include "model/PathText.h"
 #include "model/ProgressTracker.h"
 #include "relayer/filestore/StdFileStore.h"
 #include "ui/ConnectorControl.h"
@@ -694,18 +695,12 @@ void MainWindow::onDownloadRequested(const relayer::app::RelayTaskItems& items)
         job.peer = peer;
         job.name = it.name;
         job.isDir = it.isDir;
-        // 分隔符统一成 '/'：协议里的路径是 POSIX 形状，而行里的远端目录是
-        // 用户手填的（Windows 上很可能写成反斜杠）。
+        // 目标路径与发送走同一份拼接规则（app/model/PathText.h）。
         //
-        // **不能去掉开头的 '/'**：那会把绝对路径打成相对的，落点从
-        // `D:/photos/a.jpg` 变成"接收目录/photos/a.jpg"。老代码这么干过，
-        // 是相对路径时代的残留。
-        QString rel = it.relDir;
-        rel.replace(QLatin1Char('\\'), QLatin1Char('/'));
-        while (rel.endsWith(QLatin1Char('/'))) {
-            rel.chop(1);
-        }
-        job.relPath = rel.isEmpty() ? it.name : (rel + QLatin1Char('/') + it.name);
+        // 别再自己 `replace('\\','/')` 再 trim 首尾斜杠：老代码连开头的
+        // '/' 都剥掉，把绝对路径打成了相对的，落点从 `D:/photos/a.jpg`
+        // 变成"接收目录/photos/a.jpg"。
+        job.relPath = relayer::app::joinRemotePath(it.relDir, it.name);
 
         // 落点：行里写了本地目录、且它确实存在 → 就落在那儿（v1 语义）。
         // 不存在则退回全局接收目录——下落点由接收方决定，不能凭一行
@@ -970,17 +965,13 @@ void MainWindow::sendBatch(const relayer::app::RelayTaskItems& items, const rela
 }
 
 // 目标绝对路径：对照表的 relDir 就是**对端视角的绝对目录**（DESIGN.md
-// §3.8）。留空 = 落到对端接收目录，这时给相对路径 `name`。
+// §3.8）。留空 = 落到对端接收目录，这时只给文件名（相对路径）。
+//
+// 规范化交给 joinRemotePath：手填的 `D://Download//`、粘来的 `D:///Download`
+// 都会变成 `D:/Download/name`。自己在每个调用点 trim 分隔符，迟早漏一处。
 static QString remoteTargetPath(const relayer::app::RelayTaskItem& item)
 {
-    if (item.relDir.isEmpty()) {
-        return item.name;
-    }
-    QString dir = item.relDir;
-    while (dir.endsWith(QLatin1Char('/')) || dir.endsWith(QLatin1Char('\\'))) {
-        dir.chop(1);
-    }
-    return dir + QLatin1Char('/') + item.name;
+    return relayer::app::joinRemotePath(item.relDir, item.name);
 }
 
 // 本地文件的 quickFingerprint（与对端算指纹时同一份算法）。空 = 算不出来。
