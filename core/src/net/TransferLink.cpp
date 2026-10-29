@@ -135,7 +135,7 @@ void TransferLink::onSessionClosed(Status why)
     // 先把在跑的传输收掉（它们的结论必须回来，否则界面会停在"传输中"），
     // 再通知上层。
     if (receiver_ && !receiver_->finished()) {
-        receiver_->cancel("数据连接断开");
+        receiver_->cancel("数据连接断开", /*keepPartial=*/true);
     }
     std::vector<std::shared_ptr<transfer::TransferPeer>> peers;
     peers.reserve(jobs_.size());
@@ -145,7 +145,7 @@ void TransferLink::onSessionClosed(Status why)
         }
     }
     for (auto& p : peers) {
-        p->cancel("数据连接断开");
+        p->cancel("数据连接断开", /*keepPartial=*/true);
     }
 
     if (handler_.onClosed) {
@@ -398,22 +398,35 @@ void TransferLink::close()
     closing_ = true;
     ready_ = false;
     tick_.cancel();
-    if (session_ != nullptr) {
-        session_->close();
-    }
-    // 不等 onClosed 投递：调用方调完 close 之后不该再收到"传输成功"。
+
+    // **先把要取消的对象快照下来，再关 session**。
+    //
+    // 顺序反了就是 UB：session_->close() 会**同步**触发 onSessionClosed，
+    // 而那条路径会逐个 cancel 并 erase jobs_。之后 close() 再遍历 jobs_
+    // 就是在已经改过的容器上迭代——Release 下实测段错误（cancelAll 里崩），
+    // Debug 因为内存布局不同侥幸躲过，很难查。
+    //
+    // 快照里持有 shared_ptr，所以 onJobDone 里 reset receiver_ 也不影响。
+    std::vector<std::shared_ptr<transfer::TransferPeer>> victims;
+    victims.reserve(jobs_.size() + 1);
     if (receiver_ && !receiver_->finished()) {
-        receiver_->cancel("数据连接已关闭");
+        victims.push_back(receiver_);
     }
-    std::vector<std::shared_ptr<transfer::TransferPeer>> peers;
-    peers.reserve(jobs_.size());
     for (auto& [id, job] : jobs_) {
         if (job.peer && !job.peer->finished()) {
-            peers.push_back(job.peer);
+            victims.push_back(job.peer);
         }
     }
-    for (auto& p : peers) {
-        p->cancel("数据连接已关闭");
+
+    if (session_ != nullptr) {
+        session_->close();   // onSessionClosed 也会取消同一批，cancel 幂等
+    }
+
+    // 兜一次"session 本来就没了"的情形：那时 onSessionClosed 不会来。
+    for (auto& p : victims) {
+        if (!p->finished()) {
+            p->cancel("数据连接已关闭", /*keepPartial=*/true);
+        }
     }
 }
 

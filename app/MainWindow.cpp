@@ -406,7 +406,7 @@ void MainWindow::onProbeRequested(const relayer::app::ConnInfo& conn)
     receiveRetries_ = 0;
 
     if (core_->busy()) {
-        if (core_->canPreempt() && !core_->hasQueuedWork() && core_->refreshPeers(conn)) {
+        if (core_->canPreempt() && core_->refreshPeers(conn)) {
             return;
         }
         // 传输中（或刚好有被抢占排队的动作）：不动会话，提示即可。
@@ -472,12 +472,12 @@ void MainWindow::onSendToPeer(const QString& peerId, const QString& peerName)
         return;
     }
 
-    // 常驻会话活着时发送直接搭在那条连接上（不换 id，也不打断接收），
-    // 所以这里不再需要"接收让位"；没有会话时会回落一次性连接。
-    if (core_->sendInFlight()) {
-        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有文件正在发送，请等它结束"));
-        return;
-    }
+    // 常驻会话活着时发送直接搭在那条连接上（不换 id，也不打断接收）；
+    // 没有会话时会回落一次性连接。
+    //
+    // **不再挡"已有发送在跑"**：双连接的数据连接支持多路并存（各路一个
+    // sessionId），这也是批量任务能并发的前提。以前那句"请等它结束"是
+    // 单连接时代的限制，现在挡着只会让用户莫名其妙。
     if (!core_->sendFile(file, QString(), peerId, lastConn_)) {
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有传输正在进行，请等它结束"));
         return;
@@ -564,7 +564,7 @@ void MainWindow::onOperationFinished(bool ok, const QString& summary, const QStr
 
     // 常驻接收收完文件**不会** finished；能到这里且接收没挂着，说明会话
     // 被抢占让位或失败断开——只要用户还想要接收、通道空闲，就重挂。
-    if (!receiveWanted_ || receiveActive_ || core_->busy() || core_->hasQueuedWork()) {
+    if (!receiveWanted_ || receiveActive_ || core_->busy()) {
         return;
     }
     if (wasReceiving && !ok) {
@@ -1103,10 +1103,7 @@ void MainWindow::onTransTaskRun(const relayer::app::RelayTaskItems& items)
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有传输正在进行，请等它结束"));
         return;
     }
-    if (core_->sendInFlight()) {
-        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("有文件正在发送，请等它结束"));
-        return;
-    }
+    // 不挡"已有发送在跑"：批量的每一路本来就是并发的（见 onSendFileRequested）。
     if (lastConn_.host.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请先在连接面板连接中继"));
         return;

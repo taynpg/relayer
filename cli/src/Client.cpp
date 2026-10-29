@@ -154,8 +154,18 @@ struct Client::Impl {
     };
     std::map<std::string, Negotiation> negotiations;
 
-    // 在飞的发送：jobId → 结论回调。
-    std::map<std::uint64_t, std::function<void(const Outcome&)>> sends;
+    // 在飞的一路发送。进度与结论都按 job 存：并发时"这条进度是谁的"
+    // 必须能区分，只有一组全局数字的界面会把 B 的进度画到 C 那一行。
+    struct SendEntry {
+        std::function<void(const Outcome&)> done;
+        std::function<void(const ProgressReport&)> progress;
+
+        // 速率基线也按路单独算——共用一个基线会让两路的瞬时速率互相污染。
+        std::uint64_t lastBytes = 0;
+        std::chrono::steady_clock::time_point lastAt = std::chrono::steady_clock::now();
+        double speed = 0.0;
+    };
+    std::map<std::uint64_t, SendEntry> sends;
 
     Action action = Action::kList;
     std::string assignedId;
@@ -1714,7 +1724,7 @@ struct Client::Impl {
     // ---------------------------------------------------------------------
 
     void startSend(const std::string& source, const std::string& remoteName, const std::string& peerDataId,
-                   std::function<void(const Outcome&)> done = {})
+                   std::function<void(const Outcome&)> done = {}, std::function<void(const ProgressReport&)> progress = {})
     {
         if (finished || data == nullptr || !data->ready()) {
             if (done) {
@@ -1743,8 +1753,11 @@ struct Client::Impl {
             }
             return;
         }
-        if (done) {
-            sends[jobId] = std::move(done);
+        if (done || progress) {
+            SendEntry e;
+            e.done = std::move(done);
+            e.progress = std::move(progress);
+            sends.emplace(jobId, std::move(e));
         }
     }
 
@@ -1766,7 +1779,7 @@ struct Client::Impl {
         if (job.sending) {
             std::function<void(const Outcome&)> done;
             if (const auto it = sends.find(job.id); it != sends.end()) {
-                done = std::move(it->second);
+                done = std::move(it->second.done);
                 sends.erase(it);
             }
             Outcome o;
@@ -1886,20 +1899,43 @@ struct Client::Impl {
 
     void reportProgress(const TransferLink::JobInfo& job)
     {
+        if (job.bytesTotal > 0 || job.bytesDone > 0) {
+            // 传输真的开始了：从现在起"没有进展"就是故障，不再豁免。
+            transferStarted = true;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+
+        // 发送中的一路：这条进度只属于它，直接交给它的回调。
+        if (const auto it = sends.find(job.id); it != sends.end()) {
+            auto& e = it->second;
+            const auto dt = std::chrono::duration<double>(now - e.lastAt).count();
+            if (dt > 0.0 && job.bytesDone >= e.lastBytes) {
+                e.speed = static_cast<double>(job.bytesDone - e.lastBytes) / dt;
+            }
+            e.lastBytes = job.bytesDone;
+            e.lastAt = now;
+            lastBytes = job.bytesDone;   // 空闲看门狗也用这个
+            if (e.progress) {
+                ProgressReport r;
+                r.bytesDone = job.bytesDone;
+                r.bytesTotal = job.bytesTotal;
+                r.bytesPerSecond = e.speed;
+                e.progress(r);
+            }
+            return;
+        }
+
+        // 接收（唯一一路）：走全局回调，与旧行为一致。
         if (!onProgress) {
             return;
         }
-        const auto now = std::chrono::steady_clock::now();
         const auto dt = std::chrono::duration<double>(now - lastReportAt).count();
         if (dt > 0.0 && job.bytesDone >= lastBytes) {
             lastSpeed = static_cast<double>(job.bytesDone - lastBytes) / dt;
         }
         lastBytes = job.bytesDone;
         lastReportAt = now;
-        if (job.bytesTotal > 0 || job.bytesDone > 0) {
-            // 传输真的开始了：从现在起"没有进展"就是故障，不再豁免。
-            transferStarted = true;
-        }
 
         ProgressReport r;
         r.bytesDone = job.bytesDone;
@@ -2075,17 +2111,26 @@ Client::~Client()
     if (!impl_) {
         return;
     }
-    // 顺序不能反：先关连接会让 onClosed 走回上层的回调链，而那时 Impl
-    // 正在析构、上层对象可能已经没了。
     impl_->destroying = true;
     impl_->finished = true;
+    // 让所有异步回调失效：析构之后上层的 token 检查会失效，回调直接 return。
     impl_->alive.reset();
-    if (impl_->data) {
-        impl_->data->close();
-    }
-    if (impl_->control) {
-        impl_->control->close();
-    }
+
+    // **不在这里主动 close()**。
+    //
+    // Client 的析构可能发生在任何线程（GUI 里是 Qt 主线程，而 io 线程通常
+    // 已经停了）。close() 会走进 TransferPeer::cancel → TransferSender::
+    // cancelAll，那条路径假定自己在 io 线程上——它要碰 Session 的写队列和
+    // 发送窗口。在主线程上跑这段就是段错误。
+    //
+    // 这不是理论：GUI 的冒烟测试在 Release 下 100% 崩在这里，Debug 下因为
+    // 内存布局不同恰好不崩，查了很久。
+    //
+    // 连接会随成员析构自然关闭：shared_ptr<TransferLink>/<ControlLink>
+    // 释放 → Session 析构 → socket 关闭。代价是没走"发取消帧再 FIN"的
+    // 优雅路径，对端看到的就是"连接断了"——它本来就该看到这个。
+    //
+    // 想在 io 线程上优雅关闭，用 abort()（它就是给那条路径准备的）。
 }
 
 void Client::sendFile(std::string sourcePath, std::string remoteName, std::string toPeerId)
@@ -2131,44 +2176,46 @@ void Client::refreshPeers()
 }
 
 bool Client::sendOnSession(std::string sourcePath, std::string remoteName, std::string toPeerId,
-                           std::function<void(const Outcome&)> done)
+                           std::function<void(const Outcome&)> done, std::function<void(const ProgressReport&)> progress)
 {
     if (!impl_->canOperate()) {
         return false;
     }
     Impl* p = impl_.get();
     std::weak_ptr<char> token = impl_->alive;
-    p->ensureDataLink([p, token, sourcePath, remoteName, toPeerId, done = std::move(done)](bool ok) {
-        if (token.expired()) {
-            return;
-        }
-        if (!ok) {
-            if (done) {
-                Outcome o;
-                o.ok = false;
-                o.summary = "数据连接不可用";
-                o.status = Status::Fail(ErrorCode::kIoError, "data link failed");
-                done(o);
-            }
-            return;
-        }
-        p->negotiateDataId(toPeerId, [p, token, sourcePath, remoteName, done](bool ok2, std::string peerDataId) {
+    p->ensureDataLink(
+        [p, token, sourcePath, remoteName, toPeerId, done = std::move(done), progress = std::move(progress)](bool ok) mutable {
             if (token.expired()) {
                 return;
             }
-            if (!ok2) {
+            if (!ok) {
                 if (done) {
                     Outcome o;
                     o.ok = false;
-                    o.summary = "对端的数据连接不可用";
-                    o.status = Status::Fail(ErrorCode::kTimeout, "data channel negotiation failed");
+                    o.summary = "数据连接不可用";
+                    o.status = Status::Fail(ErrorCode::kIoError, "data link failed");
                     done(o);
                 }
                 return;
             }
-            p->startSend(sourcePath, remoteName, peerDataId, done);
+            p->negotiateDataId(toPeerId, [p, token, sourcePath, remoteName, done,
+                                          progress = std::move(progress)](bool ok2, std::string peerDataId) mutable {
+                if (token.expired()) {
+                    return;
+                }
+                if (!ok2) {
+                    if (done) {
+                        Outcome o;
+                        o.ok = false;
+                        o.summary = "对端的数据连接不可用";
+                        o.status = Status::Fail(ErrorCode::kTimeout, "data channel negotiation failed");
+                        done(o);
+                    }
+                    return;
+                }
+                p->startSend(sourcePath, remoteName, peerDataId, done, std::move(progress));
+            });
         });
-    });
     return true;
 }
 

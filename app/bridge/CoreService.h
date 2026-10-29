@@ -99,13 +99,6 @@ public:
         return busy_ && receivePending_;
     }
 
-    // 有已抢占、还没开始执行的排队操作。GUI 据此决定要不要重挂自动接收：
-    // 排队的操作马上会把 busy 重新占上，此刻重挂会跟它抢通道。
-    bool hasQueuedWork() const noexcept
-    {
-        return queuedWork_;
-    }
-
     // 最近一次失败是否属于连接级失败（中继断开/对端失联，见
     // cli::Outcome::connectionLost）。任务批次凭它决定"剩余项不再发"。
     // 在 finishOperation 发出 operationFinished 之前置位，GUI 槽读到的
@@ -143,10 +136,13 @@ public:
     // 一直停在"传输中"。
     void cancelSendTask(qint64 taskId);
 
-    // 有"搭车发送"正在进行（会话内发送）。GUI 用它挡重复点击。
+    // 有几路"搭车发送"正在进行（会话内发送）。
+    //
+    // 是**计数**不是布尔：双连接之后多路可以同时在跑（批量任务就靠这个），
+    // 用布尔的版本会让第一路完成时把后面的结论当成"重复"丢掉。
     bool sendInFlight() const noexcept
     {
-        return sendActive_;
+        return sendCount_.load(std::memory_order_acquire) > 0;
     }
 
     // 挂起等待别人发文件，落到 targetDir 目录。
@@ -305,16 +301,6 @@ private:
     // 常驻会话 + 表单参数一致 + 当前没有发送在跑 → 可以搭车发送。
     bool canSendOnSession(const relayer::app::ConnInfo& conn) const;
 
-    // 并发的发送任务：taskId → Client。**只在 io 线程读写**。    //
-    // 每个任务一个 Client（也就是一条连接）。它不碰 client_、也不碰 busy_：
-    // busy_ 表示"常驻会话的占用"，而并发发送不该阻止自动接收挂起——否则
-    // "我在发给 B" 期间别人就无法发给我，这正是并行要解决的问题之一。
-    struct SendJob {
-        qint64 taskId = 0;
-        std::shared_ptr<cli::Client> client;
-    };
-    std::map<qint64, SendJob> sendJobs_;
-
     // 下一次收到的 .tar.xz 要不要自动解开。**只在 io 线程读写**。
     //
     // 不放进 ClientConfig：常驻接收会话的 config 在 startReceive 时就定死了，
@@ -353,20 +339,18 @@ private:
     std::shared_ptr<cli::Client> client_;
     std::string lastId_;   // 去重：同一个 id 不重复发 assignedIdChanged
 
-    // 只属于 io 线程：被抢占接收的下一个 onDone 不发信号（见
-    // runOrAfterReceive）。
-    bool suppressNextFinished_ = false;
-
-    // busy_ / receivePending_ / queuedWork_ 是 atomic：GUI 线程读它们做
-    // 闸门判断，io 线程写。receivePending_ 只在 beginReceive 置 true、
-    // finishOperation 清掉；queuedWork_ 表达"有被抢占排队的操作还没开跑"。
+    // busy_ / receivePending_ 是 atomic：GUI 线程读它们做闸门判断，
+    // io 线程写。
+    //
+    // busy_ 的含义是"**有一个会话在跑**"，不是"忙得不能做别的"——双连接
+    // 下常驻会话本来就是长期存在的，它几乎恒为 true。想判断"能不能再开
+    // 一个操作"，要看 receivePending_（有常驻接收会话 = 可以并发）。
     std::atomic<bool> busy_{false};
     std::atomic<bool> receivePending_{false};
-    std::atomic<bool> queuedWork_{false};
 
-    // 有"搭车发送"在常驻会话上进行。GUI 线程读写（挡重复发送）、
-    // io 线程在结论回调里清。
-    std::atomic<bool> sendActive_{false};
+    // 在飞的搭车发送路数。**只由 io 线程写**（发起时 +1、结论回调里 -1），
+    // GUI 线程读它做提示。
+    std::atomic<int> sendCount_{0};
 
     // 最近一次结论的连接级失败标记（io 线程写、GUI 线程读，见
     // lastFailureConnectionLost() 的注释）。

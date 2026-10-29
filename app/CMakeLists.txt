@@ -30,12 +30,23 @@ set(CMAKE_AUTORCC ON)
 # .ui 集中在 ui/ 下，头文件里 #include "ui_XXX.h" 时到这里找
 set(CMAKE_AUTOUIC_SEARCH_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/ui)
 
+# CoreService 单独成库：它是唯一与 Qt 有关、却又**不依赖任何控件**的
+# 那一层（只有 QObject / QString）。抽出来的理由是能被单独测试——
+# GUI 之前一条自动化用例都没有，"改了不知道有没有坏"。
+#
+# 只链接 Qt6::Core，不链接 Widgets：想让它依赖 Widgets 时会立刻发现。
+add_library(relayer_app_core STATIC
+    bridge/CoreService.cpp
+)
+target_include_directories(relayer_app_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(relayer_app_core PUBLIC relayer_client Qt6::Core)
+relayer_set_warnings(relayer_app_core)
+
 add_executable(relayer WIN32
     main.cpp
     MainWindow.cpp
     SingleInstance.cpp
     Base/InfoDrop.cpp
-    bridge/CoreService.cpp
     model/ProgressTracker.cpp
     ui/ConnectorControl.cpp
     ui/FileMetaInfo.cpp
@@ -60,7 +71,7 @@ target_include_directories(relayer PRIVATE
 )
 
 target_link_libraries(relayer PRIVATE
-    relayer_client      # bridge 直接复用 CLI 的 Client 门面（PUBLIC 带 core/asio/platform）
+    relayer_app_core    # bridge 层；PUBLIC 带着 relayer_client
     Qt6::Widgets
     Qt6::Network        # QLocalServer / QLocalSocket（单实例）
 )
@@ -69,3 +80,12 @@ target_link_libraries(relayer PRIVATE
 target_compile_definitions(relayer PRIVATE RELAYER_VERSION="${PROJECT_VERSION}")
 
 relayer_set_warnings(relayer)
+
+# 冒烟测试：一个无窗口的可执行文件，用 CoreService 真连一次中继、真列一次
+# 目录。覆盖的是"连接 → 数据连接就绪 → 控制连接并发请求 → 应答配对"这条
+# 链路——GUI 里最容易坏、又最难靠手点发现的部分。
+if(RELAYER_BUILD_TESTS)
+    add_executable(gui_smoke tools/gui_smoke.cpp)
+    target_link_libraries(gui_smoke PRIVATE relayer_app_core)
+    relayer_set_warnings(gui_smoke)
+endif()

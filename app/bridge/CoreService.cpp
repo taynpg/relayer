@@ -38,8 +38,22 @@ CoreService::~CoreService()
     if (ioThread_.joinable()) {
         ioThread_.join();
     }
+
     // 线程已停，这里不再是并发上下文，直接释放即可。
     client_.reset();
+
+    // **把 io_context 的队列跑空**，再让它析构。
+    //
+    // 上面那步 client_.reset() 会连锁关闭 Session / Connection，而关闭会把
+    // 取消回调排进 ctx_ 的队列（asio 的 socket 关闭总要投递一次操作完成）。
+    // 队列里那些 handler 持有 socket、缓冲区、shared_ptr——它们必须**在
+    // ctx_ 还活着的时候**被销毁。
+    //
+    // 少了这一步的后果是 Release 下的段错误（Debug 因为内存布局不同，恰好
+    // 看不出来）：ctx_ 析构时销毁残留 handler，而那些 handler 引用的对象
+    // 已经在清理链条上拆掉了一半。
+    ctx_.restart();
+    ctx_.poll();
 }
 
 void CoreService::startIoThread()
@@ -149,55 +163,30 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo& conn)
 
 bool CoreService::runOrAfterReceive(std::function<void()> beginOp)
 {
-    if (!busy_) {
-        // 空闲：同步占上 busy（gate 住 GUI 线程的后续请求），io 线程开跑。
-        busy_ = true;
-        emit busyChanged(true);
-        runOnIo(std::move(beginOp));
-        return true;
-    }
-    if (!receivePending_) {
-        return false;   // 传输中，真忙
-    }
-
-    // 抢占挂起的接收：排队动作 → 取消接收 → onDone 落地后动作开跑。
+    // 名字里的 "AfterReceive" 是历史遗留：单连接时代，任何新操作都得先把
+    // 挂起的接收**推倒**（abort + 重建连接），否则新连接会顶掉它、换掉
+    // 本机 id。双连接之后这件事不存在了——控制连接能并发处理请求，
+    // 浏览、元信息、文件操作在传输期间照样发得出去（它们各自走 ask，
+    // 应答按请求号配对），接收不必让位。
     //
-    // 顺序要点：queuedWork_ 置 true 必须先于 abort()——abort 同步走 onDone，
-    // onDone 里 emit 的 operationFinished 会被 queued 投递到 GUI；GUI 处理它时
-    // 决定要不要重挂自动接收，判据就是 queuedWork_。若在 abort 之后才置位，
-    // GUI 可能在 io 线程两条语句之间读到旧值，抢先重挂、和排队的动作抢通道。
-    runOnIo([this, act = std::move(beginOp)]() mutable {
-        queuedWork_ = true;
-        // 被抢占接收的 abort 也会走 onDone（"中止"），但那不是用户
-        // 操作的结束，是内部让位——不发 finished，否则任务链会把它
-        // 误判成"第一项失败"（实测如此），自动接收逻辑也会被搅乱。
-        suppressNextFinished_ = true;
-        if (client_) {
-            client_->abort();   // 同步走 onDone：finishOperation 消费标记
-        }
-        // act 里会重新占 busy。post 而不是直接调：此刻仍在 abort 的
-        // 调用链上，直接建新 Client 替换 client_ 又是回调栈析构的老坑。
-        asio::post(ctx_, std::move(act));
-    });
+    // 于是这里只剩一个闸门：**有没有一次性操作在跑**。有就拒绝，因为
+    // 一次性操作用的是临时连接，两条连接同时存在会让"本机 id 是哪个"
+    // 变得含糊。
+    if (busy_) {
+        return false;
+    }
+    busy_ = true;
+    emit busyChanged(true);
+    runOnIo(std::move(beginOp));
     return true;
 }
 
 void CoreService::finishOperation(const cli::Outcome& o, bool withPeerList)
 {
     // 会话级结论：正在进行的搭车发送到此为止（Client 那边也不会再回调
-    // 它了，见 Client::Impl::finish）。清掉标记，让 onSendFinished 的
-    // 迟到回调被静默丢弃。
-    sendActive_ = false;
-
-    // io 线程。被抢占接收的"中止"属于内部机制（见 runOrAfterReceive）：
-    // 翻转内部状态但不发信号——busy 会被紧接着的排队动作重新占上，
-    // 中间发 false 再发 true 只会让按钮闪一下、让上层误推进。
-    if (suppressNextFinished_) {
-        suppressNextFinished_ = false;
-        busy_ = false;
-        receivePending_ = false;
-        return;
-    }
+    // 它们了，见 Client::Impl::finish）。计数清零，界面上"还在发"的
+    // 提示随之消失。
+    sendCount_.store(0, std::memory_order_release);
 
     // 先发列表（list 的惯例顺序：先数据后结论），再发结论与
     // busy 翻转——GUI 侧依赖"收到 finished 时 busy 已可用"来解锁按钮。
@@ -221,7 +210,10 @@ void CoreService::finishOperation(const cli::Outcome& o, bool withPeerList)
 
 bool CoreService::canSendOnSession(const ConnInfo& conn) const
 {
-    if (!busy_.load() || !receivePending_.load() || queuedWork_.load() || sendActive_.load()) {
+    // 不再限制"只能有一路在发"：数据连接本来就支持多路并存（sender 各自
+    // 一个 sessionId）。同一对端的并发由上层串行（RelayTaskControl 的
+    // 窗口填充里按 peerId 去重），因为对端的接收端一次只收一个文件。
+    if (!busy_.load() || !receivePending_.load()) {
         return false;
     }
     const QString key = conn.host + QStringLiteral(":") + QString::number(conn.port) + QStringLiteral(":") +
@@ -235,7 +227,7 @@ bool CoreService::sendFile(const QString& localPath, const QString& remoteName, 
     // 分配 id；接收也不受影响（两边靠 sessionId 区分各自的帧）。这是
     // "点一次发送自己的 id 就涨一号"的根治点。
     if (canSendOnSession(conn)) {
-        sendActive_ = true;
+        sendCount_.fetch_add(1, std::memory_order_acq_rel);
         runOnIo([this, path = fromQt(localPath), name = fromQt(remoteName), peer = fromQt(toPeerId)] {
             const bool started =
                 client_ && client_->sendOnSession(path, name, peer, [this](const cli::Outcome& o) { onSendFinished(o); });
@@ -244,7 +236,7 @@ bool CoreService::sendFile(const QString& localPath, const QString& remoteName, 
             }
             // 会话在 GUI 判断与 post 落地之间结束了（比如中继刚断）：
             // 如实报一次结论，别让调用方等一个永远不来的回调。
-            if (sendActive_.exchange(false)) {
+            if (sendCount_.fetch_sub(1, std::memory_order_acq_rel) > 0) {
                 emit sendFinished(false, QStringLiteral("当前会话不可用，请重新连接后再发"), QString());
             }
         });
@@ -260,7 +252,6 @@ bool CoreService::sendFile(const QString& localPath, const QString& remoteName, 
 
         busy_ = true;
         receivePending_ = false;
-        queuedWork_ = false;
         emit busyChanged(true);
         client_ = std::make_shared<cli::Client>(
             ctx_, std::move(cfg),
@@ -276,47 +267,53 @@ bool CoreService::sendFileTask(qint64 taskId, const QString& localPath, const QS
     if (taskId <= 0 || localPath.isEmpty() || toPeerId.isEmpty()) {
         return false;
     }
+    (void)conn;
 
-    // makeConfig 在 GUI 线程求值：它读 QSettings，而那不该在 io 线程碰。
-    auto cfg = makeConfig(conn);
-    // **不声明 id**。并发时每一路都是一条新连接，若都声明同一个 requestedId，
-    // 第二条起就会被服务端按"已被占用"拒掉。这些连接是即用即弃的，界面也不
-    // 显示它们的 id（onIdAssigned 置空），与"一次操作一条连接"时期一致。
-    cfg.requestedId.clear();
-    cfg.onIdAssigned = nullptr;
+    // 并发发送也走**常驻会话的数据连接**。
+    //
+    // 上一版是"每个任务一条新连接"：那在单连接模型下是唯一能做到并发的
+    // 办法，代价是每个文件两次握手，而且每路都换一个服务端 id。双连接
+    // 之后数据连接本来就支持多路并存（sender 各自一个 sessionId），
+    // 按任务开连接纯属浪费。
+    //
+    // 仍然要求"有常驻会话"：没有它就没有数据连接，回落成一次性连接会
+    // 让本机 id 跳号，而批量发送最忌讳这个（对端表里的我们随时过期）。
+    if (!busy_ || !receivePending_) {
+        return false;
+    }
 
-    runOnIo([this, taskId, path = fromQt(localPath), name = fromQt(remoteName), peer = fromQt(toPeerId),
-             cfg = std::move(cfg)]() mutable {
-        auto client = std::make_shared<cli::Client>(
-            ctx_, std::move(cfg),
+    runOnIo([this, taskId, path = fromQt(localPath), name = fromQt(remoteName), peer = fromQt(toPeerId)] {
+        if (!client_) {
+            emit sendTaskFinished(taskId, false, QStringLiteral("没有可用的常驻会话"), QString());
+            return;
+        }
+        const bool started = client_->sendOnSession(
+            path, name, peer,
+            [this, taskId](const cli::Outcome& o) {
+                lastConnectionLost_.store(o.connectionLost, std::memory_order_release);
+                emit sendTaskFinished(taskId, o.ok, toQt(o.summary), toQt(o.status.message));
+            },
+            // 每路一份进度：全局的 progressChanged 不带任务身份，多路并发
+            // 时会把 B 的进度画到 C 那一行上。
             [this, taskId](const cli::ProgressReport& p) {
                 emit sendTaskProgress(taskId, p.bytesDone, p.bytesTotal, p.bytesPerSecond);
-            },
-            [this, taskId](const cli::Outcome& o) {
-                emit sendTaskFinished(taskId, o.ok, toQt(o.summary), toQt(o.status.message));
-
-                auto it = sendJobs_.find(taskId);
-                if (it == sendJobs_.end()) {
-                    return;
-                }
-                // 不能在 Client 自己的回调栈上销毁它（use-after-free 老坑），
-                // 先摘出来交给下一轮事件循环释放——与 TransferPeer 的处理同理。
-                auto keep = it->second.client;
-                sendJobs_.erase(it);
-                asio::post(ctx_, [keep]() { (void)keep; });
             });
-        sendJobs_[taskId] = SendJob{taskId, client};
-        client->sendFile(path, name, peer);
+        if (!started) {
+            emit sendTaskFinished(taskId, false, QStringLiteral("当前会话不可用，请重新连接后再发"), QString());
+        }
     });
     return true;
 }
 
 void CoreService::cancelSendTask(qint64 taskId)
 {
-    runOnIo([this, taskId] {
-        const auto it = sendJobs_.find(taskId);
-        if (it != sendJobs_.end() && it->second.client) {
-            it->second.client->cancelSend();
+    (void)taskId;
+    // 双连接下所有在飞的发送共用一条数据连接，"只取消这一路"没有独立
+    // 入口——Client 只有 cancelSend()（全部）。批量的停止本来就是全停，
+    // 界面上也只有"停止"一个按钮，所以这不是妥协而是语义对齐。
+    runOnIo([this] {
+        if (client_) {
+            client_->cancelSend();
         }
     });
 }
@@ -335,11 +332,9 @@ void CoreService::finishSendOperation(const cli::Outcome& o)
 
 void CoreService::onSendFinished(const cli::Outcome& o)
 {
-    // 会话级结论先到时（finishOperation 已把 sendActive_ 清掉），这里不能
-    // 再发一次：一次发送只能有一个结论。
-    if (!sendActive_.exchange(false)) {
-        return;
-    }
+    // 每一路都要发自己的结论。多路并发时，"计数减到 0 了才发"是错的——
+    // 那会让后完成的几路永远不报。计数只用于界面上"还在发"的提示。
+    sendCount_.fetch_sub(1, std::memory_order_acq_rel);
     lastConnectionLost_.store(o.connectionLost, std::memory_order_release);
     emit sendFinished(o.ok, toQt(o.summary), toQt(o.status.message));
 }
@@ -355,7 +350,6 @@ void CoreService::startReceive(const QString& targetDir, const ConnInfo& conn)
     runOnIo([this, targetDir, cfg = makeConfig(conn)]() mutable {
         busy_ = true;
         receivePending_ = true;
-        queuedWork_ = false;
         // 记下默认落点：行级下载会临时改落点，收完改回这里。
         defaultReceiveDir_ = fromQt(targetDir);
         pullTargetDir_.clear();
@@ -376,7 +370,6 @@ bool CoreService::listPeers(const ConnInfo& conn)
 
         busy_ = true;
         receivePending_ = false;
-        queuedWork_ = false;
         emit busyChanged(true);
         // 不需要进度。必须是显式 lambda 而不是 {}：make_shared 是
         // 可变参转发，braced-init-list 无法在转发中推导参数类型。
@@ -393,13 +386,10 @@ bool CoreService::refreshPeers(const ConnInfo& conn)
     const QString key = conn.host + QStringLiteral(":") + QString::number(conn.port) + QStringLiteral(":") +
                         (conn.noAuth ? QStringLiteral("N") : QStringLiteral("P")) + QStringLiteral(":") + conn.password;
 
-    // 常驻接收会话活着（挂起等文件，且没有排队中的被抢占操作）：直接在
-    // 那条连接上问列表。不占通道、不翻转 busy、不产生 operationFinished
-    // ——GUI 的接收状态机与身份显示完全无感，id 自然不会变。
-    //
-    // 条件里必须有 !queuedWork_：有排队的动作说明接收刚被抢占、马上要
-    // 换操作，此刻往旧 client 上发列表是往一条将死的连接上说话。
-    if (busy_.load() && receivePending_.load() && !queuedWork_.load() && key == activeConnKey_) {
+    // 常驻接收会话活着：直接在**那条连接**上问列表。不占通道、不翻转
+    // busy、不产生 operationFinished——GUI 的接收状态机与身份显示完全
+    // 无感，id 自然不会变。
+    if (busy_.load() && receivePending_.load() && key == activeConnKey_) {
         runOnIo([this] {
             // post 排队后才读 client_：GUI 线程不碰这个指针（单线程
             // 契约），此刻它可能正被替换。
@@ -672,7 +662,7 @@ void CoreService::cancelCurrent()
     if (!busy_) {
         return;
     }
-    if (sendActive_) {
+    if (sendCount_.load(std::memory_order_acquire) > 0) {
         // 有搭车发送在跑：只取消这一次发送，会话（和本机 id）保持不动。
         // 结论由 sendFinished 带回，busy 不翻转。
         runOnIo([this] {

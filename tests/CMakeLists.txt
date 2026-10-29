@@ -108,6 +108,18 @@ if(Python3_Interpreter_FOUND)
                          WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
                          TIMEOUT 900
                          LABELS "e2e")
+
+    # GUI 桥接层的冒烟：无窗口的 gui_smoke 真连一次中继、自投列举一次。
+    # 只在开了 GUI 才有这个目标。
+    if(TARGET gui_smoke)
+        add_test(NAME gui_smoke
+                 COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/e2e/run_gui_smoke.py
+                         --bin ${CMAKE_BINARY_DIR}/bin)
+        set_tests_properties(gui_smoke PROPERTIES
+                             WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+                             TIMEOUT 120
+                             LABELS "e2e")
+    endif()
 else()
     message(WARNING "未找到 Python3，跳过架构与协议文档检查")
 endif()

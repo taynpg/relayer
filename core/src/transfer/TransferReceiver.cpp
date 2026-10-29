@@ -602,7 +602,7 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
     return out;
 }
 
-void TransferReceiver::abort()
+void TransferReceiver::abort(bool keepPartial)
 {
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -624,6 +624,10 @@ void TransferReceiver::abort()
     // 删之前先关写流：Windows 上删除一个仍被打开的文件会失败，残片就永远
     // 留在用户目录里，而界面上已经显示"已取消"——没人会把两者联系起来。
     closeWriteStream();
+    if (keepPartial) {
+        // 连接断了不是用户的选择：残片留着，下次能续传。
+        return;
+    }
     (void)store_.remove(partPath_);
 }
 

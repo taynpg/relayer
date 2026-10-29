@@ -199,7 +199,13 @@ public:
     //
     // 不删残片的话，用户会在目标目录里看到一个永远传不完的 `.relaypart`，
     // 而界面上"传输已取消"——没人会把两者联系起来。
-    void abort();
+    // keepPartial = true 时**保留残片**。
+    //
+    // 区别在哪：用户主动取消时残片是垃圾（他自己不要了），删掉才干净；
+    // 而"连接断了 / 对端进程没了"不是用户的意图——下次连上应当能续传。
+    // 旧实现靠"失败时不关连接"间接达到这个效果，双连接之后失败也会关
+    // 数据连接，所以这件事必须显式表达。
+    void abort(bool keepPartial = false);
 
 private:
     [[nodiscard]] std::uint64_t offsetOf(std::uint32_t chunkIndex) const noexcept;

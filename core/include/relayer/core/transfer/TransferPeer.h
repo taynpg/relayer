@@ -166,7 +166,10 @@ public:
     // 精确控制节奏，不必等真实时间。
     void pump();
 
-    void cancel(std::string_view reason);
+    // keepPartial 只对**接收方**有意义：true 时保留 .relaypart。
+    // 用户主动取消 → false（残片是垃圾）；连接断开/对端失联 → true
+    // （下次要续传）。
+    void cancel(std::string_view reason, bool keepPartial = false);
 
     [[nodiscard]] TransferProgress progress() const;
 

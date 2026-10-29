@@ -366,8 +366,10 @@ public:
     // 为什么必须这样做：sendFile 每次新建连接，服务端给新连接分配新 id，
     // GUI 里"点一次发送，自己的 id 就涨一号"，发送方自己也因此从对端表里
     // 消失。v1 是常驻连接天然没这问题，v2 用这个方法补回来。
+    // progress 是**这一路**的进度（可空）。多路并发时必须有它：全局的
+    // onProgress 不带任务身份，把 B 的进度画到 C 那一行上是必然的。
     bool sendOnSession(std::string sourcePath, std::string remoteName, std::string toPeerId,
-                       std::function<void(const Outcome&)> done);
+                       std::function<void(const Outcome&)> done, std::function<void(const ProgressReport&)> progress = {});
 
     // 在**现有常驻会话**上问一次远端目录（PROTOCOL.md §11.8）。
     //

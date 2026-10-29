@@ -830,7 +830,7 @@ void TransferPeer::pump()
     }
 }
 
-void TransferPeer::cancel(std::string_view reason)
+void TransferPeer::cancel(std::string_view reason, bool keepPartial)
 {
     if (finished_) {
         return;
@@ -849,7 +849,7 @@ void TransferPeer::cancel(std::string_view reason)
         sender_->cancelAll();
     }
     if (receiver_) {
-        receiver_->abort();
+        receiver_->abort(keepPartial);
     }
 
     finish(TransferOutcome::kLocalCancelled, Status::Fail(ErrorCode::kCancelled, std::string(reason)));

@@ -442,10 +442,8 @@ void RelayTaskControl::onRetryFailed()
     if (running_) {
         return;
     }
-    if (core_ && core_->sendInFlight()) {
-        emit logMessage(QStringLiteral("[任务] 有文件正在发送，稍后再试\n"));
-        return;
-    }
+    // 不检查 sendInFlight()：单文件发送与批次可以并存（数据连接支持多路），
+    // 而"批次正在跑"已经由上面的 running_ 挡住了。
     if (core_ && core_->busy() && !core_->canPreempt()) {
         emit logMessage(QStringLiteral("[任务] 通道被占用，稍后再试\n"));
         return;
