@@ -42,4 +42,14 @@ std::string joinPathText(std::string_view base, std::string_view name);
 //   `/`      → ``
 std::string parentPathText(std::string_view path);
 
+// 是不是"设备/根开头"的路径（盘符、UNC、前导分隔符）。
+//
+// 用来把"对端绝对路径"与"接收目录下的相对落点"分开——这两种在协议里都
+// 合法（DESIGN.md §3.8：绝对路径直接落，相对路径由接收方按接收目录解析），
+// 服务端处理路径元信息查询时必须按同一条规则还原成绝对路径，否则查询会
+// 落到对端进程的工作目录上。
+//
+// 空串返回 false：空在协议里表示"根列表"，不是路径。
+bool isAbsolutePathText(std::string_view path);
+
 }   // namespace relayer::core::session

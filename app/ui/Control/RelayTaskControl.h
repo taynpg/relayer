@@ -9,6 +9,7 @@
 #include "model/ProgressTracker.h"
 #include "model/TransferTask.h"
 
+class QComboBox;
 class QLabel;
 class QPushButton;
 class QTableWidget;
@@ -21,16 +22,12 @@ namespace relayer::app {
 //   - 不做模态对话框，做成主窗口"任务"选项卡：批次往往持续几分钟到
 //     更久，模态会锁死整个界面（v1 实测的痛点），用户需要同时看日志、
 //     改对照表。
-//   - 分页先不做：v2 的批次由对照表逐行勾选产生，单批规模远小于 v1
-//     的"整个目录树"；QTableWidget 万行内没有性能问题。真到需要时
-//     再搬 v1 的分页代码。
-//   - 压缩归档（tar.xz 打包）不在本控件做：那是阶段 F 的远端浏览/
-//     下载能力，v2 协议目前没有"请求对端打包"的帧。
+//   - "基本检查 + 覆盖提示"不在本控件做，在 MainWindow（发送前检查）：
+//     它要发 kAskPathMeta 问对端，而本控件不碰网络。
 //
-// 执行模型：CoreService 一次只跑一个操作，批次内顺序逐个 sendFile，
-// 由 operationFinished 链式推进。**单个文件失败不中断整批**（v1 的
-// 正确决策），但连接级失败（中继断开/对端失联）会终止——链路没了，
-// 剩余文件只会逐个等满 answerTimeout。
+// 执行模型：一次最多 kConcurrency 路并发（同一对端的行串行），由
+// sendTaskFinished 逐项推进。**单个文件失败不中断整批**（v1 的正确
+// 决策），连接级失败（中继断开/对端失联）才把排队项标跳过。
 class RelayTaskControl : public QDialog
 {
     Q_OBJECT
@@ -105,6 +102,22 @@ public:
     // 把并发窗口补满：从 rows_ 里找还没开始的行，启动直到 active_ 达到上限。
     void fillWindow();
     void finishBatch(bool allOk);
+
+    // 分页（v1 RelayTask 的同款控件）：一次把几万个文件插进 QTableWidget
+    // 会卡很久，而"每页 N 条 + 翻页"既看得清进度，也不影响传输。
+    //
+    // 模型（rows_）与视图彻底解耦：行号是**模型下标**，表格显示的是
+    // [page_*pageSize_, ...) 这一段。所有按行更新都必须先过 viewRowOf，
+    // 行不在当前页时只更新模型（切页时 fillRow 会带上最新状态）。
+    void renderPage();
+    void gotoPage(int page);
+    void updatePageLabel();
+    [[nodiscard]] int pageCount() const;
+    [[nodiscard]] int viewRowOf(int modelRow) const;
+
+    // 把第 modelRow 行画到 viewRow。rebuildTable 与 renderPage 共用。
+    void fillRow(int viewRow, int modelRow);
+
     void rebuildTable();
     void setStatus(int row, Status st);
     void refreshRowCells(int row);
@@ -116,6 +129,21 @@ public:
     QPushButton* btnRetryFailed_ = nullptr;
     QPushButton* btnClear_ = nullptr;
     QLabel* summaryLabel_ = nullptr;
+
+    QPushButton* btnFirst_ = nullptr;
+    QPushButton* btnPrev_ = nullptr;
+    QPushButton* btnNext_ = nullptr;
+    QPushButton* btnLast_ = nullptr;
+    QLabel* pageLabel_ = nullptr;
+    QComboBox* pageSizeBox_ = nullptr;
+
+    int pageSize_ = 100;
+    int page_ = 0;
+
+    // 每行的进度文本（"35.2% · 1.2MiB/s"）。存文本而不只是 tracker：
+    // 翻到别的页再翻回来时，进度列要能立刻显示当前值，而不是等下一次
+    // 100ms 回调才填上。
+    QHash<int, QString> progressText_;
 
     relayer::app::CoreService* core_ = nullptr;
     relayer::app::ConnInfo conn_;

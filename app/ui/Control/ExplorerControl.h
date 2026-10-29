@@ -31,11 +31,17 @@ class QComboBox;
 //
 // 两条路共用同一份表格、排序、筛选、导航逻辑——这正是"只换子类、不换 UI"
 // 的意义。差异只在三处，都有明确理由：
-//   1. 远端是**只读**：重命名/删除/新建文件夹都是本地文件系统操作，远端没有
-//      对应帧（要做得先有协议）；远端模式不显示这些动作。
-//   2. 远端的拖拽载荷是**对端绝对路径**而不是本地绝对路径，所以拖出时多打一个
+//   1. 远端的写操作（改名 / 删除 / 新建目录 / 算 SHA-256 / 解压）走
+//      PROTOCOL.md §11.12，经 MainWindow 转给 CoreService：本控件不碰网络，
+//      也不判断路径合法（那只有对端知道）。与本地那套的区别是"谁执行"，
+//      不是"能不能做"。
+//   2. 右键菜单**只有一套**（onTableContextMenu）：每个动作声明 local /
+//      remote 两个执行体，为空的表示这一端不支持、自动不显示——目前只有
+//      「在资源管理器中打开」和「压缩为 tar.xz」是本地独有。这样"远端少了
+//      哪项"由能力决定，而不是由两段独立的代码决定。
+//   3. 远端的拖拽载荷是**对端绝对路径**而不是本地绝对路径，所以拖出时多打一个
 //      标记 MIME，对照表的本地目录列据此拒收（见 InfoDrop.h）。
-//   3. 远端路径是**对端绝对路径**（可能是另一个系统的路径规则），显示成
+//   4. 远端路径是**对端绝对路径**（可能是另一个系统的路径规则），显示成
 //      `peer:/rel`，且不可手输。
 //
 // 与 v1 的另一处差异：不用 WorkerThread/BaseAskDF/WaitDialog。本地列举同步
@@ -131,9 +137,21 @@ signals:
     // （目录要递归展开、文件用"父目录 + 文件名"两种形状）。
     void localTransferRequested(const QStringList& paths);
 
+    // 远端文件操作（PROTOCOL.md §11.12）：算 SHA-256 / 改名 / 新建目录 /
+    // 删除 / 解压。本控件只把"对谁、对哪个路径、做什么"交出去——它不碰
+    // 网络，也不知道自己是不是某个会话的一部分。
+    //
+    // kind："sha256" / "rename" / "mkdir" / "delete" / "unpack"。
+    // newName 只有 rename 用；paths 只有 delete 用（可能是多项）。
+    void remoteOpRequested(const QString& kind, const QString& peerId, const QString& absPath, const QString& newName,
+                           const QStringList& paths);
+
     // 粗校验 / 时间戳校验（v1 的语义：与**另一个面板当前目录下的同名文件**
     // 比）。本控件不知道自己对面是谁——由 MainWindow 取另一侧路径并决定
-    // 哪一边是远端。wantTime=false 比大小，true 比修改时间。
+    // 哪一边是远端。wantTime=false 比内容（采样指纹），true 比修改时间。
+    //
+    // 两端都能发起：结论与方向无关（都是"本地目录/name vs 远端目录/name"），
+    // 所以远端菜单里这两项走的是同一个信号、同一段逻辑。
     void compareRequested(const QString& name, bool wantTime);
 
 private:
@@ -211,6 +229,23 @@ private:
     // 右键「详细信息」：本地/远端共用同一个对话框（v1 也是同一个 Form）。
     void showMetaInfo(int row);
 
+    // 后台跑一个本地重活（递归删除、压缩、解压、算 SHA-256）。
+    //
+    // v1 所有这些都走 WorkerThread + WaitDialog；v2 早先是 GUI 线程里同步跑，
+    // 删一个几万文件的目录、解一个 2GB 的包、算一个 4GB 文件的 SHA-256 都会
+    // 把界面冻住几十秒，用户唯一能做的就是等或杀进程。这里补回后台执行。
+    //
+    // 契约：
+    //   - job 在**工作线程**执行，只能碰路径与标准库，不许碰任何 QWidget /
+    //     本对象成员（要用的数据一律按值捕获）；
+    //   - done 回到 GUI 线程执行，第二个参数是失败原因（成功时为空）；
+    //   - 同一时刻只允许一个后台操作，重复请求被拒绝并在状态行说明。
+    void runAsync(const QString& statusText, std::function<bool(QString&)> job, std::function<void(bool, const QString&)> done);
+    [[nodiscard]] bool busy() const
+    {
+        return busy_;
+    }
+
     Ui::ExplorerControl* ui_ = nullptr;
     ExpDropTable* table_ = nullptr;   // 表格本体由 initControl 动态创建，塞进 .ui 的占位 widget
 
@@ -221,4 +256,7 @@ private:
     Qt::SortOrder sortOrder_ = Qt::AscendingOrder;
     QString filterName_;
     QStringList filterExts_;   // 小写后缀；含"(无后缀)"特殊标签；空 = 不筛选
+
+    // 有后台本地操作在跑（见 runAsync）。
+    bool busy_ = false;
 };

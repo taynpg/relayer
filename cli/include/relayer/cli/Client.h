@@ -88,6 +88,44 @@ struct Outcome {
     // askPathMeta 的结果：与请求里的路径**一一对应、顺序相同**。
     // 其他操作为空。
     std::vector<core::session::RemoteMeta> remoteMetas;
+
+    // 远端文件操作（fileOpOnSession，PROTOCOL.md §11.12）的结果。
+    // 只有对应的操作才会填，其余为默认值：
+    //   - kSha256    → sha256Hex（64 个小写十六进制字符）
+    //   - kDelete    → failedPaths（部分失败时逐条列出，全成功时为空）
+    //   - kUnarchive → extractedDir（解出的目录）
+    std::string sha256Hex;
+    std::string extractedDir;
+    std::vector<std::string> failedPaths;
+};
+
+// 远端文件操作种类（PROTOCOL.md §11.12）。对应五条 ask 帧。
+enum class FileOpKind {
+    kSha256,      // 让对端算一个文件的 SHA-256
+    kRename,      // 改名（拒绝覆盖已存在的目标）
+    kDelete,      // 删除一批路径（目录递归）
+    kCreateDir,   // 新建目录（含中间层）
+    kUnarchive,   // 把对端的一个 .tar.xz 解到同目录的同名子目录
+};
+
+// 一次远端文件操作的请求。用结构体而不是六个参数的函数：
+// 这五项在多处出现（CLI 自检、GUI 右键、e2e），参数顺序错了编译器不会管。
+//
+// 路径都是**对端视角**的路径（绝对，或相对接收目录的相对路径——与发送
+// 落点同一套解析，见 DESIGN.md §3.8）。
+struct FileOpRequest {
+    FileOpKind kind = FileOpKind::kSha256;
+    std::string peerId;
+
+    // kSha256 / kCreateDir / kUnarchive 用 path；kRename 用它作源。
+    // kDelete 不看它，看 paths。
+    std::string path;
+
+    // kRename 的目标名（同一目录内的新名字）。
+    std::string newPath;
+
+    // kDelete 要删的路径。
+    std::vector<std::string> paths;
 };
 
 // 进度回调。bytesPerSecond 由 Client 自己算——传原始计数让每个调用方
@@ -257,6 +295,13 @@ struct ClientConfig {
     // 测试用它兜底，避免一个逻辑 bug（比如永远不会完成的收尾握手）把
     // CI 拖到全局超时才有结论。
     std::chrono::seconds hardTimeout{0};
+
+    // 一次性连接上做一次远端文件操作（`op` 子命令，PROTOCOL.md §11.12）。
+    //
+    // 只有 `op` 用它。GUI 走的是 fileOpOnSession——搭在常驻接收会话上，
+    // 不换 id。CLI 没有常驻会话，一条连接做一件事、做完就退。
+    // peerId 为空表示不做。
+    FileOpRequest fileOp;
 };
 
 // 命令行用法之外的两种操作。放在一个枚举里而不是两个类：
@@ -266,6 +311,7 @@ enum class Action {
     kReceive,   // 把收到的文件落到本地
     kList,      // 只连上去打印在线列表，然后退出
     kBrowse,    // 问对端要一次目录列举（远端浏览 / 对照表粗校验的前置）
+    kFileOp,    // 让对端做一次文件操作（算摘要 / 改名 / 删除 / 建目录 / 解压）
 };
 
 class Client
@@ -296,6 +342,10 @@ public:
     // absPath 是**对端视角的绝对路径**，空表示根列表（盘符 + 家目录）。
     // 或路径越界时结果为失败（kRejected），不是崩溃。
     void browsePeer(std::string peerId, std::string relPath);
+
+    // 让对端做一次文件操作（PROTOCOL.md §11.12）。`op` 子命令用：
+    // 一条连接只做这件事，拿到应答就结束。
+    void runFileOp(FileOpRequest req);
 
     // 在**当前这条连接**上问一次在线列表（只对常驻接收会话有意义）。
     //
@@ -337,6 +387,16 @@ public:
     // 结果按请求顺序落在 Outcome::remoteMetas；对端返回的条数不匹配时
     // 整批判失败（按下标对不上就是错位，错位的覆盖提示会让用户点错文件）。
     bool askPathMetaOnSession(std::string peerId, std::vector<std::string> absPaths, std::function<void(const Outcome&)> done);
+
+    // 在**现有常驻会话**上请对端做一次文件操作（PROTOCOL.md §11.12）：
+    // 算 SHA-256、改名、删除、新建目录、解压归档。
+    //
+    // 与列举/元信息/取回共用"会话不结束、只回调这一次结论"的模式，四者
+    // **互斥**——同一时刻只有一个请求在等应答，否则应答回来分不清归属。
+    //
+    // 返回 false = 没有可用的常驻会话，或已有别的请求在飞。调用方应提示
+    // 用户而不是偷偷新开连接（新连接会顶掉接收会话、换掉本机 id）。
+    bool fileOpOnSession(FileOpRequest req, std::function<void(const Outcome&)> done);
 
     // 在**现有常驻会话**上请对端把某个文件发过来（PROTOCOL.md §11.9）。
     //

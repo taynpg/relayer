@@ -1,5 +1,6 @@
 #include "RelayTaskControl.h"
 
+#include <QComboBox>
 #include <QDir>
 #include <QDirIterator>
 #include <QFileInfo>
@@ -9,6 +10,7 @@
 #include <QPushButton>
 #include <QTableWidget>
 #include <QVBoxLayout>
+#include <limits>
 
 #include "model/PathText.h"
 #include "model/ProgressTracker.h"
@@ -94,6 +96,34 @@ void RelayTaskControl::buildLayout()
 
     summaryLabel_ = new QLabel(QStringLiteral("共 0 项"), this);
 
+    // 分页导航条（v1 RelayTask 的同款）：
+    //   首页 / 上一页 / 第 x/y 页 ｜ 条目 a-b / 共 n / 下一页 / 末页 / 每页 N
+    btnFirst_ = new QPushButton(QStringLiteral("首页"), this);
+    btnPrev_ = new QPushButton(QStringLiteral("上一页"), this);
+    btnNext_ = new QPushButton(QStringLiteral("下一页"), this);
+    btnLast_ = new QPushButton(QStringLiteral("末页"), this);
+    pageLabel_ = new QLabel(QStringLiteral("第 1/1 页"), this);
+    pageLabel_->setAlignment(Qt::AlignCenter);
+    pageSizeBox_ = new QComboBox(this);
+    pageSizeBox_->addItems(
+        {QStringLiteral("50"), QStringLiteral("100"), QStringLiteral("200"), QStringLiteral("500"), QStringLiteral("全部")});
+    pageSizeBox_->setCurrentText(QStringLiteral("100"));
+
+    connect(btnFirst_, &QPushButton::clicked, this, [this]() { gotoPage(0); });
+    connect(btnPrev_, &QPushButton::clicked, this, [this]() { gotoPage(page_ - 1); });
+    connect(btnNext_, &QPushButton::clicked, this, [this]() { gotoPage(page_ + 1); });
+    connect(btnLast_, &QPushButton::clicked, this, [this]() { gotoPage(pageCount() - 1); });
+    connect(pageSizeBox_, &QComboBox::currentTextChanged, this, [this](const QString& text) {
+        // "全部"给一个足够大的数而不是特判分支：pageCount / 取整 / 边界判断
+        // 全都照常工作，少一处 if 就少一处漏判。
+        pageSize_ = text == QStringLiteral("全部") ? std::numeric_limits<int>::max() : text.toInt();
+        if (pageSize_ <= 0) {
+            pageSize_ = 100;
+        }
+        page_ = 0;
+        renderPage();
+    });
+
     btnStop_ = new QPushButton(QStringLiteral("停止"), this);
     btnStop_->setEnabled(false);
     connect(btnStop_, &QPushButton::clicked, this, &RelayTaskControl::onStopClicked);
@@ -108,6 +138,15 @@ void RelayTaskControl::buildLayout()
     auto* btnLayout = new QHBoxLayout();
     btnLayout->addWidget(summaryLabel_);
     btnLayout->addStretch();
+    btnLayout->addWidget(btnFirst_);
+    btnLayout->addWidget(btnPrev_);
+    btnLayout->addWidget(pageLabel_);
+    btnLayout->addWidget(btnNext_);
+    btnLayout->addWidget(btnLast_);
+    btnLayout->addSpacing(12);
+    btnLayout->addWidget(new QLabel(QStringLiteral("每页"), this));
+    btnLayout->addWidget(pageSizeBox_);
+    btnLayout->addSpacing(12);
     btnLayout->addWidget(btnStop_);
     btnLayout->addWidget(btnRetryFailed_);
     btnLayout->addWidget(btnClear_);
@@ -115,6 +154,7 @@ void RelayTaskControl::buildLayout()
     auto* layout = new QVBoxLayout(this);
     layout->addWidget(table_);
     layout->addLayout(btnLayout);
+    updatePageLabel();
 }
 
 void RelayTaskControl::attachCoreService(relayer::app::CoreService* core)
@@ -199,6 +239,7 @@ void RelayTaskControl::startTasks(const RelayTaskItems& items, const ConnInfo& c
     stopping_ = false;
     active_.clear();
     trackers_.clear();
+    progressText_.clear();
     updateButtons();
     emit logMessage(QStringLiteral("[任务] 开始：%1 个文件\n").arg(rows_.size()));
     fillWindow();
@@ -270,6 +311,7 @@ void RelayTaskControl::fillWindow()
         const Row& t = rows_[next];
         setStatus(next, kTransing);
         trackers_.remove(next);   // 新的一路，进度从零算
+        progressText_.remove(next);
         active_.insert(next);
 
         emit logMessage(
@@ -385,8 +427,13 @@ void RelayTaskControl::onSendTaskProgress(qint64 taskId, quint64 bytesDone, quin
         return;
     }
     // 每行一个 tracker：并发时共用一份会把别的任务的速率画到这一行上。
-    if (auto* it = table_->item(row, kColProgress)) {
-        it->setText(trackers_[row].update(bytesDone, bytesTotal, bytesPerSecond));
+    progressText_[row] = trackers_[row].update(bytesDone, bytesTotal, bytesPerSecond);
+    const int viewRow = viewRowOf(row);
+    if (viewRow < 0) {
+        return;   // 不在当前页：文本已存，切页时 fillRow 会取
+    }
+    if (auto* it = table_->item(viewRow, kColProgress)) {
+        it->setText(progressText_.value(row));
     }
 }
 
@@ -424,6 +471,7 @@ void RelayTaskControl::onRetryFailed()
     stopping_ = false;
     active_.clear();
     trackers_.clear();
+    progressText_.clear();
     updateButtons();
     emit logMessage(QStringLiteral("[任务] 重传失败项\n"));
     fillWindow();
@@ -440,7 +488,9 @@ void RelayTaskControl::onClearClicked()
         return;
     }
     rows_.clear();
-    table_->setRowCount(0);
+    progressText_.clear();
+    page_ = 0;
+    renderPage();
     updateSummary();
 }
 
@@ -465,25 +515,107 @@ void RelayTaskControl::finishBatch(bool allOk)
     emit batchFinished(allOk);
 }
 
+int RelayTaskControl::pageCount() const
+{
+    const int total = static_cast<int>(rows_.size());
+    if (total <= 0) {
+        return 1;
+    }
+    const qint64 size = qMax(1, pageSize_);
+    return static_cast<int>((static_cast<qint64>(total) + size - 1) / size);
+}
+
+int RelayTaskControl::viewRowOf(int modelRow) const
+{
+    if (modelRow < 0 || modelRow >= rows_.size()) {
+        return -1;
+    }
+    // qint64：pageSize_ 在"全部"时是 INT_MAX，page_*pageSize_ 用 int 算会溢出。
+    const qint64 start = static_cast<qint64>(page_) * pageSize_;
+    const qint64 offset = static_cast<qint64>(modelRow) - start;
+    if (offset < 0 || offset >= pageSize_) {
+        return -1;
+    }
+    return static_cast<int>(offset);
+}
+
+void RelayTaskControl::fillRow(int viewRow, int modelRow)
+{
+    const Row& r = rows_[modelRow];
+    auto mkItem = [](const QString& text) {
+        auto* it = new QTableWidgetItem(text);
+        it->setFlags(it->flags() & ~Qt::ItemIsEditable);
+        return it;
+    };
+    table_->setItem(viewRow, kColIndex, mkItem(QString::number(modelRow + 1)));
+    table_->setItem(viewRow, kColName, mkItem(r.name));
+    table_->setItem(viewRow, kColPeer, mkItem(r.peerId));
+    table_->setItem(viewRow, kColRelDir, mkItem(r.relDir));
+    table_->setItem(viewRow, kColSize, mkItem(humanBytes(r.size)));
+
+    const StatusStyle style = statusStyle(r.status);
+    auto* statusItem = mkItem(style.text);
+    statusItem->setForeground(style.color);
+    table_->setItem(viewRow, kColStatus, statusItem);
+
+    // 进度按模型行的文本恢复：翻到别的页再翻回来不该是空白，
+    // 也不该等下一次 100ms 回调才填上。
+    table_->setItem(viewRow, kColProgress, mkItem(progressText_.value(modelRow)));
+}
+
+void RelayTaskControl::renderPage()
+{
+    const int pages = pageCount();
+    page_ = qBound(0, page_, pages - 1);
+
+    const qint64 start = static_cast<qint64>(page_) * pageSize_;
+    const int first = start < rows_.size() ? static_cast<int>(start) : -1;
+    const int last = first < 0 ? -1 : static_cast<int>(qMin<qint64>(start + pageSize_, static_cast<qint64>(rows_.size())));
+
+    table_->setUpdatesEnabled(false);
+    table_->clearContents();
+    table_->setRowCount(0);
+
+    if (first >= 0 && last > first) {
+        table_->setRowCount(last - first);
+        for (int m = first; m < last; ++m) {
+            fillRow(m - first, m);
+        }
+    }
+    table_->setUpdatesEnabled(true);
+    updatePageLabel();
+}
+
+void RelayTaskControl::gotoPage(int page)
+{
+    const int target = qBound(0, page, pageCount() - 1);
+    if (target == page_) {
+        return;
+    }
+    page_ = target;
+    renderPage();
+}
+
+void RelayTaskControl::updatePageLabel()
+{
+    const int total = static_cast<int>(rows_.size());
+    const int pages = pageCount();
+    page_ = qBound(0, page_, pages - 1);
+
+    const int begin = total == 0 ? 0 : static_cast<int>(static_cast<qint64>(page_) * pageSize_) + 1;
+    const int end = total == 0 ? 0 : static_cast<int>(qMin<qint64>(static_cast<qint64>(page_ + 1) * pageSize_, total));
+    pageLabel_->setText(
+        QStringLiteral("第 %1/%2 页 ｜ 条目 %3-%4 / 共 %5").arg(page_ + 1).arg(pages).arg(begin).arg(end).arg(total));
+    btnFirst_->setEnabled(page_ > 0);
+    btnPrev_->setEnabled(page_ > 0);
+    btnNext_->setEnabled(page_ < pages - 1);
+    btnLast_->setEnabled(page_ < pages - 1);
+}
+
 void RelayTaskControl::rebuildTable()
 {
-    table_->setRowCount(static_cast<int>(rows_.size()));
-    for (int i = 0; i < rows_.size(); ++i) {
-        const Row& r = rows_[i];
-        auto mkItem = [](const QString& text) {
-            auto* it = new QTableWidgetItem(text);
-            it->setFlags(it->flags() & ~Qt::ItemIsEditable);
-            return it;
-        };
-        table_->setItem(i, kColIndex, mkItem(QString::number(i + 1)));
-        table_->setItem(i, kColName, mkItem(r.name));
-        table_->setItem(i, kColPeer, mkItem(r.peerId));
-        table_->setItem(i, kColRelDir, mkItem(r.relDir));
-        table_->setItem(i, kColSize, mkItem(humanBytes(r.size)));
-        table_->setItem(i, kColStatus, mkItem(QString()));
-        table_->setItem(i, kColProgress, mkItem(QString()));
-        refreshRowCells(i);
-    }
+    page_ = 0;
+    renderPage();
 }
 
 void RelayTaskControl::setStatus(int row, Status st)
@@ -503,8 +635,12 @@ void RelayTaskControl::refreshRowCells(int row)
     if (row < 0 || row >= rows_.size()) {
         return;
     }
+    const int viewRow = viewRowOf(row);
+    if (viewRow < 0) {
+        return;   // 不在当前页：模型已改，切到那页时 fillRow 会带上
+    }
     const StatusStyle style = statusStyle(rows_[row].status);
-    if (auto* it = table_->item(row, kColStatus)) {
+    if (auto* it = table_->item(viewRow, kColStatus)) {
         it->setText(style.text);
         it->setForeground(style.color);
     }

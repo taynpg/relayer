@@ -1,14 +1,18 @@
 #include "MainWindow.h"
 
 #include <QAbstractButton>
+#include <QClipboard>
 #include <QCloseEvent>
+#include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGroupBox>
+#include <QGuiApplication>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScreen>
 #include <QSettings>
 #include <QSplitter>
 #include <QStandardPaths>
@@ -73,6 +77,46 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent), ui_(new Ui::MainWindo
 
     // 本地面板一开始就落在用户目录：空白表格会让人以为功能没做。
     explorer_->navigateTo(QStandardPaths::writableLocation(QStandardPaths::HomeLocation));
+
+    restoreWindowGeometry();
+}
+
+// v1 relayFile::initAfter 的规则，一处不落：
+//   1. 有几何数据且 restoreGeometry 成功 → 用它（它自己会恢复最大化状态）；
+//   2. 恢复出来的矩形与本机任一屏幕都不相交（外接屏已经拔掉）→ 居中到主屏；
+//   3. 没有几何数据（首次启动 / 旧配置）→ 主屏 70%，并限制在 90% 以内再居中。
+//
+// 第 3 步的上限不是洁癖：如果哪天真存进了一个"接近整屏的宽高"，不限制的话
+// 窗口边框会被任务栏吃掉一截，而用户没有明显手段拖回来。
+void MainWindow::restoreWindowGeometry()
+{
+    QSettings settings;
+    const QByteArray saved = settings.value(relayer::app::settings::kWindowGeometry).toByteArray();
+    if (!saved.isEmpty() && restoreGeometry(saved)) {
+        const QRect current = geometry();
+        bool onScreen = false;
+        const auto screens = QGuiApplication::screens();
+        for (const QScreen* screen : screens) {
+            if (screen->availableGeometry().intersects(current)) {
+                onScreen = true;
+                break;
+            }
+        }
+        if (onScreen || screens.isEmpty()) {
+            return;   // 最大化状态由 Qt 在首次 show 时恢复
+        }
+        const QRect avail = screens.first()->availableGeometry();
+        move(avail.x() + (avail.width() - current.width()) / 2, avail.y() + (avail.height() - current.height()) / 2);
+        return;
+    }
+
+    const QRect avail = QGuiApplication::primaryScreen()->availableGeometry();
+    int w = static_cast<int>(avail.width() * 0.7);
+    int h = static_cast<int>(avail.height() * 0.7);
+    w = qMin(w, static_cast<int>(avail.width() * 0.9));
+    h = qMin(h, static_cast<int>(avail.height() * 0.9));
+    resize(w, h);
+    move(avail.x() + (avail.width() - w) / 2, avail.y() + (avail.height() - h) / 2);
 }
 
 MainWindow::~MainWindow()
@@ -198,8 +242,12 @@ void MainWindow::wireSignals()
             });
     connect(core_, &relayer::app::CoreService::remotePullFinished, this, &MainWindow::onRemotePullFinished);
 
-    // 发送前检查的回程（kAskPathMeta 的应答）。
-    connect(core_, &relayer::app::CoreService::pathMetaFinished, this, &MainWindow::onPreCheckMetaFinished);
+    // 远端文件操作（§11.12）：面板 → CoreService → 结论回日志 + 刷新面板。
+    connect(remoteExplorer_, &ExplorerControl::remoteOpRequested, this, &MainWindow::onRemoteOpRequested);
+    connect(core_, &relayer::app::CoreService::remoteFileOpFinished, this, &MainWindow::onRemoteFileOpFinished);
+
+    // 发送前检查与对照表检查共用 kAskPathMeta，靠 pathMetaPurpose_ 分派。
+    connect(core_, &relayer::app::CoreService::pathMetaFinished, this, &MainWindow::onPathMetaFinished);
     connect(remoteExplorer_, &ExplorerControl::remoteListRequested, this, [this](const QString& peer, const QString& relPath) {
         if (!core_->browsePeerOnSession(peer, relPath)) {
             remoteExplorer_->applyRemoteEntries(false, false, QStringLiteral("当前不能列举（会话不可用或正在传输）"), {});
@@ -488,9 +536,13 @@ void MainWindow::onOperationFinished(bool ok, const QString& summary, const QStr
 {
     // 检查远端的队列挂在常驻会话上：会话一结束，队列里的请求就不会再有
     // 回音了。不清掉的话界面会永远停在"检查中"。
-    if (remoteCheckIndex_ >= 0) {
+    if (checkGroupIndex_ >= 0) {
         remoteChecks_.clear();
-        remoteCheckIndex_ = -1;
+        checkGroups_.clear();
+        checkGroupIndex_ = -1;
+        if (pathMetaPurpose_ == PathMetaPurpose::kRemoteCheck) {
+            pathMetaPurpose_ = PathMetaPurpose::kNone;
+        }
         log_->appendLog(QStringLiteral("[检查] 会话结束，检查中止\n"));
     }
 
@@ -549,6 +601,10 @@ void MainWindow::onOperationFinished(bool ok, const QString& summary, const QStr
 // 为什么放在 MainWindow 而不是 ExplorerControl：需要同时知道两个面板各自的
 // 当前路径，而两个面板互相不认识。v1 用共享状态回调（tellInfoCall_）解决，
 // v2 让 MainWindow 做中间人——它本来就持有两者。
+//
+// 为什么走 kAskPathMeta 而不是列举对端目录：一次往返、只查这一个文件，
+// 还顺带拿到内容指纹。列举一个大目录只为比一个文件是 v2 早先的写法，
+// 又慢又只能比大小。
 void MainWindow::onCompareRequested(const QString& name, bool wantTime)
 {
     if (!core_->busy()) {
@@ -560,64 +616,183 @@ void MainWindow::onCompareRequested(const QString& name, bool wantTime)
         return;
     }
 
-    const QFileInfo local(QDir(explorer_->currentPathForCompare()).filePath(name));
+    const QString localPath = QDir(explorer_->currentPathForCompare()).filePath(name);
+    const QFileInfo local(localPath);
     if (!local.exists() || !local.isFile()) {
         log_->appendLog(QStringLiteral("[校验] 本地没有这个文件：%1\n").arg(name));
         return;
     }
 
+    const QString peer = remoteExplorer_->remotePeerId();
+    if (peer.isEmpty()) {
+        log_->appendLog(QStringLiteral("[校验] 远端面板还没有对端（先右键对端「浏览此对端的目录」）\n"));
+        return;
+    }
+
     pendingCompare_.name = name;
+    pendingCompare_.peer = peer;
+    pendingCompare_.localPath = localPath;
+    pendingCompare_.absPath = relayer::app::joinRemotePath(remoteExplorer_->currentPathForCompare(), name);
     pendingCompare_.wantTime = wantTime;
     pendingCompare_.localSize = local.size();
     pendingCompare_.localMtime = local.lastModified().toMSecsSinceEpoch();
     compareActive_ = true;
 
+    pathMetaPurpose_ = PathMetaPurpose::kLocalCompare;
+    if (!core_->askPathMeta(peer, QStringList{pendingCompare_.absPath})) {
+        compareActive_ = false;
+        pathMetaPurpose_ = PathMetaPurpose::kNone;
+        log_->appendLog(QStringLiteral("[校验] 当前不能查询对端（未连接或正在传输）\n"));
+        return;
+    }
     log_->appendLog(
         QStringLiteral("[校验] %1：本地 %2 字节，正在取对端信息…\n").arg(name, QString::number(pendingCompare_.localSize)));
-
-    // 对端就是远端面板当前所在的那个目录。没选对端 / 没有会话时它会返回
-    // false，下面的日志说明原因——不必在这里重复判断。
-    if (!core_->browsePeerOnSession(remoteExplorer_->remotePeerId(), remoteExplorer_->currentPathForCompare())) {
-        compareActive_ = false;
-        log_->appendLog(QStringLiteral("[校验] 当前不能列举对端（未连接或正在传输）\n"));
-    }
 }
 
-// 对端信息到手：比大小，或比修改时间。
-void MainWindow::finishCompare(qint64 peerSize, qint64 peerMtime)
+void MainWindow::onLocalCompareMetaFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteMetaRow>& rows)
 {
     const auto pc = pendingCompare_;
     compareActive_ = false;
+    pathMetaPurpose_ = PathMetaPurpose::kNone;
 
-    QString conclusion;
-    bool same = true;
-    if (!pc.wantTime) {
-        same = (pc.localSize == peerSize);
-        conclusion = same ? QStringLiteral("大小一致（%1 字节）").arg(pc.localSize)
-                          : QStringLiteral("大小不符：本地 %1，对端 %2 字节").arg(pc.localSize).arg(peerSize);
-    } else {
-        same = (pc.localMtime == peerMtime);
+    if (!ok) {
+        log_->appendLog(QStringLiteral("[校验] 取对端信息失败：%1\n").arg(summary));
+        return;
+    }
+    if (rows.isEmpty() || !rows.first().exists) {
+        log_->appendLog(QStringLiteral("[校验] %1：对端没有这个文件（%2:%3）\n")
+                            .arg(pc.name, pc.peer, pc.absPath.isEmpty() ? QStringLiteral("<接收目录>") : pc.absPath));
+        return;
+    }
+    finishCompare(rows.first());
+}
+
+// 对端信息到手：时间戳校验比 mtime；粗校验先比大小再比内容指纹。
+//
+// 内容级用 quickFingerprint（采样指纹），与 v1 的 SampleCompare 采样块是
+// 同一个思路、同一份成本量级——比整文件哈希便宜，比"只看大小"强得多。
+void MainWindow::finishCompare(const relayer::app::RemoteMetaRow& peerMeta)
+{
+    const auto pc = pendingCompare_;
+    const qint64 peerSize = static_cast<qint64>(peerMeta.size);
+    const qint64 peerMtime = peerMeta.mtimeMs > 0 ? peerMeta.mtimeMs : 0;
+
+    if (pc.wantTime) {
         const auto fmt = [](qint64 ms) {
             return QDateTime::fromMSecsSinceEpoch(ms).toString(QStringLiteral("yyyy-MM-dd hh:mm:ss"));
         };
-        if (same) {
-            conclusion = QStringLiteral("两端修改时间相同（%1）").arg(fmt(pc.localMtime));
-        } else {
-            conclusion = QStringLiteral("修改时间不同：本地 %1，对端 %2（%3 更新）")
-                             .arg(fmt(pc.localMtime), fmt(peerMtime),
-                                  pc.localMtime > peerMtime ? QStringLiteral("本地") : QStringLiteral("对端"));
+        if (pc.localMtime == peerMtime) {
+            log_->appendLog(QStringLiteral("[校验] %1：两端修改时间相同（%2）\n").arg(pc.name, fmt(pc.localMtime)));
+            return;
         }
+        if (peerMtime <= 0) {
+            log_->appendLog(QStringLiteral("[校验] %1：对端没有给出修改时间（本地 %2）\n").arg(pc.name, fmt(pc.localMtime)));
+            return;
+        }
+        const bool localNewer = pc.localMtime > peerMtime;
+        qint64 diffSec = qAbs(pc.localMtime - peerMtime) / 1000;
+        const qint64 days = diffSec / 86400;
+        const qint64 hours = (diffSec % 86400) / 3600;
+        const qint64 mins = (diffSec % 3600) / 60;
+        const qint64 secs = diffSec % 60;
+        QStringList parts;
+        if (days > 0) {
+            parts << QStringLiteral("%1天").arg(days);
+        }
+        if (hours > 0) {
+            parts << QStringLiteral("%1小时").arg(hours);
+        }
+        if (mins > 0) {
+            parts << QStringLiteral("%1分").arg(mins);
+        }
+        if (secs > 0 || parts.isEmpty()) {
+            parts << QStringLiteral("%1秒").arg(secs);
+        }
+        log_->appendLog(QStringLiteral("[校验] %1：%2更新（本地 %3，对端 %4，相差 %5）\n")
+                            .arg(pc.name, localNewer ? QStringLiteral("本地") : QStringLiteral("对端"), fmt(pc.localMtime),
+                                 fmt(peerMtime), parts.join(QString())));
+        return;
     }
 
-    log_->appendLog(
-        QStringLiteral("[校验] %1：%2%3\n").arg(pc.name, conclusion, same ? QString() : QStringLiteral("  ← 不一致")));
+    // 粗校验：大小不一致就没必要算指纹了。
+    if (peerSize != pc.localSize) {
+        log_->appendLog(QStringLiteral("[校验] %1：大小不符（本地 %2，对端 %3）\n")
+                            .arg(pc.name, humanBytes(static_cast<quint64>(pc.localSize)), humanBytes(peerMeta.size)));
+        return;
+    }
+
+    relayer::filestore::StdFileStore store;
+    const QString localFp = QString::fromStdString(store.quickFingerprint(pc.localPath.toStdString()));
+    if (localFp.isEmpty() || peerMeta.fingerprint.isEmpty()) {
+        log_->appendLog(QStringLiteral("[校验] %1：大小一致（%2），内容无法粗判（%3）\n")
+                            .arg(pc.name, humanBytes(peerMeta.size),
+                                 localFp.isEmpty() ? QStringLiteral("本地读取失败") : QStringLiteral("对端未给出指纹")));
+        return;
+    }
+    if (localFp == peerMeta.fingerprint) {
+        log_->appendLog(QStringLiteral("[校验] %1：内容粗判一致（%2）\n").arg(pc.name, humanBytes(peerMeta.size)));
+    } else {
+        log_->appendLog(QStringLiteral("[校验] %1：大小一致但内容不一致（%2）\n").arg(pc.name, humanBytes(peerMeta.size)));
+    }
 }
 
-// 对照表右键"检查远端"：逐行问对方"这个文件在不在这、大小对不对"。
+// 远端文件操作：面板只给"对谁、对哪个路径、做什么"，这里转给 CoreService。
 //
-// 这是"粗校验"——比对的是文件名 + 大小，不是内容哈希。理由：哈希要对方
-// 读整个文件，成本与传一遍差不多；而"发错人 / 发错目录"这类事故里，
-// 文件在不在这、大小对不对已经能看出来。内容级校验留给传输后的校验和。
+// 特意不在本层做路径拼接或存在性检查：面板给的已经是**对端绝对路径**，
+// 而"路径对不对"只有对端知道——本地猜一遍只会制造两套判断。
+void MainWindow::onRemoteOpRequested(const QString& kind, const QString& peerId, const QString& absPath, const QString& newName,
+                                     const QStringList& paths)
+{
+    bool started = false;
+    if (kind == QLatin1String("sha256")) {
+        started = core_->remoteOpSha256(peerId, absPath);
+    } else if (kind == QLatin1String("rename")) {
+        started = core_->remoteOpRename(peerId, absPath, newName);
+    } else if (kind == QLatin1String("mkdir")) {
+        started = core_->remoteOpCreateDir(peerId, absPath);
+    } else if (kind == QLatin1String("delete")) {
+        started = core_->remoteOpDelete(peerId, paths);
+    } else if (kind == QLatin1String("unpack")) {
+        started = core_->remoteOpUnarchive(peerId, absPath);
+    }
+
+    if (!started) {
+        log_->appendLog(QStringLiteral("[远端] 当前不能执行「%1」：未连接、正在传输，或已有别的远端请求在飞\n").arg(kind));
+    }
+}
+
+void MainWindow::onRemoteFileOpFinished(const QString& kind, bool ok, const QString& summary, const QString& detail,
+                                        const QString& result)
+{
+    if (!ok) {
+        log_->appendLog(
+            QStringLiteral("[远端] %1 失败：%2%3\n")
+                .arg(kind, summary, detail.isEmpty() ? QString() : QStringLiteral("（") + detail + QStringLiteral("）")));
+        if (!result.isEmpty()) {
+            log_->appendLog(QStringLiteral("[远端] 没处理掉的项：\n%1\n").arg(result));
+        }
+    } else if (kind == QLatin1String("sha256")) {
+        // 与本地 SHA256 同一个交互：算完自动进剪贴板，用户下一步多半是粘贴。
+        QGuiApplication::clipboard()->setText(result);
+        log_->appendLog(QStringLiteral("[远端] SHA-256（已复制到剪贴板）：%1\n").arg(result));
+    } else if (kind == QLatin1String("unpack")) {
+        log_->appendLog(QStringLiteral("[远端] 已解压到 %1\n").arg(result));
+    } else {
+        log_->appendLog(QStringLiteral("[远端] %1\n").arg(summary));
+    }
+
+    // 变更类操作之后重列当前目录：删了/改名了/建了目录却不刷新，用户会
+    // 以为没生效，然后再点一次。sha256 不改动文件系统，不必刷。
+    if (kind != QLatin1String("sha256") && !remoteExplorer_->remotePeerId().isEmpty()) {
+        remoteExplorer_->navigateTo(remoteExplorer_->currentPathForCompare());
+    }
+}
+// 对照表右键"检查远端"：按对端分组，每组一次 kAskPathMeta（§11.11）。
+//
+// v1 的「粗校验」是"逐文件两次往返采样块"。v2 用一条批量查询把存在性、
+// 大小、时间、内容指纹一次拿全：一处 RTT 换一整套结论，还少了"逐行列举
+// 一个大目录"的开销。语义没有缩水——quickFingerprint 就是采样指纹，
+// 与 v1 的 SampleBlock 采样是同一个思路（比整文件哈希便宜得多）。
 void MainWindow::onRemoteCheckRequested(const relayer::app::RelayTaskItems& items)
 {
     if (!core_->busy()) {
@@ -626,39 +801,135 @@ void MainWindow::onRemoteCheckRequested(const relayer::app::RelayTaskItems& item
                                             "新开连接会把本机 id 换掉。"));
         return;
     }
-    if (remoteCheckIndex_ >= 0) {
+    if (checkGroupIndex_ >= 0) {
         log_->appendLog(QStringLiteral("[检查] 上一批还没跑完，请等它结束\n"));
         return;
     }
 
     const QString defaultPeer = connector_->currentPeerId();
     remoteChecks_.clear();
+    checkGroups_.clear();
+
     for (const auto& it : items) {
         const QString peer = it.peerId.isEmpty() ? defaultPeer : it.peerId;
         if (peer.isEmpty()) {
             log_->appendLog(QStringLiteral("[检查] %1：没有指定对端，跳过\n").arg(it.name));
             continue;
         }
-        if (it.isDir) {
-            // 目录的"是否已有"没有意义（对方可能只收到一半）。真要支持，
-            // 得递归比对，那是另一件事。
-            log_->appendLog(QStringLiteral("[检查] %1：目录行暂不支持，跳过\n").arg(it.name));
+        if (it.name.isEmpty()) {
             continue;
         }
+
         RemoteCheck rc;
         rc.peer = peer;
-        rc.relDir = it.relDir;
         rc.name = it.name;
-        rc.localSize = QFileInfo(QDir(it.localDir).filePath(it.name)).size();
+        rc.absPath = relayer::app::joinRemotePath(it.relDir, it.name);
+        rc.localPath = QDir(it.localDir).filePath(it.name);
+        const QFileInfo local(rc.localPath);
+        rc.isDir = it.isDir || local.isDir();
+        rc.localSize = local.size();
         remoteChecks_.append(rc);
+
+        // 分组：同一个对端的目标路径合成一次请求。
+        int group = -1;
+        for (int i = 0; i < checkGroups_.size(); ++i) {
+            if (checkGroups_.at(i).peer == peer) {
+                group = i;
+                break;
+            }
+        }
+        if (group < 0) {
+            CheckGroup g;
+            g.peer = peer;
+            checkGroups_.append(g);
+            group = static_cast<int>(checkGroups_.size()) - 1;
+        }
+        checkGroups_[group].paths << rc.absPath;
+        checkGroups_[group].checkIndexes << static_cast<int>(remoteChecks_.size()) - 1;
     }
 
     if (remoteChecks_.isEmpty()) {
         return;
     }
-    remoteCheckIndex_ = 0;
-    log_->appendLog(QStringLiteral("[检查] 开始检查 %1 项\n").arg(remoteChecks_.size()));
-    nextRemoteCheck();
+    checkGroupIndex_ = 0;
+    log_->appendLog(QStringLiteral("[检查] 开始检查 %1 项（%2 个对端）\n").arg(remoteChecks_.size()).arg(checkGroups_.size()));
+    issueNextCheckGroup();
+}
+
+void MainWindow::issueNextCheckGroup()
+{
+    while (checkGroupIndex_ >= 0 && checkGroupIndex_ < checkGroups_.size()) {
+        const auto& group = checkGroups_.at(checkGroupIndex_);
+        pathMetaPurpose_ = PathMetaPurpose::kRemoteCheck;
+        if (core_->askPathMeta(group.peer, group.paths)) {
+            return;   // 等 onRemoteCheckMetaFinished
+        }
+        log_->appendLog(QStringLiteral("[检查] 无法查询 %1（会话不可用或正忙），该组跳过\n").arg(group.peer));
+        ++checkGroupIndex_;
+    }
+
+    if (checkGroupIndex_ >= 0) {
+        checkGroupIndex_ = -1;
+        pathMetaPurpose_ = PathMetaPurpose::kNone;
+        remoteChecks_.clear();
+        checkGroups_.clear();
+        log_->appendLog(QStringLiteral("[检查] 结束\n"));
+    }
+}
+
+void MainWindow::onRemoteCheckMetaFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteMetaRow>& rows)
+{
+    if (checkGroupIndex_ < 0 || checkGroupIndex_ >= checkGroups_.size()) {
+        return;   // 迟到的应答
+    }
+    const auto group = checkGroups_.at(checkGroupIndex_);   // 值拷贝：下面会改下标
+    ++checkGroupIndex_;
+
+    if (!ok) {
+        log_->appendLog(QStringLiteral("[检查] %1 的检查失败：%2\n").arg(group.peer, summary));
+        issueNextCheckGroup();
+        return;
+    }
+
+    for (int i = 0; i < group.checkIndexes.size() && i < rows.size(); ++i) {
+        const auto& rc = remoteChecks_.at(group.checkIndexes.at(i));
+        const auto& meta = rows.at(i);
+
+        if (!meta.exists) {
+            log_->appendLog(QStringLiteral("[检查] %1：对方没有（%2:%3）\n")
+                                .arg(rc.name, rc.peer, rc.absPath.isEmpty() ? QStringLiteral("<接收目录>") : rc.absPath));
+            continue;
+        }
+        if (rc.isDir || meta.isDir) {
+            log_->appendLog(QStringLiteral("[检查] %1：对方已有同名目录\n").arg(rc.name));
+            continue;
+        }
+
+        const qint64 peerSize = static_cast<qint64>(meta.size);
+        if (peerSize != rc.localSize) {
+            log_->appendLog(
+                QStringLiteral("[检查] %1：大小不符（本地 %2，对方 %3）\n")
+                    .arg(rc.name, humanBytes(static_cast<quint64>(rc.localSize)), humanBytes(static_cast<quint64>(meta.size))));
+            continue;
+        }
+
+        // 大小一致才值得比内容。任一侧算不出指纹都按"无法粗判"报，
+        // 不替用户判定"大概一样"——那个结论会被用来决定要不要覆盖。
+        relayer::filestore::StdFileStore store;
+        const QString localFp = QString::fromStdString(store.quickFingerprint(rc.localPath.toStdString()));
+        if (localFp.isEmpty() || meta.fingerprint.isEmpty()) {
+            log_->appendLog(
+                QStringLiteral("[检查] %1：大小一致，内容无法粗判（%2）\n")
+                    .arg(rc.name, localFp.isEmpty() ? QStringLiteral("本地读取失败") : QStringLiteral("对端未给出指纹")));
+        } else if (localFp == meta.fingerprint) {
+            log_->appendLog(
+                QStringLiteral("[检查] %1：已存在且内容一致（%2）\n").arg(rc.name, humanBytes(static_cast<quint64>(meta.size))));
+        } else {
+            log_->appendLog(QStringLiteral("[检查] %1：大小一致但内容不一致\n").arg(rc.name));
+        }
+    }
+
+    issueNextCheckGroup();
 }
 
 // 对照表右键"下载到本地目录"：把每行在 peer:relDir 下的 name 取回来，
@@ -813,73 +1084,12 @@ void MainWindow::switchRemotePeer(const QString& peerId, const QString& peerName
                         .arg(peerId, relPath.isEmpty() ? QStringLiteral(" 的共享目录") : QStringLiteral(" 的 ").append(relPath)));
 }
 
-void MainWindow::nextRemoteCheck()
-{
-    while (remoteCheckIndex_ < remoteChecks_.size()) {
-        const auto& rc = remoteChecks_.at(remoteCheckIndex_);
-        if (core_->browsePeerOnSession(rc.peer, rc.relDir)) {
-            return;   // 等 remoteBrowseFinished
-        }
-        log_->appendLog(QStringLiteral("[检查] %1：当前无法列举（会话不可用或正忙）\n").arg(rc.name));
-        ++remoteCheckIndex_;
-    }
-    remoteChecks_.clear();
-    remoteCheckIndex_ = -1;
-    log_->appendLog(QStringLiteral("[检查] 结束\n"));
-}
-
 void MainWindow::onRemoteBrowseFinished(bool ok, bool rootListing, const QString& summary,
                                         const QList<relayer::app::RemoteRow>& rows)
 {
-    // 三个消费者，按优先级：一次性的比对 > 检查队列 > 远端面板（默认落点）。
-    if (compareActive_) {
-        if (!ok) {
-            compareActive_ = false;
-            log_->appendLog(QStringLiteral("[校验] 取对端信息失败：%1\n").arg(summary));
-            return;
-        }
-        const auto pc = pendingCompare_;
-        const auto it =
-            std::find_if(rows.begin(), rows.end(), [&](const relayer::app::RemoteRow& r) { return r.name == pc.name; });
-        if (it == rows.end()) {
-            compareActive_ = false;
-            log_->appendLog(QStringLiteral("[校验] %1：对端目录里没有这个文件\n").arg(pc.name));
-            return;
-        }
-        finishCompare(static_cast<qint64>(it->size), it->mtime > 0 ? it->mtime * 1000 : 0);
-        return;
-    }
-
-    if (remoteCheckIndex_ < 0 || remoteCheckIndex_ >= remoteChecks_.size()) {
-        // 不是检查队列要的，那就是远端面板的——**必须回填**，否则浏览
-        // 请求有去无回，面板永远停在"正在读取"、表格永远是空的。
-        remoteExplorer_->applyRemoteEntries(ok, rootListing, summary, rows);
-        return;
-    }
-    const auto rc = remoteChecks_.at(remoteCheckIndex_);
-    ++remoteCheckIndex_;
-
-    if (!ok) {
-        // 最常见的两种：对方没开共享（拒绝），或目录不存在。两者都让
-        // "对方没有这个文件"成立，但原因要写清楚，否则用户会以为传失败了。
-        log_->appendLog(QStringLiteral("[检查] %1：无法确认（%2）\n").arg(rc.name, summary));
-        nextRemoteCheck();
-        return;
-    }
-
-    const auto it = std::find_if(rows.begin(), rows.end(), [&](const relayer::app::RemoteRow& r) { return r.name == rc.name; });
-    if (it == rows.end()) {
-        log_->appendLog(QStringLiteral("[检查] %1：对方没有（%2:%3 下未找到）\n")
-                            .arg(rc.name, rc.peer, rc.relDir.isEmpty() ? QStringLiteral("<根>") : rc.relDir));
-    } else if (static_cast<qint64>(it->size) != rc.localSize) {
-        log_->appendLog(QStringLiteral("[检查] %1：大小不符（本地 %2，对方 %3）\n")
-                            .arg(rc.name)
-                            .arg(rc.localSize)
-                            .arg(static_cast<qint64>(it->size)));
-    } else {
-        log_->appendLog(QStringLiteral("[检查] %1：已存在且大小一致\n").arg(rc.name));
-    }
-    nextRemoteCheck();
+    // 远端面板是唯一的消费者：粗校验/检查远端都改走 kAskPathMeta 了
+    // （一次往返、带指纹），不再和面板抢同一路列举应答。
+    remoteExplorer_->applyRemoteEntries(ok, rootListing, summary, rows);
 }
 
 void MainWindow::onTransTaskRun(const relayer::app::RelayTaskItems& items)
@@ -990,6 +1200,7 @@ void MainWindow::startSendPreCheck(const relayer::app::RelayTaskItems& items, co
     preCheckQueue_.clear();
     preCheckResults_.clear();
     preCheckIndex_ = -1;
+    pathMetaPurpose_ = PathMetaPurpose::kSendPreCheck;
 
     // 按对端分组：一次请求只能问一个对端，而一批任务可能跨多个对端。
     QHash<QString, int> byPeer;   // peerId -> preCheckQueue_ 下标
@@ -1043,6 +1254,30 @@ void MainWindow::issueNextPreCheck()
     }
 }
 
+// kAskPathMeta 应答的统一入口：两个消费者（发送前检查、对照表检查）串行使用
+// 同一条通道，靠 pathMetaPurpose_ 分派。
+//
+// 不做"按内容猜归属"：一批发送前检查可能来自三个对端，一次检查也可能是
+// 一个对端的一批路径，只看条数分不清。标志位由发起方自己置、自己清。
+void MainWindow::onPathMetaFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteMetaRow>& rows)
+{
+    switch (pathMetaPurpose_) {
+    case PathMetaPurpose::kSendPreCheck:
+        onPreCheckMetaFinished(ok, summary, rows);
+        return;
+    case PathMetaPurpose::kRemoteCheck:
+        onRemoteCheckMetaFinished(ok, summary, rows);
+        return;
+    case PathMetaPurpose::kLocalCompare:
+        onLocalCompareMetaFinished(ok, summary, rows);
+        return;
+    case PathMetaPurpose::kNone:
+    default:
+        // 没有归属的应答（例如发起方已被取消）：丢掉，不猜。
+        return;
+    }
+}
+
 void MainWindow::onPreCheckMetaFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteMetaRow>& rows)
 {
     if (preCheckIndex_ < 0 || preCheckIndex_ >= preCheckQueue_.size()) {
@@ -1065,6 +1300,7 @@ void MainWindow::onPreCheckMetaFinished(bool ok, const QString& summary, const Q
 
 void MainWindow::promptOverwriteThenSend()
 {
+    pathMetaPurpose_ = PathMetaPurpose::kNone;
     relayer::app::RelayTaskItems kept;
     kept.reserve(preCheckItems_.size());
 
@@ -1154,6 +1390,9 @@ void MainWindow::promptOverwriteThenSend()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    // saveGeometry 同时保存"还原态矩形"与最大化状态，当前是最大化也安全。
+    QSettings().setValue(relayer::app::settings::kWindowGeometry, saveGeometry());
+
     receiveWanted_ = false;
     taskControl_->stopBatch();
     core_->cancelCurrent();

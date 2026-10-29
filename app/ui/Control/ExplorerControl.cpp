@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -14,11 +15,15 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPointer>
+#include <QRunnable>
 #include <QStandardPaths>
 #include <QStyle>
+#include <QThreadPool>
 #include <QTimer>
 #include <QUrl>
 #include <algorithm>
+#include <memory>
 
 #include "model/PathText.h"
 #include "relayer/cli/Client.h"
@@ -55,18 +60,15 @@ bool isPathLikeName(const QString& name)
 
 // 本地文件的 SHA-256（流式读，不整个进内存）。
 //
-// 上限 512 MiB：这是**在 GUI 线程同步算**的（见下面菜单项），超过这个
-// 体积的等待会让人以为程序挂了。真要算更大的文件，用 relayer-cli 或系统
-// 工具的 certutil/sha256sum。
-QString fileSha256(const QString& path)
+// 不设大小上限：现在它只在**后台线程**跑（见 runAsync），再大的文件也只是
+// "多等一会儿"，界面不会僵。v2 早先在 GUI 线程里同步算，为了不让界面冻住
+// 才砍到 512 MiB——那个限制是症状，不是需求；v1 在 WorkerThread 里算，没有上限。
+QString fileSha256(const QString& path, QString& err)
 {
-    constexpr qint64 kLimit = 512LL * 1024 * 1024;
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
+        err = file.errorString();
         return QString();
-    }
-    if (file.size() > kLimit) {
-        return QStringLiteral("too-large");
     }
 
     relayer::crypto::Sha256 hash;
@@ -74,6 +76,7 @@ QString fileSha256(const QString& path)
     while (true) {
         const qint64 n = file.read(buffer.data(), buffer.size());
         if (n < 0) {
+            err = file.errorString();
             return QString();
         }
         if (n == 0) {
@@ -360,6 +363,41 @@ void ExplorerControl::setStatus(const QString& text, bool error)
     ui_->lblStatus->setStyleSheet(error ? QStringLiteral("color: #c0392b;") : QString());
 }
 
+void ExplorerControl::runAsync(const QString& statusText, std::function<bool(QString&)> job,
+                               std::function<void(bool, const QString&)> done)
+{
+    if (busy_) {
+        setStatus(QStringLiteral("上一个本地操作还没结束，请稍候"), true);
+        return;
+    }
+    busy_ = true;
+    setStatus(statusText);
+    // 先把状态行画出来：后台活可能跑几十秒，不给反馈就像没反应。
+    QCoreApplication::processEvents();
+
+    QPointer<ExplorerControl> self(this);
+    auto jobPtr = std::make_shared<std::function<bool(QString&)>>(std::move(job));
+    auto donePtr = std::make_shared<std::function<void(bool, const QString&)>>(std::move(done));
+
+    QThreadPool::globalInstance()->start(QRunnable::create([self, jobPtr, donePtr]() {
+        QString err;
+        const bool ok = (*jobPtr)(err);
+        // 回 GUI 线程。用 self 作 context：窗口在这期间被关掉的话，
+        // 这次投递会被丢弃（job 已经跑完，没人接结果而已）。
+        ExplorerControl* target = self.data();
+        if (target == nullptr) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            target,
+            [target, ok, err, donePtr]() {
+                target->busy_ = false;
+                (*donePtr)(ok, err);
+            },
+            Qt::QueuedConnection);
+    }));
+}
+
 QString ExplorerControl::displayPath() const
 {
     if (source_ == Source::Local) {
@@ -381,9 +419,12 @@ void ExplorerControl::setRemotePeer(const QString& peerId, const QString& peerNa
     entries_.clear();
     remotePendingPath_.clear();
 
-    // 远端只读：文件系统操作都不适用，直接关掉入口，而不是留着能点但点了
-    // 报错。拖出**保留**——载荷是相对路径，落到本地面板就是"下载"（v1 的
-    // 跨面板拖拽在 v2 的对应物）。表格上的标记让对照表拒收这种载荷。
+    // 远端模式下路径框不可手输（那是**对端**的路径，在本机敲没有意义），
+    // 「进入」按钮随之禁用。其余交互（右键菜单、拖出）与本地面板一致——
+    // 菜单只有一套，差异由"这一端有没有执行体"决定，见 onTableContextMenu。
+    //
+    // 拖出**保留**：载荷是相对路径，落到本地面板就是"下载"（v1 的跨面板
+    // 拖拽在 v2 的对应物）。表格上的标记让对照表拒收这种载荷。
     table_->setDragEnabled(true);
     table_->setRemoteSource(true);
     ui_->cbPath->setEditable(false);
@@ -664,165 +705,290 @@ void ExplorerControl::showMetaInfo(int row)
 
 void ExplorerControl::onTableContextMenu(const QPoint& pos)
 {
-    // 动作表注册式写法（清单 #5）：{显示条件, 文字, 回调}，不再写
-    // 十个 if (selectAction == xxx) 的平铺比较。
-    const QList<QTableWidgetItem*> selected = table_->selectedItems();
+    // **一套菜单，两端共用**（v1 的形状）：`source_` 只决定"谁去执行"，
+    // 不决定"显示哪些项"。唯一按端过滤的是「在资源管理器中打开」——它只
+    // 对本地有意义，远端那一侧自动不出现。
+    //
+    // v2 早先把两端拆成两个 if 块，代价是"远端少一半功能"且两处措辞各写
+    // 一套。现在每项声明两个执行体（local / remote），为空表示这一端不
+    // 支持、直接不显示——"远端不支持就隐藏"成了一条规则，不用每项各写
+    // 一次 `if (source_ == Remote)`。
+    const bool remote = (source_ == Source::Remote);
+
     QSet<int> rowSet;
-    for (auto* it : selected) {
+    for (auto* it : table_->selectedItems()) {
         rowSet.insert(it->row());
     }
-    const QVector<int> rows(rowSet.cbegin(), rowSet.cend());
-    const bool singleRow = rows.size() == 1;
-    const QString selectedPath =
-        singleRow ? QDir(currentPath_).filePath(table_->item(rows[0], toInt(ExpColumn::Name))->text()) : QString();
+    QVector<int> sel(rowSet.cbegin(), rowSet.cend());
+    std::sort(sel.begin(), sel.end());
+
+    const bool single = sel.size() == 1;
+    // 根列表那一行是整个盘符 / 家目录：改名、删除、新建、下载它都没有意义
+    // （"把整个 D 盘打包发过来"不是用户想要的）。
+    const bool rootListing = remote && remoteRootListing_;
+    const bool singleEntry = single && !rootListing;
+
+    const auto nameOf = [this](int row) { return table_->item(row, toInt(ExpColumn::Name))->text(); };
+    const auto isDirRow = [this](int row) { return table_->item(row, toInt(ExpColumn::Type))->text() == QStringLiteral("Dir"); };
+    // 根列表里的条目名本身就是完整路径（盘符 / 家目录），不能再拼。
+    const auto remotePathOf = [this](int row) {
+        const QString n = table_->item(row, toInt(ExpColumn::Name))->text();
+        return remoteRootListing_ ? relayer::app::normalizeRemotePath(n) : relayer::app::joinRemotePath(currentPath_, n);
+    };
+
+    const QString name = single ? nameOf(sel.at(0)) : QString();
+    const bool isDir = single && isDirRow(sel.at(0));
+    const bool isFile = single && !isDir;
+    // 同一个"这一项"在两端各是一个绝对路径：本地是本机路径，远端是对端
+    // 绝对路径。下面的动作只关心"对它做什么"，不关心它在谁的盘上。
+    const QString absPath = single ? (remote ? remotePathOf(sel.at(0)) : QDir(currentPath_).filePath(name)) : QString();
+    const bool isArchive = isFile && name.endsWith(QStringLiteral(".tar.xz"), Qt::CaseInsensitive);
 
     QMenu menu(this);
-    if (source_ == Source::Remote) {
-        // 远端只读：本地那套（打开/复制路径/重命名/删除/新建）全不适用。
-        // 能做的只有两件——把文件**拿过来**（§11.9）和刷新。
-        const QString name = singleRow ? table_->item(rows[0], toInt(ExpColumn::Name))->text() : QString();
-        const bool isFile = singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir");
-        const QString peer = peerId_;
-
-        // 文件走 §11.9（原样发），目录走 §11.10（对端打包成 tar.xz）。
-        // 分两项而不是一项自适应：两者的结果不一样——目录拿到的是一个包，
-        // 用户需要知道这件事，否则会以为文件没解压。
-        // 目标绝对路径：根列表里那一行本身就是完整路径，普通列表要拼。
-        const QString absPath = remoteRootListing_ ? name : relayer::app::joinRemotePath(currentPath_, name);
-        if (isFile) {
-            auto* pull = menu.addAction(QStringLiteral("下载到接收目录"));
-            pull->setEnabled(singleRow && !isPathLikeName(absPath));
-            pull->setToolTip(QStringLiteral("文件会落到本机的接收目录"));
-            connect(pull, &QAction::triggered, this, [this, peer, absPath]() {
-                emit remotePullRequested(peer, absPath, false);
-                setStatus(QStringLiteral("已请求取回 %1 …").arg(absPath));
-            });
-        } else {
-            auto* pullDir = menu.addAction(QStringLiteral("下载目录（打包为 tar.xz）"));
-            pullDir->setEnabled(singleRow && !remoteRootListing_);
-            pullDir->setToolTip(QStringLiteral("对端会把它压缩成一个 .tar.xz 发过来，\n"
-                                               "落到接收目录；本版不自动解包"));
-            connect(pullDir, &QAction::triggered, this, [this, peer, absPath]() {
-                emit remotePullRequested(peer, absPath, true);
-                setStatus(QStringLiteral("已请求打包 %1（对方压缩中，可能要几秒）…").arg(absPath));
-            });
+    // visible 决定"这一次要不要出现"；两个执行体里为空的表示该端不支持，
+    // 同样不显示。两端给同一段逻辑时写两份字面量，不要复用同一个
+    // std::function（会被 move 走，第二次只剩空壳）。
+    const auto add = [&](bool visible, const QString& label, std::function<void()> localFn, std::function<void()> remoteFn) {
+        if (!visible) {
+            return;
         }
-
-        connect(menu.addAction(QStringLiteral("刷新")), &QAction::triggered, this, [this]() { enterPath(currentPath_); });
-        // 详细信息在远端同样有意义：名字、大小、修改时间都是 §11.8 回来的，
-        // 只是没有本地路径（对话框里显示 `peer:/rel` 并标注"（远端）"）。
-        if (singleRow) {
-            connect(menu.addAction(QStringLiteral("详细信息")), &QAction::triggered, this,
-                    [this, rows]() { showMetaInfo(rows[0]); });
+        auto body = remote ? std::move(remoteFn) : std::move(localFn);
+        if (!body) {
+            return;
         }
-        menu.exec(table_->viewport()->mapToGlobal(pos));
-        return;
-    }
-    const struct {
-        bool visible;
-        QString label;
-        std::function<void()> run;
-    } actions[] = {
-        // v1 的顺序：传输在第一项（有选中项时才出现）。它把"看到文件"和
-        // "发出去"接起来——没有它，用户只能去对照表手工加行。
-        {!rows.isEmpty(), QStringLiteral("传输（发送到当前通信对象）"),
-         [this]() { emit localTransferRequested(selectedLocalPaths()); }},
-        {true, QStringLiteral("新建文件夹"), [this]() { onNewDir(); }},
-        {singleRow, QStringLiteral("打开"),
-         [this, selectedPath, rows]() {
-             const bool isDir = table_->item(rows[0], toInt(ExpColumn::Type))->text() == QStringLiteral("Dir");
-             QDesktopServices::openUrl(QUrl::fromLocalFile(isDir ? selectedPath : currentPath_));
-         }},
-        {singleRow, QStringLiteral("复制全路径"), [this, selectedPath]() { QApplication::clipboard()->setText(selectedPath); }},
-        // v1 的「详细信息」：名字/类型/大小/修改时间 + 三个复制按钮。
-        // 数据直接取自 entries_，不重新 stat——显示的必须是"表格里那一条"，
-        // 而不是"现在磁盘上那一条"（两者可能不同，用户会困惑）。
-        {singleRow, QStringLiteral("详细信息"), [this, rows]() { showMetaInfo(rows[0]); }},
-        // 压缩 / 解压缩（v1 有、v2 之前只有后端能力没有入口）。
-        //
-        // 压缩的方向：包内**带顶层目录**（entryName 相对各源的父目录），
-        // 所以解压时用 unpackArchive(path, false) 解到父目录；取回目录的包
-        // 是无顶层的，那个走 true。两种形状不能混。
-        {!rows.isEmpty(), QStringLiteral("压缩为 tar.xz…"),
-         [this]() {
-             const QStringList paths = selectedLocalPaths();
-             if (paths.isEmpty()) {
-                 return;
-             }
-             QString suggested = QStringLiteral("archive.tar.xz");
-             if (paths.size() == 1) {
-                 suggested = QFileInfo(paths.first()).fileName() + QStringLiteral(".tar.xz");
-             }
-             const QString out = QFileDialog::getSaveFileName(
-                 this, QStringLiteral("压缩为"), QDir(currentPath()).filePath(suggested), QStringLiteral("tar.xz (*.tar.xz)"));
-             if (out.isEmpty()) {
-                 return;
-             }
-             setStatus(QStringLiteral("正在压缩 %1 项 …").arg(paths.size()));
-             QCoreApplication::processEvents();
-             std::vector<std::string> sources;
-             sources.reserve(static_cast<std::size_t>(paths.size()));
-             for (const auto& p : paths) {
-                 sources.push_back(p.toStdString());
-             }
-             std::string err;
-             if (!relayer::cli::Client::createArchive(sources, out.toStdString(), err)) {
-                 setStatus(QStringLiteral("压缩失败：%1").arg(QString::fromStdString(err)), true);
-                 return;
-             }
-             setStatus(QStringLiteral("已压缩为 %1").arg(QFileInfo(out).fileName()));
-             emit notice(QStringLiteral("[压缩] %1（%2 项）").arg(out).arg(paths.size()));
-             enterPath(currentPath_);   // 刷新，让新包出现
-         }},
-        {singleRow && selectedPath.endsWith(QStringLiteral(".tar.xz"), Qt::CaseInsensitive), QStringLiteral("解压缩"),
-         [this, selectedPath]() {
-             setStatus(QStringLiteral("正在解压 %1 …").arg(QFileInfo(selectedPath).fileName()));
-             QCoreApplication::processEvents();
-             // false：手动压缩的包有顶层目录，解到父目录即可，再套一层会变成 a/a/。
-             const auto dir = relayer::cli::Client::unpackArchive(selectedPath.toStdString(), false);
-             if (dir.empty()) {
-                 setStatus(QStringLiteral("解压失败（包可能损坏）"), true);
-                 return;
-             }
-             setStatus(QStringLiteral("已解压到 %1").arg(QString::fromStdString(dir)));
-             emit notice(QStringLiteral("[解压] %1").arg(QString::fromStdString(dir)));
-             enterPath(currentPath_);
-         }},
-        // 粗校验 / 时间戳校验：与**另一侧面板当前目录下的同名文件**比。
-        // 本控件不知道对面是谁，只把文件名交出去（MainWindow 取路径）。
-        {singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir"),
-         QStringLiteral("粗校验（与对端同名文件比大小）"),
-         [this, rows]() { emit compareRequested(table_->item(rows[0], toInt(ExpColumn::Name))->text(), false); }},
-        {singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir"),
-         QStringLiteral("时间戳校验（比修改时间）"),
-         [this, rows]() { emit compareRequested(table_->item(rows[0], toInt(ExpColumn::Name))->text(), true); }},
-        {singleRow && table_->item(rows[0], toInt(ExpColumn::Type))->text() != QStringLiteral("Dir"), QStringLiteral("SHA256"),
-         [this, selectedPath]() {
-             setStatus(QStringLiteral("正在计算 SHA-256 …"));
-             // 让状态行先画出来再开始算，否则界面会静默卡住几秒。
-             QCoreApplication::processEvents();
-             const QString hex = fileSha256(selectedPath);
-             if (hex.isEmpty()) {
-                 setStatus(QStringLiteral("SHA-256 计算失败（文件打不开）"), true);
-                 return;
-             }
-             if (hex == QStringLiteral("too-large")) {
-                 setStatus(QStringLiteral("文件超过 512 MiB，请用 relayer-cli 或系统工具计算"), true);
-                 return;
-             }
-             QApplication::clipboard()->setText(hex);
-             setStatus(QStringLiteral("SHA-256（已复制到剪贴板）：%1").arg(hex));
-             emit notice(QStringLiteral("[校验] %1\n  SHA-256 = %2").arg(selectedPath, hex));
-         }},
-        {singleRow, QStringLiteral("重命名"), [this, rows]() { onRename(rows[0]); }},
-        {!rows.isEmpty(), QStringLiteral("删除"), [this, rows]() { onDelete(rows); }},
+        connect(menu.addAction(label), &QAction::triggered, this, std::move(body));
     };
-    for (const auto& a : actions) {
-        if (!a.visible) {
-            continue;
+    const auto addSeparator = [&menu]() {
+        if (!menu.isEmpty()) {
+            menu.addSeparator();
         }
-        connect(menu.addAction(a.label), &QAction::triggered, this, a.run);
+    };
+
+    // ---- 传输：方向由面板决定（v1 语义：同一个词，两个方向）------------
+    //
+    // 远端只对单行显示：取回请求一次只允许一个在飞（协议层用"下一个应答
+    // 就是我的"配对），多行会立刻被拒。这与 v1 的"逐项排队"是同一个限制，
+    // 只是 v1 在任务窗口里排队，v2 让她去对照表的"下载到本地目录"那边排。
+    if (remote) {
+        add(singleEntry && !isPathLikeName(absPath),
+            isDir ? QStringLiteral("传输（对端打包为 tar.xz 后下载）") : QStringLiteral("传输（下载到接收目录）"), nullptr,
+            [this, absPath, isDir]() {
+                emit remotePullRequested(peerId_, absPath, isDir);
+                setStatus(isDir ? QStringLiteral("已请求对端打包 %1 …（可能要几秒）").arg(absPath)
+                                : QStringLiteral("已请求取回 %1 …").arg(absPath));
+            });
+    } else {
+        add(
+            !sel.isEmpty(), QStringLiteral("传输（发送到当前通信对象）"),
+            [this]() { emit localTransferRequested(selectedLocalPaths()); }, nullptr);
     }
+
+    addSeparator();
+
+    // ---- 文件系统变更 --------------------------------------------------
+    add(
+        !rootListing, QStringLiteral("新建文件夹…"), [this]() { onNewDir(); },
+        [this]() {
+            bool ok = false;
+            const QString dirName =
+                QInputDialog::getText(this, QStringLiteral("新建文件夹"), QStringLiteral("文件夹名"), QLineEdit::Normal, {}, &ok)
+                    .trimmed();
+            if (!ok || dirName.isEmpty()) {
+                return;
+            }
+            // 与当前目录拼成对端绝对路径。空路径在协议里表示"根列表"，不是
+            // "当前目录"，所以根列表下不给这个动作（上面已排除）。
+            const QString target = relayer::app::joinRemotePath(currentPath_, dirName);
+            setStatus(QStringLiteral("正在请求对端新建 %1 …").arg(target));
+            emit remoteOpRequested(QStringLiteral("mkdir"), peerId_, target, QString(), {});
+        });
+
+    add(
+        singleEntry, QStringLiteral("重命名…"), [this, sel]() { onRename(sel.at(0)); },
+        [this, absPath, name]() {
+            bool ok = false;
+            const QString newName =
+                QInputDialog::getText(this, QStringLiteral("重命名"), QStringLiteral("新名字"), QLineEdit::Normal, name, &ok)
+                    .trimmed();
+            if (!ok || newName.isEmpty() || newName == name) {
+                return;
+            }
+            setStatus(QStringLiteral("正在请求对端重命名 %1 …").arg(name));
+            emit remoteOpRequested(QStringLiteral("rename"), peerId_, absPath, newName, {});
+        });
+
+    add(
+        !sel.isEmpty(), QStringLiteral("删除"), [this, sel]() { onDelete(sel); },
+        [this, sel, remotePathOf]() {
+            QStringList paths;
+            paths.reserve(sel.size());
+            for (int r : sel) {
+                paths << remotePathOf(r);
+            }
+            const auto choice =
+                QMessageBox::question(this, QStringLiteral("确认"),
+                                      QStringLiteral("让对端删除这 %1 项？目录会连同内容一起删除，不可恢复。").arg(paths.size()),
+                                      QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+            if (choice != QMessageBox::Yes) {
+                return;
+            }
+            setStatus(QStringLiteral("正在请求对端删除 %1 项 …").arg(paths.size()));
+            emit remoteOpRequested(QStringLiteral("delete"), peerId_, QString(), QString(), paths);
+        });
+
+    addSeparator();
+
+    // ---- 校验与摘要 ----------------------------------------------------
+    //
+    // SHA256：本地读盘算，远端请对端算。两边都自动进剪贴板——用户下一步
+    // 多半就是粘贴到别处比对。
+    add(
+        isFile, QStringLiteral("SHA256"),
+        [this, absPath]() {
+            // 后台算（v1 在 WorkerThread 里算，无大小上限）。结果放共享变量
+            // 里带回：job 的返回值只表达成败，结论本身是那个十六进制串。
+            auto hex = std::make_shared<QString>();
+            runAsync(
+                QStringLiteral("正在计算 SHA-256 …（大文件需要一会儿）"),
+                [absPath, hex](QString& err) {
+                    *hex = fileSha256(absPath, err);
+                    return !hex->isEmpty();
+                },
+                [this, absPath, hex](bool ok, const QString& err) {
+                    if (!ok) {
+                        setStatus(QStringLiteral("SHA-256 计算失败：%1").arg(err), true);
+                        return;
+                    }
+                    QApplication::clipboard()->setText(*hex);
+                    setStatus(QStringLiteral("SHA-256（已复制到剪贴板）：%1").arg(*hex));
+                    emit notice(QStringLiteral("[校验] %1\n  SHA-256 = %2").arg(absPath, *hex));
+                });
+        },
+        [this, absPath]() {
+            setStatus(QStringLiteral("已请求对端计算 SHA-256 …"));
+            emit remoteOpRequested(QStringLiteral("sha256"), peerId_, absPath, QString(), {});
+        });
+
+    // 粗校验 / 时间戳校验：与**另一侧面板当前目录下的同名文件**比。
+    // 方向无关——两端都是"本地目录/name vs 远端目录/name"，所以从哪一侧
+    // 发起得到的都是同一个结论，执行体也就可以完全相同。
+    add(
+        isFile, QStringLiteral("粗校验（与另一侧同名文件比内容）"), [this, name]() { emit compareRequested(name, false); },
+        [this, name]() { emit compareRequested(name, false); });
+    add(
+        isFile, QStringLiteral("时间戳校验（比修改时间）"), [this, name]() { emit compareRequested(name, true); },
+        [this, name]() { emit compareRequested(name, true); });
+
+    addSeparator();
+
+    // ---- 压缩 / 解压缩 -------------------------------------------------
+    //
+    // 压缩只有本地：v2 没有"让对端压到对端某个路径"的入口（协议帧在，
+    // 但没有真实用途——要拿对方的东西就打包取回，见 §11.10）。远端传
+    // nullptr 即自动隐藏。
+    add(
+        !sel.isEmpty(), QStringLiteral("压缩为 tar.xz…"),
+        [this]() {
+            const QStringList paths = selectedLocalPaths();
+            if (paths.isEmpty()) {
+                return;
+            }
+            QString suggested = QStringLiteral("archive.tar.xz");
+            if (paths.size() == 1) {
+                suggested = QFileInfo(paths.first()).fileName() + QStringLiteral(".tar.xz");
+            }
+            const QString out = QFileDialog::getSaveFileName(
+                this, QStringLiteral("压缩为"), QDir(currentPath()).filePath(suggested), QStringLiteral("tar.xz (*.tar.xz)"));
+            if (out.isEmpty()) {
+                return;
+            }
+            // 压缩是纯 CPU/IO 的重活（tar.xz 还要 LZMA 压），后台跑。
+            std::vector<std::string> sources;
+            sources.reserve(static_cast<std::size_t>(paths.size()));
+            for (const auto& p : paths) {
+                sources.push_back(p.toStdString());
+            }
+            const std::string archive = out.toStdString();
+            runAsync(
+                QStringLiteral("正在压缩 %1 项 …").arg(paths.size()),
+                [sources, archive](QString& err) {
+                    std::string detail;
+                    if (!relayer::cli::Client::createArchive(sources, archive, detail)) {
+                        err = QString::fromStdString(detail);
+                        return false;
+                    }
+                    return true;
+                },
+                [this, out, count = paths.size()](bool ok, const QString& err) {
+                    if (!ok) {
+                        setStatus(QStringLiteral("压缩失败：%1").arg(err), true);
+                        return;
+                    }
+                    setStatus(QStringLiteral("已压缩为 %1").arg(QFileInfo(out).fileName()));
+                    emit notice(QStringLiteral("[压缩] %1（%2 项）").arg(out).arg(count));
+                    enterPath(currentPath_);   // 刷新，让新包出现
+                });
+        },
+        nullptr);
+
+    add(
+        isArchive, QStringLiteral("解压缩"),
+        [this, absPath]() {
+            const std::string archive = absPath.toStdString();
+            auto dir = std::make_shared<std::string>();
+            runAsync(
+                QStringLiteral("正在解压 %1 …").arg(QFileInfo(absPath).fileName()),
+                // false：手动压缩的包有顶层目录，解到父目录即可，再套一层会变成 a/a/。
+                [archive, dir](QString& err) {
+                    *dir = relayer::cli::Client::unpackArchive(archive, false);
+                    if (dir->empty()) {
+                        err = QStringLiteral("包可能已损坏");
+                        return false;
+                    }
+                    return true;
+                },
+                [this, dir](bool ok, const QString& err) {
+                    if (!ok) {
+                        setStatus(QStringLiteral("解压失败（%1）").arg(err), true);
+                        return;
+                    }
+                    const QString out = QString::fromStdString(*dir);
+                    setStatus(QStringLiteral("已解压到 %1").arg(out));
+                    emit notice(QStringLiteral("[解压] %1").arg(out));
+                    enterPath(currentPath_);
+                });
+        },
+        [this, absPath]() {
+            setStatus(QStringLiteral("已请求对端解压 %1 …").arg(QFileInfo(absPath).fileName()));
+            emit remoteOpRequested(QStringLiteral("unpack"), peerId_, absPath, QString(), {});
+        });
+
+    addSeparator();
+
+    // ---- 只读动作 ------------------------------------------------------
+    add(
+        single, QStringLiteral("复制全路径"), [this, absPath]() { QApplication::clipboard()->setText(absPath); },
+        [this, absPath]() { QApplication::clipboard()->setText(absPath); });
+
+    // 数据直接取自 entries_，不重新 stat——显示的必须是"表格里那一条"，
+    // 而不是"现在磁盘上那一条"（两者可能不同，用户会困惑）。
+    add(
+        single, QStringLiteral("详细信息"), [this, sel]() { showMetaInfo(sel.at(0)); },
+        [this, sel]() { showMetaInfo(sel.at(0)); });
+
+    // 「在资源管理器中打开」只对本地有意义：远端没有本机路径可打开。
+    // 这正是"统一菜单里少数几个按端隐藏"的例子——远端传 nullptr。
+    add(
+        single, QStringLiteral("在资源管理器中打开"),
+        [this, isDir, absPath]() {
+            // 目录：打开它本身；文件：打开它所在目录（与 v1 一致——双击
+            // 文件不该启动一个程序，那是"打开文件"不是"在资源管理器里看"）。
+            QDesktopServices::openUrl(QUrl::fromLocalFile(isDir ? absPath : currentPath_));
+        },
+        nullptr);
+
+    add(true, QStringLiteral("刷新"), [this]() { enterPath(currentPath_); }, [this]() { enterPath(currentPath_); });
+
     menu.exec(table_->viewport()->mapToGlobal(pos));
 }
 
@@ -859,28 +1025,40 @@ void ExplorerControl::onDelete(const QVector<int>& rows)
     if (choice != QMessageBox::Yes) {
         return;
     }
+
+    // 递归删除是"删一个几万文件的目录要几十秒"的操作，必须在后台。
+    // 只传路径（按值），工作线程不碰本控件任何成员。
     const QDir dir(currentPath_);
-    QStringList failed;
+    QStringList paths;
+    paths.reserve(names.size());
     for (const QString& name : names) {
-        const QString path = dir.filePath(name);
-        const QFileInfo fi(path);
-        bool ok = false;
-        if (fi.isDir()) {
-            ok = QDir(path).removeRecursively();
-        } else {
-            ok = QFile::remove(path);
-        }
-        if (!ok) {
-            failed << name;
-        }
+        paths << dir.filePath(name);
     }
-    if (!failed.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("提示"),
-                             QStringLiteral("%1 个项目删除失败（可能被占用或权限不足）：%2")
-                                 .arg(failed.size())
-                                 .arg(failed.join(QStringLiteral("、"))));
-    }
-    enterPath(currentPath_);
+
+    runAsync(
+        QStringLiteral("正在删除 %1 项 …").arg(paths.size()),
+        [paths](QString& err) {
+            QStringList failed;
+            for (const QString& path : paths) {
+                const QFileInfo info(path);
+                const bool ok = info.isDir() ? QDir(path).removeRecursively() : QFile::remove(path);
+                if (!ok) {
+                    failed << info.fileName();
+                }
+            }
+            if (!failed.isEmpty()) {
+                err = failed.join(QStringLiteral("、"));
+                return false;
+            }
+            return true;
+        },
+        [this](bool ok, const QString& err) {
+            if (!ok) {
+                QMessageBox::warning(this, QStringLiteral("提示"),
+                                     QStringLiteral("以下项目删除失败（可能被占用或权限不足）：\n%1").arg(err));
+            }
+            enterPath(currentPath_);
+        });
 }
 
 void ExplorerControl::onNewDir()

@@ -13,10 +13,13 @@
 
 # GUI 打开但机器上没有 Qt 时，给出能直接照做的错误，而不是一层嵌套的
 # "Could not find a package configuration file"。
-find_package(Qt6 COMPONENTS Widgets QUIET)
+#
+# Network 是给单实例用的（QLocalServer/QLocalSocket 属 Qt Network，
+# 不是 Core 里的东西）。它随 qt6-base 一起装，不需要额外的包。
+find_package(Qt6 COMPONENTS Widgets Network QUIET)
 if(NOT Qt6_FOUND)
     message(FATAL_ERROR
-        "RELAYER_BUILD_GUI=ON 但找不到 Qt6（Widgets）。"
+        "RELAYER_BUILD_GUI=ON 但找不到 Qt6（Widgets/Network）。"
         " 两条路任选：安装 Qt6（MSYS2: pacman -S mingw-w64-ucrt-x86_64-qt6-base），"
         " 或关闭 GUI：cmake -DRELAYER_BUILD_GUI=OFF")
 endif()
@@ -30,6 +33,7 @@ set(CMAKE_AUTOUIC_SEARCH_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/ui)
 add_executable(relayer WIN32
     main.cpp
     MainWindow.cpp
+    SingleInstance.cpp
     Base/InfoDrop.cpp
     bridge/CoreService.cpp
     model/ProgressTracker.cpp
@@ -58,6 +62,7 @@ target_include_directories(relayer PRIVATE
 target_link_libraries(relayer PRIVATE
     relayer_client      # bridge 直接复用 CLI 的 Client 门面（PUBLIC 带 core/asio/platform）
     Qt6::Widgets
+    Qt6::Network        # QLocalServer / QLocalSocket（单实例）
 )
 
 # 版本号单一来源是根 CMakeLists.txt 的 project(VERSION)，这里只注入字符串

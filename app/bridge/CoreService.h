@@ -186,6 +186,25 @@ public:
     // 覆盖提示会让用户点到别的文件上）。
     bool askPathMeta(const QString& peerId, const QStringList& absPaths);
 
+    // ------------------------------------------------------------------
+    // 远端文件操作（PROTOCOL.md §11.12）
+    // ------------------------------------------------------------------
+    //
+    // 都是"让**对端**在它自己的盘上做一件事"，与列举、取回并列。全部搭在
+    // 常驻接收会话上：新开连接会顶掉接收会话、换掉本机 id。
+    //
+    // 返回 false = 当前不能做（没连接、正在传输，或已有别的远端请求在飞）。
+    // 结论统一从 remoteFileOpFinished 回来——一个信号而不是五个：
+    // 调用方都是"发出去、等一个结论、刷新面板"，区别只在 kind 与 result。
+    //
+    // kind 取值："sha256" / "rename" / "mkdir" / "delete" / "unpack"。
+    // 用字符串而不是 cli::FileOpKind：这个头文件不该把 cli 的枚举泄进 Qt 层。
+    bool remoteOpSha256(const QString& peerId, const QString& absPath);
+    bool remoteOpRename(const QString& peerId, const QString& absPath, const QString& newName);
+    bool remoteOpCreateDir(const QString& peerId, const QString& absPath);
+    bool remoteOpDelete(const QString& peerId, const QStringList& absPaths);
+    bool remoteOpUnarchive(const QString& peerId, const QString& absPath);
+
     // 中止当前操作（硬停：不发 cancel 帧，与 CLI 的 abort 同语义）。
     void cancelCurrent();
 
@@ -243,6 +262,12 @@ signals:
     // ok=false 时包会**保留**在接收目录，detail 说明原因。
     void archiveExtracted(bool ok, const QString& dir, const QString& detail);
 
+    // 远端文件操作的结论（PROTOCOL.md §11.12）。
+    //
+    // result 的含义按 kind 决定：sha256 → 十六进制摘要；unpack → 解出的目录；
+    // delete → 没删掉的路径（换行分隔，全成功时为空）；rename/mkdir → 空。
+    void remoteFileOpFinished(const QString& kind, bool ok, const QString& summary, const QString& detail, const QString& result);
+
 private:
     void startIoThread();
     void runOnIo(std::function<void()> fn);
@@ -253,6 +278,9 @@ private:
     //   - 传输中：返回 false，调用方负责提示。
     // beginOp 在 io 线程执行，负责建 Client 并发起操作。
     bool runOrAfterReceive(std::function<void()> beginOp);
+
+    // 远端文件操作的统一入口（上面五个公开方法都走它）。
+    bool runRemoteOp(cli::FileOpRequest req, const QString& kind);
 
     // ClientConfig 组装。回调里 emit 的都是 Qt 信号——从 io 线程 emit
     // 跨线程信号是安全的（AutoConnection 退化为 QueuedConnection）。
@@ -277,8 +305,7 @@ private:
     // 常驻会话 + 表单参数一致 + 当前没有发送在跑 → 可以搭车发送。
     bool canSendOnSession(const relayer::app::ConnInfo& conn) const;
 
-    // 并发的发送任务：taskId → Client。**只在 io 线程读写**。
-    //
+    // 并发的发送任务：taskId → Client。**只在 io 线程读写**。    //
     // 每个任务一个 Client（也就是一条连接）。它不碰 client_、也不碰 busy_：
     // busy_ 表示"常驻会话的占用"，而并发发送不该阻止自动接收挂起——否则
     // "我在发给 B" 期间别人就无法发给我，这正是并行要解决的问题之一。

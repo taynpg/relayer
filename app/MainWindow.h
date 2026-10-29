@@ -68,26 +68,58 @@ private slots:
     void onBrowsePeerRequested(const QString& peerId, const QString& peerName);
     void onRemoteBrowseFinished(bool ok, bool rootListing, const QString& summary, const QList<relayer::app::RemoteRow>& rows);
 
+    // 远端文件操作（PROTOCOL.md §11.12）：把面板的请求转给 CoreService，
+    // 再把结论写进日志、刷新面板。本类不做任何路径判断——面板已经给的是
+    // 对端绝对路径。
+    void onRemoteOpRequested(const QString& kind, const QString& peerId, const QString& absPath, const QString& newName,
+                             const QStringList& paths);
+    void onRemoteFileOpFinished(const QString& kind, bool ok, const QString& summary, const QString& detail,
+                                const QString& result);
+
 private:
     void buildLayout();
     void wireSignals();
     void startAutoReceive();
 
+    // 恢复上次的窗口几何（v1 relayFile::initAfter 的同一套规则）：
+    // 优先用 saveGeometry 的原始字节；没有或恢复失败时按主屏 70% 居中，
+    // 并限制在可用区域的 90% 以内。两种情况都会做"至少有一部分在屏上"
+    // 的检查——上次保存位置的那块显示器可能已经拔掉了。
+    void restoreWindowGeometry();
+
     // 把远端面板切到某个对端的某一层（空 = 根列表）。
     // 两个入口共用：对端表右键「浏览此对端的目录」、对照表右键「访问对端目录」。
     void switchRemotePeer(const QString& peerId, const QString& peerName, const QString& relPath = QString());
 
-    // "检查远端"的逐行队列：CoreService 一次只跑一个列举，所以一行一行来。
+    // 对照表右键"检查远端"：逐项问对方"这个文件在不在、多大、内容是否一致"。
+    //
+    // v1 的「粗校验」用 SampleCompare 抽采样块比对内容。v2 不需要新开一路
+    // 协议来做同一件事：kAskPathMeta（§11.11）一次往返就能带回 size / mtime /
+    // quickFingerprint，本地算同一份指纹即可比对——批量、一次 RTT、还顺带
+    // 拿到了大小与时间。这是本次重写的关键：不是"少做了内容校验"，而是
+    // 用更少往返做完了 v1 三件事（存在性 + 粗校验 + 时间戳）。
     struct RemoteCheck {
         QString peer;
-        QString relDir;   // 对端接收根下的相对目录（列举它）
-        QString name;     // 期望在里面看到的文件名
+        QString absPath;     // 对端视角绝对路径
+        QString localPath;   // 本地路径（算指纹用）
+        QString name;        // 显示用
         qint64 localSize = 0;
+        bool isDir = false;
     };
-    void nextRemoteCheck();
+
+    // 按对端分组：一次 askPathMeta 只能问一个对端，一批可能跨多个。
+    struct CheckGroup {
+        QString peer;
+        QStringList paths;
+        QList<int> checkIndexes;   // 落回 remoteChecks_ 的下标
+    };
+
+    void issueNextCheckGroup();
+    void onRemoteCheckMetaFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteMetaRow>& rows);
 
     QList<RemoteCheck> remoteChecks_;
-    int remoteCheckIndex_ = -1;
+    QList<CheckGroup> checkGroups_;
+    int checkGroupIndex_ = -1;
 
     // ------------------------------------------------------------------
     // 发送前检查（v1 的"基本检查 + 覆盖提示"）
@@ -112,6 +144,18 @@ private:
     void issueNextPreCheck();
     void onPreCheckMetaFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteMetaRow>& rows);
     void promptOverwriteThenSend();
+
+    // pathMetaFinished 有两个消费者（发送前检查、对照表检查），而请求是
+    // 串行发的——必须记住"这次应答属于谁"。靠全局标志而不是参数：
+    // 信号是 CoreService 发出的，加不了用途参数。
+    enum class PathMetaPurpose {
+        kNone,
+        kSendPreCheck,
+        kRemoteCheck,
+        kLocalCompare,   // 浏览面板的「粗校验 / 时间戳校验」
+    };
+    PathMetaPurpose pathMetaPurpose_ = PathMetaPurpose::kNone;
+    void onPathMetaFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteMetaRow>& rows);
 
     relayer::app::RelayTaskItems preCheckItems_;
     relayer::app::ConnInfo preCheckConn_;
@@ -143,17 +187,22 @@ private:
     int downloadIndex_ = -1;         // -1 = 空闲；否则是"已发请求、等接受"的下标
     bool downloadWaiting_ = false;   // 已接受，等文件落地
 
-    // 一次待完成的比对。远端那一侧要先列举才能拿到 size/mtime，所以这里
-    // 记住本地侧的数值，等应答回来再比。
+    // 一次待完成的比对。对端那一侧走 kAskPathMeta（一次往返就能拿到
+    // size / mtime / 内容指纹），不列举整个目录——v1 的粗校验也只关心这一个
+    // 文件，为了它把对端一个几千项的目录拉回来纯属浪费。
     struct PendingCompare {
         QString name;
+        QString peer;
+        QString absPath;   // 对端视角的绝对路径
+        QString localPath;
         bool wantTime = false;
         qint64 localSize = 0;
         qint64 localMtime = 0;
     };
     PendingCompare pendingCompare_;
     bool compareActive_ = false;
-    void finishCompare(qint64 peerSize, qint64 peerMtime);
+    void finishCompare(const relayer::app::RemoteMetaRow& peerMeta);
+    void onLocalCompareMetaFinished(bool ok, const QString& summary, const QList<relayer::app::RemoteMetaRow>& rows);
 
     Ui::MainWindow* ui_;
     relayer::app::CoreService* core_;

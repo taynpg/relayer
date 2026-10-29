@@ -9,6 +9,11 @@
 
 namespace relayer::app {
 namespace settings {
+// 主窗口几何（QMainWindow::saveGeometry 的原始字节，含还原态矩形、
+// 位置与最大化/全屏状态）。存成 QByteArray 而不是宽高两个 int：v1 的
+// 旧格式只有宽高，最大化时保存的宽高接近整屏，恢复时窗口会右下出屏。
+inline constexpr const char* kWindowGeometry = "window/geometry";
+
 // 连接面板
 inline constexpr const char* kConnectorNoAuth = "connector/noAuth";
 inline constexpr const char* kConnectorRecent = "connector/recent";

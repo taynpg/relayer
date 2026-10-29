@@ -7,7 +7,9 @@
 #include <filesystem>
 #include <utility>
 
+#include "relayer/common/crypto/Sha256.h"
 #include "relayer/core/session/FileList.h"
+#include "relayer/core/session/FileOp.h"
 #include "relayer/core/session/PathMeta.h"
 #include "relayer/core/session/PathText.h"
 #include "relayer/core/session/PeerTable.h"
@@ -120,13 +122,24 @@ struct Client::Impl {
 
     // 会话内的一次"取回请求"（PROTOCOL.md §11.9）。只等到 kAnswerFilePull
     // 为止——真正的文件由常驻接收会话收下，走的是普通接收路径。
-    bool pullActive = false;
-    // 这一次是"取目录"还是"取文件"。只影响失败文案：同一个 kNotFound，
+    bool pullActive = false;   // 这一次是"取目录"还是"取文件"。只影响失败文案：同一个 kNotFound，
     // 对文件请求是"不存在或它是目录"，对目录请求是"不存在或它不是目录"。
     bool pullIsArchive = false;
     std::function<void(const Outcome&)> onPullDone;
     asio::steady_timer pullTimer{ctx};
     std::string targetPath;
+
+    // 会话上的远端文件操作（PROTOCOL.md §11.12）：算 SHA-256 / 改名 / 删除 /
+    // 新建目录 / 解压。与 browse/meta/pull 同一套"只等一次应答"的模式，
+    // 四者互斥（见 startFileOpOnSession 的检查）。
+    bool opActive = false;
+    FileOpKind opKind = FileOpKind::kSha256;
+    core::session::FileOpStatus opStatus = core::session::FileOpStatus::kOk;
+    std::vector<std::string> opFailedPaths;
+    std::string opSha256Hex;
+    std::string opExtractedDir;
+    std::function<void(const Outcome&)> onOpDone;
+    asio::steady_timer opTimer{ctx};
 
     bool authenticated = false;
     bool finished = false;
@@ -203,6 +216,10 @@ struct Client::Impl {
         metaActive = false;
         onMetaDone = nullptr;
         metaTimer.cancel();
+        // 挂起的远端文件操作同理。
+        opActive = false;
+        onOpDone = nullptr;
+        opTimer.cancel();
 
         if (!ok) {
             // 失败时**不**调 session->close()：先让调用方看到结论，关闭
@@ -235,6 +252,11 @@ struct Client::Impl {
                 o.remoteEntries = remoteEntries;
                 o.listStatus = listStatus;
                 o.rootListing = rootListing;
+            } else if (action == Action::kFileOp) {
+                // 文件操作的结论字段（其它操作时都是默认值）。
+                o.sha256Hex = opSha256Hex;
+                o.extractedDir = opExtractedDir;
+                o.failedPaths = opFailedPaths;
             }
             onDone(o);
         }
@@ -622,6 +644,11 @@ struct Client::Impl {
             // 但要把 peer 建起来，否则帧来了没人接。
             startReceiving();
             return;
+
+        case Action::kFileOp:
+            // 一次性连接上让对端做一件事，拿到应答就结束（`op` 子命令）。
+            requestFileOpOnce();
+            return;
         }
     }
 
@@ -656,6 +683,18 @@ struct Client::Impl {
             }
             finish(false, "对端没有响应（可能已离线）", Status::Fail(ErrorCode::kTimeout, "browse answer timeout"));
         });
+    }
+
+    // `op` 子命令：一条连接只做一件事，拿到应答就结束。
+    //
+    // 与 GUI 的差别只在"能不能搭常驻会话"：CLI 每次新连一条，不会顶掉
+    // 别人的接收会话（它本来就没有）。所以这里不检查 canSendOnSession。
+    void requestFileOpOnce()
+    {
+        if (!startFileOp(config.fileOp, [this](const Outcome& o) { finish(o.ok, o.summary, o.status); })) {
+            finish(false, "远端操作请求不合法（路径为空、条数超限，或已有请求在飞）",
+                   Status::Fail(ErrorCode::kProtocol, "file op request rejected"));
+        }
     }
 
     // 对端来问目录：按**绝对路径**列一层、回一条。
@@ -769,9 +808,11 @@ struct Client::Impl {
 
         metas.reserve(paths.size());
         for (const auto& raw : paths) {
-            // 规范化只看文本，不改语义；对端发的反斜杠写法在这里统一掉，
-            // 免得 stat 与 quickFingerprint 各解释一遍。
-            const auto p = core::session::normalizePathText(raw);
+            // 绝对路径原样规范化；相对路径按**接收目录**还原，与发送落点
+            // 同一条规则（DESIGN §3.8）。不这么做，"落到我的接收目录"这种
+            // 最常见的发送，检查会去 stat 对方的进程工作目录，结论恒为
+            // "不存在"——检查等于白做，用户以为对方没有那份文件。
+            const auto p = absoluteForPeer(raw);
             core::session::RemoteMeta m;
             const auto st = store.stat(p);
             if (st.exists) {
@@ -1277,6 +1318,451 @@ struct Client::Impl {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // 远端文件操作（PROTOCOL.md §11.12）
+    // ---------------------------------------------------------------------
+
+    // 把对端发来的路径还原成本机可用的绝对路径。
+    //
+    // 两件事：规范化（反斜杠 / 重复分隔符 / 点段），以及"相对路径按接收
+    // 目录解析"。后者与发送落点是同一条规则（DESIGN.md §3.8）——对方说
+    // "落到你的接收目录"，实际是 `<接收目录>/name`，不是本进程的工作目录。
+    std::string absoluteForPeer(std::string p) const
+    {
+        p = core::session::normalizePathText(p);
+        if (!p.empty() && !core::session::isAbsolutePathText(p) && !targetPath.empty()) {
+            p = core::session::joinPathText(targetPath, p);
+        }
+        return p;
+    }
+
+    // 流式计算 SHA-256。用 IFileStore 的读流而不是 std::ifstream：路径编码
+    // （Windows 宽字符）与"打开失败给 Status"都已在实现里处理过。
+    std::vector<char> sha256Of(const std::string& path, std::string& err) const
+    {
+        Status st;
+        auto stream = store.openRead(path, st);
+        if (!stream) {
+            err = st.message;
+            return {};
+        }
+        crypto::Sha256 hash;
+        std::vector<char> buf(1U << 20);
+        while (true) {
+            const auto n = stream->read(buf.data(), buf.size(), st);
+            if (!st.ok()) {
+                err = st.message;
+                return {};
+            }
+            if (n == 0) {
+                break;   // 正常 EOF
+            }
+            hash.update(buf.data(), n);
+        }
+        const auto digest = hash.digest();
+        return std::vector<char>(digest.begin(), digest.end());
+    }
+
+    // 递归删除。IFileStore::remove 是单层的（只删空目录或单文件），而
+    // "删一个目录"要连内容一起走。不用 std::filesystem::remove_all：它在
+    // 遇到占用时会中途停下，且不告诉调用方**哪一项**没删掉——界面要的
+    // 正是这份清单（v1 的失败清单语义）。
+    bool removeRecursive(const std::string& path, std::string& err)
+    {
+        const auto st = store.stat(path);
+        if (!st.exists) {
+            err = "路径不存在";
+            return false;
+        }
+        if (!st.isDir) {
+            const auto r = store.remove(path);
+            if (!r.ok()) {
+                err = r.message;
+                return false;
+            }
+            return true;
+        }
+        std::vector<filestore::DirEntry> entries;
+        if (const auto r = store.list(path, false, entries); !r.ok()) {
+            err = r.message;
+            return false;
+        }
+        for (const auto& e : entries) {
+            if (!removeRecursive(store.join(path, e.name), err)) {
+                return false;
+            }
+        }
+        const auto r = store.remove(path);   // 现在空了，能删掉
+        if (!r.ok()) {
+            err = r.message;
+            return false;
+        }
+        return true;
+    }
+
+    void sendFileOpAnswer(FrameType type, const std::string& to, const std::vector<char>& body)
+    {
+        Frame answer;
+        answer.type = type;
+        answer.to = to;
+        answer.body = body;
+        (void)session->send(answer);
+    }
+
+    void serveFileOp(const Frame& req)
+    {
+        switch (req.type) {
+        case FrameType::kAskSha256:
+            serveSha256(req);
+            return;
+        case FrameType::kAskRename:
+            serveRename(req);
+            return;
+        case FrameType::kAskCreateDir:
+            serveCreateDir(req);
+            return;
+        case FrameType::kAskDelete:
+            serveDelete(req);
+            return;
+        case FrameType::kAskUnarchive:
+            serveUnarchive(req);
+            return;
+        default:
+            return;
+        }
+    }
+
+    void serveSha256(const Frame& req)
+    {
+        using core::session::FileOpStatus;
+        FileOpStatus status = FileOpStatus::kOk;
+        std::vector<char> digest;
+        std::string path;
+        std::string err;
+
+        if (!core::session::decodeAskPath(req.body, path, err)) {
+            status = FileOpStatus::kRejected;
+        } else {
+            path = absoluteForPeer(std::move(path));
+            const auto st = store.stat(path);
+            if (!st.exists) {
+                status = FileOpStatus::kNotFound;
+            } else if (st.isDir) {
+                // 目录没有"内容的 SHA-256"。回 kRejected 而不是算一个空摘要
+                // ——后者会让界面显示一串看起来正常的哈希。
+                status = FileOpStatus::kRejected;
+            } else {
+                digest = sha256Of(path, err);
+                if (digest.empty()) {
+                    status = FileOpStatus::kDenied;
+                }
+            }
+        }
+
+        std::vector<char> body;
+        if (core::session::encodeAnswerSha256(status, digest, body).ok()) {
+            sendFileOpAnswer(FrameType::kAnswerSha256, req.from, body);
+        }
+    }
+
+    void serveRename(const Frame& req)
+    {
+        using core::session::FileOpStatus;
+        FileOpStatus status = FileOpStatus::kOk;
+        std::string from;
+        std::string to;
+        std::string err;
+
+        if (!core::session::decodeAskRename(req.body, from, to, err)) {
+            status = FileOpStatus::kRejected;
+        } else {
+            from = absoluteForPeer(std::move(from));
+            to = absoluteForPeer(std::move(to));
+            const auto src = store.stat(from);
+            if (!src.exists) {
+                status = FileOpStatus::kNotFound;
+            } else if (store.stat(to).exists) {
+                // 不覆盖：改名撞上已有文件时覆盖等于"悄悄删掉别人的东西"，
+                // 而且不可恢复。让用户自己先改名或先删。
+                status = FileOpStatus::kExists;
+            } else if (!store.atomicReplace(from, to).ok()) {
+                status = FileOpStatus::kFailed;
+            }
+        }
+
+        std::vector<char> body;
+        if (core::session::encodeAnswerFileOp(status, body).ok()) {
+            sendFileOpAnswer(FrameType::kAnswerRename, req.from, body);
+        }
+    }
+
+    void serveCreateDir(const Frame& req)
+    {
+        using core::session::FileOpStatus;
+        FileOpStatus status = FileOpStatus::kOk;
+        std::string path;
+        std::string err;
+
+        if (!core::session::decodeAskPath(req.body, path, err)) {
+            status = FileOpStatus::kRejected;
+        } else {
+            path = absoluteForPeer(std::move(path));
+            const auto st = store.stat(path);
+            if (st.exists) {
+                // 已经存在（目录或同名文件）：报 kExists 而不是"mkdirs 成功"。
+                // 同名文件时 mkdirs 会失败，两种情形给的下一步动作相同
+                // （换个名字），所以统一一个状态。
+                status = FileOpStatus::kExists;
+            } else if (!store.mkdirs(path).ok()) {
+                status = FileOpStatus::kFailed;
+            }
+        }
+
+        std::vector<char> body;
+        if (core::session::encodeAnswerFileOp(status, body).ok()) {
+            sendFileOpAnswer(FrameType::kAnswerCreateDir, req.from, body);
+        }
+    }
+
+    void serveDelete(const Frame& req)
+    {
+        using core::session::FileOpStatus;
+        FileOpStatus status = FileOpStatus::kOk;
+        std::vector<std::string> paths;
+        std::vector<std::string> failed;
+        std::string err;
+
+        if (!core::session::decodeAskDelete(req.body, paths, err)) {
+            status = FileOpStatus::kRejected;
+        } else {
+            for (const auto& raw : paths) {
+                const auto p = absoluteForPeer(raw);
+                std::string why;
+                if (!removeRecursive(p, why)) {
+                    failed.push_back(p);
+                }
+            }
+            // 空请求解不出 paths（encode 侧已挡），走到这里 paths 必非空。
+            status = failed.empty() ? FileOpStatus::kOk : FileOpStatus::kDenied;
+        }
+
+        std::vector<char> body;
+        if (core::session::encodeAnswerDelete(status, failed, body).ok()) {
+            sendFileOpAnswer(FrameType::kAnswerDelete, req.from, body);
+        }
+    }
+
+    void serveUnarchive(const Frame& req)
+    {
+        using core::session::FileOpStatus;
+        FileOpStatus status = FileOpStatus::kOk;
+        std::string dir;
+        std::string path;
+        std::string err;
+
+        if (!core::session::decodeAskPath(req.body, path, err)) {
+            status = FileOpStatus::kRejected;
+        } else {
+            path = absoluteForPeer(std::move(path));
+            const auto st = store.stat(path);
+            if (!st.exists || st.isDir) {
+                status = FileOpStatus::kNotFound;
+            } else {
+                // 与本地右键「解压缩」同一语义：解到 `<父目录>/<包名去后缀>/`，
+                // 成功后删包。intoSubdir=true 是取回目录那种"包内无顶层目录"
+                // 的形状；本操作解的是对端自己的包，可能两种形状都有——
+                // 这里按"有顶层目录"处理（intoSubdir=false 会散在父目录，
+                // 风险更大），宁可多一层。
+                dir = Client::unpackArchive(path, true);
+                if (dir.empty()) {
+                    status = FileOpStatus::kFailed;
+                } else {
+                    // 统一成 `/` 分隔：std::filesystem 在 Windows 上拼出来是
+                    // 反斜杠，界面直接显示会与其它远端路径不一致。
+                    dir = core::session::normalizePathText(dir);
+                }
+            }
+        }
+
+        std::vector<char> body;
+        if (core::session::encodeAnswerUnarchive(status, dir, body).ok()) {
+            sendFileOpAnswer(FrameType::kAnswerUnarchive, req.from, body);
+        }
+    }
+
+    bool startFileOpOnSession(FileOpRequest req, std::function<void(const Outcome&)> done)
+    {
+        // GUI 走这条路：必须搭在常驻会话上，不新开连接（新连接会顶掉接收
+        // 会话、换掉本机 id）。
+        if (!canSendOnSession()) {
+            return false;
+        }
+        return startFileOp(std::move(req), std::move(done));
+    }
+
+    // 真正构造并发出请求。两个入口共用：GUI 的会话内操作（要求 canSendOnSession）、
+    // CLI 的一次性连接（已有会话，只是不需要"常驻"这个前提）。
+    bool startFileOp(FileOpRequest req, std::function<void(const Outcome&)> done)
+    {
+        // 四种"只等一次应答"的请求互斥：同时挂两个，应答回来就分不清是谁的。
+        if (opActive || browseActive || metaActive || pullActive) {
+            return false;
+        }
+
+        Frame f;
+        switch (req.kind) {
+        case FileOpKind::kSha256:
+            f.type = FrameType::kAskSha256;
+            f.body = core::session::encodeAskPath(req.path);
+            break;
+        case FileOpKind::kCreateDir:
+            f.type = FrameType::kAskCreateDir;
+            f.body = core::session::encodeAskPath(req.path);
+            break;
+        case FileOpKind::kUnarchive:
+            f.type = FrameType::kAskUnarchive;
+            f.body = core::session::encodeAskPath(req.path);
+            break;
+        case FileOpKind::kRename:
+            f.type = FrameType::kAskRename;
+            f.body = core::session::encodeAskRename(req.path, req.newPath);
+            break;
+        case FileOpKind::kDelete:
+            f.type = FrameType::kAskDelete;
+            f.body = core::session::encodeAskDelete(req.paths);
+            break;
+        }
+        if (f.body.empty()) {
+            return false;   // 参数不合法（空路径/超长/条数超限），调用方该先校验
+        }
+
+        opActive = true;
+        opKind = req.kind;
+        opStatus = core::session::FileOpStatus::kOk;
+        opFailedPaths.clear();
+        opSha256Hex.clear();
+        opExtractedDir.clear();
+        onOpDone = std::move(done);
+        f.to = req.peerId;
+
+        touch();
+        if (const auto st = session->send(f); !st.ok()) {
+            finishOp(false, "远端操作请求发送失败", st);
+            return false;
+        }
+
+        // 超时：解压要给足时间（对端在解一个大包，几十秒很正常），其余
+        // 与列举/元信息一致用 10 秒。
+        const auto limit = (req.kind == FileOpKind::kUnarchive) ? std::chrono::seconds(120) : std::chrono::seconds(10);
+        opTimer.expires_after(limit);
+        opTimer.async_wait([this](const std::error_code& ec) {
+            if (ec || !opActive) {
+                return;
+            }
+            finishOp(false, "对端没有响应（可能已离线）", Status::Fail(ErrorCode::kTimeout, "file op answer timeout"));
+        });
+        return true;
+    }
+
+    // 远端文件操作的应答。按 opKind 校验帧类型：四种请求互斥，但一个
+    // 乱序/过期的帧不该被当成本次的结论（比如超时之后才到的应答）。
+    void onFileOpAnswer(const Frame& f)
+    {
+        using core::session::FileOpStatus;
+        std::string err;
+
+        if (opKind == FileOpKind::kSha256) {
+            FileOpStatus status = FileOpStatus::kFailed;
+            std::vector<char> digest;
+            if (!core::session::decodeAnswerSha256(f.body, status, digest, err)) {
+                finishOp(false, "SHA-256 应答解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+                return;
+            }
+            if (status == FileOpStatus::kOk) {
+                crypto::Sha256::Digest d{};
+                for (std::size_t i = 0; i < d.size() && i < digest.size(); ++i) {
+                    d[i] = static_cast<std::uint8_t>(digest[i]);
+                }
+                opSha256Hex = crypto::Sha256::hex(d);
+            }
+            finishOpWithStatus(status, "SHA-256");
+            return;
+        }
+
+        if (opKind == FileOpKind::kDelete) {
+            FileOpStatus status = FileOpStatus::kFailed;
+            std::vector<std::string> failed;
+            if (!core::session::decodeAnswerDelete(f.body, status, failed, err)) {
+                finishOp(false, "删除应答解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+                return;
+            }
+            opFailedPaths = std::move(failed);
+            if (status == FileOpStatus::kOk) {
+                finishOp(true, "删除完成");
+            } else {
+                // 部分失败是常态（目录里有个文件被别人占着）。结论里带上
+                // 条数，界面再逐条列出来——"删失败了"这种话没法行动。
+                finishOp(false, "有 " + std::to_string(opFailedPaths.size()) + " 项没删掉",
+                         Status::Fail(ErrorCode::kIoError, "delete partially failed"));
+            }
+            return;
+        }
+
+        if (opKind == FileOpKind::kUnarchive) {
+            FileOpStatus status = FileOpStatus::kFailed;
+            std::string dir;
+            if (!core::session::decodeAnswerUnarchive(f.body, status, dir, err)) {
+                finishOp(false, "解压应答解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+                return;
+            }
+            opExtractedDir = std::move(dir);
+            finishOpWithStatus(status, "解压缩");
+            return;
+        }
+
+        // 重命名 / 新建目录：只带状态。
+        FileOpStatus status = FileOpStatus::kFailed;
+        if (!core::session::decodeAnswerFileOp(f.body, status, err)) {
+            finishOp(false, "应答解码失败：" + err, Status::Fail(ErrorCode::kProtocol, err));
+            return;
+        }
+        finishOpWithStatus(status, opKind == FileOpKind::kRename ? "重命名" : "新建文件夹");
+    }
+
+    void finishOp(bool ok, std::string summary, Status status = Status{})
+    {
+        if (!opActive) {
+            return;
+        }
+        opActive = false;
+        opTimer.cancel();
+        auto done = std::move(onOpDone);
+        onOpDone = nullptr;
+
+        Outcome o;
+        o.ok = ok;
+        o.summary = std::move(summary);
+        o.status = std::move(status);
+        o.sha256Hex = opSha256Hex;
+        o.extractedDir = opExtractedDir;
+        o.failedPaths = opFailedPaths;
+        if (done) {
+            done(o);
+        }
+    }
+
+    // 只带状态的应答的收尾（改名 / 新建目录）。
+    void finishOpWithStatus(core::session::FileOpStatus status, std::string what)
+    {
+        const bool ok = (status == core::session::FileOpStatus::kOk);
+        std::string summary = what + "：" + core::session::fileOpStatusText(status);
+        Status st;
+        if (!ok) {
+            st = Status::Fail(ErrorCode::kIoError, core::session::fileOpStatusText(status));
+        }
+        finishOp(ok, std::move(summary), std::move(st));
+    }
+
     bool startSendOnSession(std::string source, std::string remoteName, std::string targetPeerId,
                             std::function<void(const Outcome&)> done)
     {
@@ -1539,6 +2025,15 @@ struct Client::Impl {
             return;
         }
 
+        // 远端文件操作（§11.12）：删除 / 改名 / 新建目录 / SHA-256 / 解压。
+        // 与列举一样，**任何操作模式下都要应答**——"我正在收文件"不妨碍
+        // 回答"这个文件多大"或"把那个目录删掉"。
+        if (f.type == FrameType::kAskSha256 || f.type == FrameType::kAskRename || f.type == FrameType::kAskCreateDir ||
+            f.type == FrameType::kAskDelete || f.type == FrameType::kAskUnarchive) {
+            serveFileOp(f);
+            return;
+        }
+
         if (f.type == FrameType::kAnswerFilePull && pullActive) {
             core::session::FilePullStatus status = core::session::FilePullStatus::kRejected;
             std::string err;
@@ -1579,6 +2074,17 @@ struct Client::Impl {
             }
             metaResults = std::move(metas);
             finishMeta(true, "路径元信息 " + std::to_string(metaResults.size()) + " 项");
+            return;
+        }
+
+        // 远端文件操作的应答（§11.12）。帧类型要与在飞的那次操作匹配：
+        // 超时之后才到的迟到应答不该被当成本次的结论。
+        if (opActive && ((f.type == FrameType::kAnswerSha256 && opKind == FileOpKind::kSha256) ||
+                         (f.type == FrameType::kAnswerRename && opKind == FileOpKind::kRename) ||
+                         (f.type == FrameType::kAnswerCreateDir && opKind == FileOpKind::kCreateDir) ||
+                         (f.type == FrameType::kAnswerDelete && opKind == FileOpKind::kDelete) ||
+                         (f.type == FrameType::kAnswerUnarchive && opKind == FileOpKind::kUnarchive))) {
+            onFileOpAnswer(f);
             return;
         }
 
@@ -1706,6 +2212,10 @@ struct Client::Impl {
         metaActive = false;
         onMetaDone = nullptr;
         metaTimer.cancel();
+        // 远端文件操作同理：会话没了，那一次操作不会有结论。
+        opActive = false;
+        onOpDone = nullptr;
+        opTimer.cancel();
         if (session) {
             session->close();
         }
@@ -1766,6 +2276,13 @@ void Client::browsePeer(std::string peerId, std::string relPath)
     impl_->connect();
 }
 
+void Client::runFileOp(FileOpRequest req)
+{
+    impl_->action = Action::kFileOp;
+    impl_->config.fileOp = std::move(req);
+    impl_->connect();
+}
+
 void Client::refreshPeers()
 {
     // 只对常驻接收会话有意义。前提不满足时静默返回而不是报错：调用方
@@ -1788,6 +2305,11 @@ bool Client::browseOnSession(std::string peerId, std::string relPath, std::funct
 bool Client::askPathMetaOnSession(std::string peerId, std::vector<std::string> absPaths, std::function<void(const Outcome&)> done)
 {
     return impl_->startAskPathMetaOnSession(std::move(peerId), std::move(absPaths), std::move(done));
+}
+
+bool Client::fileOpOnSession(FileOpRequest req, std::function<void(const Outcome&)> done)
+{
+    return impl_->startFileOpOnSession(std::move(req), std::move(done));
 }
 
 bool Client::createArchive(const std::vector<std::string>& sources, const std::string& archivePath, std::string& err)

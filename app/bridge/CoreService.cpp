@@ -496,6 +496,111 @@ bool CoreService::askPathMeta(const QString& peerId, const QStringList& absPaths
     return true;
 }
 
+bool CoreService::runRemoteOp(cli::FileOpRequest req, const QString& kind)
+{
+    // 与列举、元信息同理：没有常驻会话就不做，**不**回落成新连接——
+    // 新连接会顶掉接收会话并换掉本机 id。
+    if (!busy_) {
+        return false;
+    }
+    runOnIo([this, req = std::move(req), kind]() {
+        if (!client_) {
+            emit remoteFileOpFinished(kind, false, QStringLiteral("没有可用的常驻会话"), {}, {});
+            return;
+        }
+        const bool started = client_->fileOpOnSession(req, [this, kind](const cli::Outcome& o) {
+            // result 的含义按 kind 决定，这里不做解释——调用方知道自己在等什么。
+            QString result;
+            if (!o.sha256Hex.empty()) {
+                result = toQt(o.sha256Hex);
+            } else if (!o.extractedDir.empty()) {
+                result = toQt(o.extractedDir);
+            } else if (!o.failedPaths.empty()) {
+                QStringList failed;
+                failed.reserve(static_cast<qsizetype>(o.failedPaths.size()));
+                for (const auto& p : o.failedPaths) {
+                    failed << toQt(p);
+                }
+                result = failed.join(QLatin1Char('\n'));
+            }
+            emit remoteFileOpFinished(kind, o.ok, toQt(o.summary), toQt(o.status.message), result);
+        });
+        if (!started) {
+            emit remoteFileOpFinished(kind, false, QStringLiteral("当前不能操作（正在传输或会话不可用）"), {}, {});
+        }
+    });
+    return true;
+}
+
+bool CoreService::remoteOpSha256(const QString& peerId, const QString& absPath)
+{
+    if (peerId.isEmpty() || absPath.isEmpty()) {
+        return false;
+    }
+    cli::FileOpRequest req;
+    req.kind = cli::FileOpKind::kSha256;
+    req.peerId = fromQt(peerId);
+    req.path = fromQt(absPath);
+    return runRemoteOp(std::move(req), QStringLiteral("sha256"));
+}
+
+bool CoreService::remoteOpRename(const QString& peerId, const QString& absPath, const QString& newName)
+{
+    if (peerId.isEmpty() || absPath.isEmpty() || newName.isEmpty()) {
+        return false;
+    }
+    // 协议里的目标也是**完整路径**，所以新名字要拼回同一个目录。用 '/' 找
+    // 父目录（远端路径在本工具内部一律 `/`，见 DESIGN.md §3.8）。
+    const qsizetype slash = absPath.lastIndexOf(QLatin1Char('/'));
+    const QString target = (slash < 0) ? newName : absPath.left(slash + 1) + newName;
+
+    cli::FileOpRequest req;
+    req.kind = cli::FileOpKind::kRename;
+    req.peerId = fromQt(peerId);
+    req.path = fromQt(absPath);
+    req.newPath = fromQt(target);
+    return runRemoteOp(std::move(req), QStringLiteral("rename"));
+}
+
+bool CoreService::remoteOpCreateDir(const QString& peerId, const QString& absPath)
+{
+    if (peerId.isEmpty() || absPath.isEmpty()) {
+        return false;
+    }
+    cli::FileOpRequest req;
+    req.kind = cli::FileOpKind::kCreateDir;
+    req.peerId = fromQt(peerId);
+    req.path = fromQt(absPath);
+    return runRemoteOp(std::move(req), QStringLiteral("mkdir"));
+}
+
+bool CoreService::remoteOpDelete(const QString& peerId, const QStringList& absPaths)
+{
+    if (peerId.isEmpty() || absPaths.isEmpty()) {
+        return false;
+    }
+    cli::FileOpRequest req;
+    req.kind = cli::FileOpKind::kDelete;
+    req.peerId = fromQt(peerId);
+    req.paths.reserve(static_cast<std::size_t>(absPaths.size()));
+    for (const auto& p : absPaths) {
+        req.paths.push_back(fromQt(p));
+    }
+    return runRemoteOp(std::move(req), QStringLiteral("delete"));
+}
+
+bool CoreService::remoteOpUnarchive(const QString& peerId, const QString& absPath)
+{
+    if (peerId.isEmpty() || absPath.isEmpty()) {
+        return false;
+    }
+    cli::FileOpRequest req;
+    req.kind = cli::FileOpKind::kUnarchive;
+    req.peerId = fromQt(peerId);
+    req.path = fromQt(absPath);
+    return runRemoteOp(std::move(req), QStringLiteral("unpack"));
+}
+
 bool CoreService::pullFileFromPeer(const QString& peerId, const QString& relPath, bool asArchive, const QString& intoDir)
 {
     if (peerId.isEmpty() || relPath.isEmpty()) {

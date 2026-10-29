@@ -29,6 +29,8 @@ add_test(NAME filestore COMMAND filestore_test)
 
 add_executable(core_test
     core/FrameTest.cpp
+    core/ControlLinkTest.cpp
+    core/PairingTest.cpp
     core/AuthTest.cpp
     core/StateMachineTest.cpp
     core/MerkleTreeTest.cpp
@@ -44,7 +46,9 @@ add_executable(core_test
     core/SessionPolicyTest.cpp
     core/SessionTest.cpp
     core/PeerTableTest.cpp
+    core/DataChannelTest.cpp
     core/FileListTest.cpp
+    core/FileOpTest.cpp
     core/PathTextTest.cpp
 )
 # relayer_asio 是 relayer_core 的 PRIVATE 依赖（本模块内部用），所以测试

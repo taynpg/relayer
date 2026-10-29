@@ -549,7 +549,7 @@ void ComparisonControl::onTableContextMenu(const QPoint& pos)
     transAction->setEnabled(!selected.isEmpty());
     QAction* downloadAction = menu.addAction(MenuIcons::download(), QStringLiteral("下载到本地目录"));
     downloadAction->setEnabled(!selected.isEmpty());
-    QAction* checkAction = menu.addAction(QStringLiteral("检查远端（对方是否已有）"));
+    QAction* checkAction = menu.addAction(QStringLiteral("检查远端（存在 / 大小 / 内容）"));
     checkAction->setEnabled(!selected.isEmpty());
     QAction* newRowAction = menu.addAction(MenuIcons::newRow(), QStringLiteral("新行"));
     QAction* deleteAction = menu.addAction(MenuIcons::del(), QStringLiteral("删除选中行"));

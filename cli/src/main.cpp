@@ -44,6 +44,13 @@ void printUsage()
                 "  recv --to-dir <目录>            等待别人发来文件，落到目录里\n"
                 "        [--overwrite]            目标已存在时覆盖（默认拒绝，保护已有文件）\n"
                 "  ls --to <对端id> [--path <相对路径>]  列出对端共享目录（远端浏览/粗校验）\n"
+                "  op --to <对端id> --op <动作> --path <对端路径>\n"
+                "                                  让对端做一次文件操作（PROTOCOL.md §11.12）：\n"
+                "        --op sha256               算这个文件的 SHA-256\n"
+                "        --op rename --new-name N  改名（拒绝覆盖已存在的目标）\n"
+                "        --op mkdir                新建目录（含中间层）\n"
+                "        --op unpack               把 .tar.xz 解到同目录的同名子目录\n"
+                "        --op delete               删除多条 --path（目录递归）\n"
                 "  pack <输出.tar.xz> <路径>...     本地压缩（不联网）\n"
                 "  unpack <包.tar.xz>               本地解压（不联网；手动压缩的包）\n"
                 "  list                            只连上去列出在线对端\n"
@@ -108,6 +115,10 @@ struct Args {
     // ls 的相对路径（相对对端共享根，空 = 根目录）。
     std::string path;
 
+    // op 的操作种类与重命名目标名（见 parseArgs 里的 op 段）。
+    std::string opKind;
+    std::string newName;
+
     // pack / unpack 的位置参数（pack: 输出包 + 各源；unpack: 包）。
     std::vector<std::string> inputs;
 
@@ -165,7 +176,7 @@ ParseResult parseArgs(int argc, char** argv)
         return r;
     }
     if (r.args.command != "send" && r.args.command != "recv" && r.args.command != "list" && r.args.command != "ls" &&
-        r.args.command != "pack" && r.args.command != "unpack") {
+        r.args.command != "pack" && r.args.command != "unpack" && r.args.command != "op") {
         r.error = "未知子命令: " + r.args.command;
         return r;
     }
@@ -331,7 +342,22 @@ ParseResult parseArgs(int argc, char** argv)
             // 想保留包就自己解——但那是少数需求，多数人拿到包只会问"东西呢"。
             r.args.config.unpackArchives = true;
         } else if (a == "--path") {
-            if (!takeValue(a, r.args.path)) {
+            std::string value;
+            if (!takeValue(a, value)) {
+                return r;
+            }
+            if (r.args.command == "op") {
+                // op 允许多次 --path：delete 要删的是一批路径。
+                r.args.inputs.push_back(std::move(value));
+            } else {
+                r.args.path = std::move(value);
+            }
+        } else if (a == "--op") {
+            if (!takeValue(a, r.args.opKind)) {
+                return r;
+            }
+        } else if (a == "--new-name") {
+            if (!takeValue(a, r.args.newName)) {
                 return r;
             }
         } else if (a == "--overwrite") {
@@ -357,6 +383,54 @@ ParseResult parseArgs(int argc, char** argv)
     if (r.args.command == "ls" && r.args.to.empty()) {
         r.error = "ls 需要 --to 指定要列举哪个对端";
         return r;
+    }
+
+    if (r.args.command == "op") {
+        // 子命令与它的必备参数，说法与其它子命令一致（缺什么直说）。
+        if (r.args.to.empty()) {
+            r.error = "op 需要 --to 指定对端";
+            return r;
+        }
+        if (r.args.opKind.empty()) {
+            r.error = "op 需要 --op <sha256|mkdir|rename|delete|unpack>";
+            return r;
+        }
+        if (r.args.inputs.empty()) {
+            r.error = "op 需要 --path 指定目标路径";
+            return r;
+        }
+        if (r.args.opKind == "rename" && r.args.newName.empty()) {
+            r.error = "op rename 需要 --new-name 指定新名字";
+            return r;
+        }
+
+        auto& req = r.args.config.fileOp;
+        req.peerId = r.args.to;
+
+        if (r.args.opKind == "sha256") {
+            req.kind = relayer::cli::FileOpKind::kSha256;
+            req.path = r.args.inputs[0];
+        } else if (r.args.opKind == "mkdir") {
+            req.kind = relayer::cli::FileOpKind::kCreateDir;
+            req.path = r.args.inputs[0];
+        } else if (r.args.opKind == "unpack") {
+            req.kind = relayer::cli::FileOpKind::kUnarchive;
+            req.path = r.args.inputs[0];
+        } else if (r.args.opKind == "rename") {
+            req.kind = relayer::cli::FileOpKind::kRename;
+            req.path = r.args.inputs[0];
+            // 协议里的目标是**完整路径**而不是单段名（与其它帧一致），
+            // 所以在这里拼同目录。两种分隔符都要认：用户从资源管理器
+            // 粘过来的是反斜杠。
+            const auto slash = req.path.find_last_of("/\\");
+            req.newPath = (slash == std::string::npos) ? r.args.newName : req.path.substr(0, slash + 1) + r.args.newName;
+        } else if (r.args.opKind == "delete") {
+            req.kind = relayer::cli::FileOpKind::kDelete;
+            req.paths = r.args.inputs;
+        } else {
+            r.error = "未知的 --op 取值: " + r.args.opKind;
+            return r;
+        }
     }
 
     if (r.args.config.selfBrowse && !r.args.path.empty()) {
@@ -502,6 +576,8 @@ int main(int argc, char** argv)
         client->receiveFile(a.toDir);
     } else if (a.command == "ls") {
         client->browsePeer(a.to, a.path);
+    } else if (a.command == "op") {
+        client->runFileOp(a.config.fileOp);
     } else {
         client->listPeers();
     }
@@ -555,11 +631,24 @@ int main(int argc, char** argv)
         std::fflush(stdout);
     }
 
+    // op 的契约输出：机器可读、格式固定（e2e 断言靠它，不做本地化）。
+    if (a.command == "op") {
+        if (!outcome.sha256Hex.empty()) {
+            std::printf("OP_SHA256=%s\n", outcome.sha256Hex.c_str());
+        }
+        if (!outcome.extractedDir.empty()) {
+            std::printf("OP_DIR=%s\n", outcome.extractedDir.c_str());
+        }
+        for (const auto& p : outcome.failedPaths) {
+            std::printf("OP_FAILED=%s\n", p.c_str());
+        }
+        std::fflush(stdout);
+    }
+
     if (outcome.ok) {
         std::printf("%s\n", outcome.summary.c_str());
         return kExitOk;
     }
-
     std::fprintf(stderr, "%s\n", outcome.summary.c_str());
     if (!outcome.status.ok() && !outcome.status.message.empty()) {
         std::fprintf(stderr, "  原因: %s\n", outcome.status.message.c_str());

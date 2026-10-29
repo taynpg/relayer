@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+using relayer::core::session::isAbsolutePathText;
 using relayer::core::session::joinPathText;
 using relayer::core::session::normalizePathText;
 using relayer::core::session::parentPathText;
@@ -85,4 +86,23 @@ TEST_CASE("parentPathText 用反斜杠输入的路径也走同一条规则", "[p
 {
     REQUIRE(parentPathText("D:\\a\\b") == "D:/a");
     REQUIRE(parentPathText("D:\\a") == "D:/");
+}
+
+TEST_CASE("isAbsolutePathText 区分绝对路径与接收目录下的相对落点", "[pathtext]")
+{
+    // 绝对：盘符 / UNC / 前导分隔符（三种前缀）。
+    REQUIRE(isAbsolutePathText("D:/a"));
+    REQUIRE(isAbsolutePathText("d://a"));
+    REQUIRE(isAbsolutePathText("/home/me"));
+    REQUIRE(isAbsolutePathText("//server/share/x"));
+    REQUIRE(isAbsolutePathText("D:/"));
+
+    // 相对：这是"落到对端接收目录"的写法，服务端要按接收目录还原成绝对路径。
+    REQUIRE_FALSE(isAbsolutePathText("x.txt"));
+    REQUIRE_FALSE(isAbsolutePathText("a/b/c.txt"));
+    REQUIRE_FALSE(isAbsolutePathText(""));
+
+    // 规范化先做，所以混写与点段不会骗过判断。
+    REQUIRE(isAbsolutePathText("D:///a"));
+    REQUIRE_FALSE(isAbsolutePathText("./x.txt"));
 }

@@ -108,6 +108,19 @@ enum class FrameType : std::uint16_t {
     kAskPathMeta = 138,
     kAnswerPathMeta = 139,
 
+    // 数据通道协商（PROTOCOL.md §11.13）：双向交换"我的数据连接 id"。
+    //
+    // 为什么要它：文件传输走**独立的连接**（双连接模型），而中继是按
+    // `to` 里的 id 找连接转发的。所以发送方必须知道"对端的数据连接叫什么
+    // 名字"，否则数据帧会被投到对端的控制连接上——那条连接上没人收块。
+    //
+    // 一次往返交换两边的 id：
+    //   请求 body  = 我的数据连接 id（我先建好再问）
+    //   应答 body  = 对端的数据连接 id
+    // 这样双方各拿到对方的一个值，不必再来一轮通知。
+    kAskDataChannel = 140,
+    kAnswerDataChannel = 141,
+
     // --- 文件传输会话管理（500..549） ---
     kFileRequestSend = 500,
     kFileAnswerSend = 501,

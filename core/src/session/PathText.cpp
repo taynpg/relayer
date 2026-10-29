@@ -174,4 +174,15 @@ std::string parentPathText(std::string_view path)
     return assemble(sp);
 }
 
+bool isAbsolutePathText(std::string_view path)
+{
+    const std::string p = normalizePathText(path);
+    if (p.empty()) {
+        return false;   // 空 = 根列表，不是路径
+    }
+    // 前缀只有三种来路：盘符、UNC、前导分隔符。splitPath 已经把这三类归到
+    // prefix，非空即"从设备/根开始"。`.` 这类没有段也没有前缀的值归为相对。
+    return !splitPath(p).prefix.empty();
+}
+
 }   // namespace relayer::core::session

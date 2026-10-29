@@ -238,6 +238,10 @@ std::string_view toString(FrameType t) noexcept
         return "ask_path_meta";
     case FrameType::kAnswerPathMeta:
         return "answer_path_meta";
+    case FrameType::kAskDataChannel:
+        return "ask_data_channel";
+    case FrameType::kAnswerDataChannel:
+        return "answer_data_channel";
 
     case FrameType::kFileRequestSend:
         return "file_request_send";

@@ -14,6 +14,7 @@
 
 add_library(relayer_core STATIC
     src/protocol/Frame.cpp
+    src/protocol/Pairing.cpp
     src/auth/Handshake.cpp
     src/auth/HandshakeClient.cpp
     src/auth/HandshakeServer.cpp
@@ -32,7 +33,10 @@ add_library(relayer_core STATIC
     src/session/SessionPolicy.cpp
     src/session/Session.cpp
     src/session/PeerTable.cpp
+    src/net/ControlLink.cpp
+    src/session/DataChannel.cpp
     src/session/FileList.cpp
+    src/session/FileOp.cpp
     src/session/PathMeta.cpp
     src/session/PathText.cpp
 )

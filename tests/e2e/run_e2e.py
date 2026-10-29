@@ -1346,6 +1346,79 @@ def run_one(name: str, fn: Callable[[Path, Path], None], bin_dir: Path) -> tuple
             print(f"    （现场保留在 {workdir}）")
 
 
+@scenario("remote-file-ops", "远端文件操作：建目录 / SHA-256 / 改名 / 递归删除 / 解压（§11.12）")
+def remote_file_ops(workdir: Path, bin_dir: Path) -> None:
+    """这一组覆盖的是"让对端在它自己的盘上干活"，五个动作各来一遍。
+
+    为什么值得进 e2e 而不是只留单测：编码往返只证明了字节对得上，
+    证明不了**对端真的执行了**——比如 serve 分支没接上、路径没按接收目录
+    还原、递归删除只删了第一层。这些只有跑两个进程才看得出来。
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server(no_auth=True)
+        recv, rid = c.start_receiver(no_auth=True)
+        common = c.cli_common(no_auth=True)
+
+        # 对端视角的绝对路径。同一台机器上跑，路径通用。
+        base = c.workdir / "remote"
+        deep = base / "tree" / "deep"
+
+        # -- 建目录：一次建出中间层 -------------------------------------
+        p = c.cli("op-mkdir", "op", "--to", rid, "--op", "mkdir", "--path", str(deep), *common)
+        expect_eq(c.wait_all([p], 30)[0], 0, "mkdir 退出码")
+        expect(deep.is_dir(), f"目录没建出来：{deep}")
+
+        # -- SHA-256：对端算的摘要必须与本地一致 ------------------------
+        f = deep / "a.bin"
+        want = make_file(f, 300_000)
+        p = c.cli("op-sha", "op", "--to", rid, "--op", "sha256", "--path", str(f), *common)
+        expect_eq(c.wait_all([p], 60)[0], 0, "sha256 退出码")
+        line = p.wait_for("OP_SHA256=", 5)
+        expect_eq(line.split("OP_SHA256=", 1)[1].strip(), want, "远端 SHA-256")
+
+        # -- 改名：生效，且原路径消失 ------------------------------------
+        p = c.cli("op-rename", "op", "--to", rid, "--op", "rename", "--path", str(f),
+                  "--new-name", "b.bin", *common)
+        expect_eq(c.wait_all([p], 30)[0], 0, "rename 退出码")
+        expect(not f.exists(), "改名后旧名字还在")
+        renamed = deep / "b.bin"
+        expect(renamed.exists(), "改名后新名字不存在")
+        expect_eq(sha256_of(renamed), want, "改名后内容变了")
+
+        # -- 撞名必须拒绝：覆盖等于替用户删掉别人的文件 ------------------
+        (deep / "c.bin").write_bytes(b"occupied")
+        p = c.cli("op-rename-taken", "op", "--to", rid, "--op", "rename", "--path", str(renamed),
+                  "--new-name", "c.bin", *common)
+        expect_eq(c.wait_all([p], 30)[0], 2, "目标已存在时应失败")
+        expect_eq((deep / "c.bin").read_bytes(), b"occupied", "被拒绝的改名仍然动了目标文件")
+        expect(renamed.exists(), "被拒绝的改名把源文件弄丢了")
+
+        # -- 删除：目录递归（第二层开始的文件也要走） --------------------
+        p = c.cli("op-delete", "op", "--to", rid, "--op", "delete", "--path", str(base / "tree"), *common)
+        expect_eq(c.wait_all([p], 30)[0], 0, "delete 退出码")
+        expect(not (base / "tree").exists(), "递归删除没有真的删掉整棵树")
+
+        # -- 解压：把本地打的包交给对端解到同名子目录 --------------------
+        archive_src = c.workdir / "packsrc"
+        (archive_src / "nested").mkdir(parents=True)
+        (archive_src / "nested" / "x.txt").write_bytes(b"unarchive-content")
+        pack = base / "bundle.tar.xz"
+        p = c.cli("op-pack", "pack", str(pack), str(archive_src))
+        expect_eq(c.wait_all([p], 60)[0], 0, "本地打包失败")
+
+        p = c.cli("op-unpack", "op", "--to", rid, "--op", "unpack", "--path", str(pack), *common)
+        expect_eq(c.wait_all([p], 120)[0], 0, "unpack 退出码")
+        expect(not pack.exists(), "解压成功后包应当被删掉")
+        # 手动压缩的包**带顶层目录**（entryName 相对各源的父目录），所以解开
+        # 后是 bundle/packsrc/nested/x.txt，不是 bundle/nested/x.txt。
+        # 这个形状与 §11.10 的取回包相反，两者不能混用同一套断言。
+        expect((base / "bundle" / "packsrc" / "nested" / "x.txt").read_bytes() == b"unarchive-content",
+               "解出来的内容不对")
+    finally:
+        c.shutdown()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="relayer 三进程集成测试")
     ap.add_argument("--quick", action="store_true", help="跳过标了 slow 的场景（200MB / 1GB）")
