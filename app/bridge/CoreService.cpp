@@ -253,6 +253,14 @@ bool CoreService::sendFile(const QString& localPath, const QString& remoteName, 
         busy_ = true;
         receivePending_ = false;
         emit busyChanged(true);
+        // 换 Client 之前先把旧的关干净。不关的后果很具体：旧的数据连接
+        // 还占着 `<本机 id>~d` 这个名字，新会话 claim 同一个名字会被服务端
+        // 拒绝，而"拒绝"的表现是**数据连接被关掉**——控制连接却正常，
+        // 界面看起来一切正常，只是每次接收都报 "session is closed"。
+        // 用户实跑时撞到的就是这个（一次失败 → 3 秒后重试 → 一直失败）。
+        if (client_) {
+            client_->shutdown();
+        }
         client_ = std::make_shared<cli::Client>(
             ctx_, std::move(cfg),
             [this](const cli::ProgressReport& p) { emit progressChanged(p.bytesDone, p.bytesTotal, p.bytesPerSecond); },
@@ -353,6 +361,14 @@ void CoreService::startReceive(const QString& targetDir, const ConnInfo& conn)
         // 记下默认落点：行级下载会临时改落点，收完改回这里。
         defaultReceiveDir_ = fromQt(targetDir);
         pullTargetDir_.clear();
+        // 换 Client 之前先把旧的关干净。不关的后果很具体：旧的数据连接
+        // 还占着 `<本机 id>~d` 这个名字，新会话 claim 同一个名字会被服务端
+        // 拒绝，而"拒绝"的表现是**数据连接被关掉**——控制连接却正常，
+        // 界面看起来一切正常，只是每次接收都报 "session is closed"。
+        // 用户实跑时撞到的就是这个（一次失败 → 3 秒后重试 → 一直失败）。
+        if (client_) {
+            client_->shutdown();
+        }
         client_ = std::make_shared<cli::Client>(
             ctx_, std::move(cfg),
             [this](const cli::ProgressReport& p) { emit progressChanged(p.bytesDone, p.bytesTotal, p.bytesPerSecond); },
@@ -373,6 +389,14 @@ bool CoreService::listPeers(const ConnInfo& conn)
         emit busyChanged(true);
         // 不需要进度。必须是显式 lambda 而不是 {}：make_shared 是
         // 可变参转发，braced-init-list 无法在转发中推导参数类型。
+        // 换 Client 之前先把旧的关干净。不关的后果很具体：旧的数据连接
+        // 还占着 `<本机 id>~d` 这个名字，新会话 claim 同一个名字会被服务端
+        // 拒绝，而"拒绝"的表现是**数据连接被关掉**——控制连接却正常，
+        // 界面看起来一切正常，只是每次接收都报 "session is closed"。
+        // 用户实跑时撞到的就是这个（一次失败 → 3 秒后重试 → 一直失败）。
+        if (client_) {
+            client_->shutdown();
+        }
         client_ = std::make_shared<cli::Client>(
             ctx_, std::move(cfg), [](const cli::ProgressReport&) {}, [this](const cli::Outcome& o) { finishOperation(o, true); });
         client_->listPeers();

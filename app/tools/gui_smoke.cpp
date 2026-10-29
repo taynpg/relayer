@@ -37,6 +37,10 @@ int main(int argc, char** argv)
     conn.port = 9527;
     conn.noAuth = true;
     QString dir = QStringLiteral(".");
+    // 非空 = 连上之后把这个文件发给**自己**，验完整的收发链路。
+    // 用户实跑时第一步就挂在这里（"传输失败：session is closed"），
+    // 而在此之前所有断言都只验到"能列目录"为止。
+    QString selfSend;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -59,11 +63,14 @@ int main(int argc, char** argv)
         } else if (a == "--password" && next(v)) {
             conn.password = v;
             conn.noAuth = false;
+        } else if (a == "--self-send" && next(v)) {
+            selfSend = v;
         }
     }
 
     relayer::app::CoreService core;
     bool browsed = false;
+    bool announced = false;
 
     // 会话提前结束（认证失败、中继断开）：直接报出来，别等到超时。
     // 四个参数（多一个 context object）不是风格问题：三个参数的
@@ -82,8 +89,34 @@ int main(int argc, char** argv)
                      });
 
     QObject::connect(&core, &relayer::app::CoreService::assignedIdChanged, &app, [&](const QString& id) {
+        // 声明了 --id 时，认证刚过的那一次还是临时号：那时发出去会打错人。
+        if (!conn.requestedId.isEmpty() && id != conn.requestedId) {
+            return;
+        }
+        if (announced) {
+            return;
+        }
+        announced = true;
+
         std::printf("SMOKE_ASSIGNED=%s\n", id.toUtf8().constData());
         std::fflush(stdout);
+
+        if (!selfSend.isEmpty()) {
+            // 发文件给自己：走的是 GUI 的路径（sendFileTask → 常驻数据连接），
+            // 覆盖"数据连接建起来 → 协商 → 传输 → 落盘"整条链路。
+            //
+            // 延后 300ms：startReceive 的建 Client 是 post 到 io 线程的，
+            // 立刻发会撞上"还没有常驻会话"。
+            QTimer::singleShot(300, &app, [&, id] {
+                if (!core.sendFileTask(1, selfSend, QStringLiteral("smoke-sent.bin"), id, conn)) {
+                    std::printf("SMOKE_FAIL 发送请求没发起（没有常驻会话）\n");
+                    std::fflush(stdout);
+                    app.exit(6);
+                }
+            });
+            return;
+        }
+
         // 自投列举：向**自己**要一次根目录列表。
         //
         // 这条请求与"接收会话"共用控制连接——正是 GUI 的浏览所走的路径
@@ -102,6 +135,27 @@ int main(int argc, char** argv)
                                      static_cast<long long>(rows.size()), summary.toUtf8().constData());
                          std::fflush(stdout);
                          app.exit(ok ? 0 : 3);
+                     });
+
+    // 自投的结果。这两条是"发文件给自己"模式专用的；列举模式不看它们。
+    QObject::connect(&core, &relayer::app::CoreService::fileReceived, &app, [&](const QString& path) {
+        std::printf("SMOKE_RECEIVED=%s\n", path.toUtf8().constData());
+        std::fflush(stdout);
+        app.exit(0);
+    });
+    QObject::connect(&core, &relayer::app::CoreService::receiveFailed, &app, [&](const QString& msg) {
+        std::printf("SMOKE_RECEIVE_FAILED=%s\n", msg.toUtf8().constData());
+        std::fflush(stdout);
+        app.exit(7);
+    });
+    QObject::connect(&core, &relayer::app::CoreService::sendTaskFinished, &app,
+                     [&](qint64, bool ok, const QString& summary, const QString& detail) {
+                         std::printf("SMOKE_SEND ok=%d summary=%s detail=%s\n", ok ? 1 : 0,
+                                     summary.toUtf8().constData(), detail.toUtf8().constData());
+                         std::fflush(stdout);
+                         if (!ok) {
+                             app.exit(8);
+                         }
                      });
 
     core.startReceive(dir, conn);

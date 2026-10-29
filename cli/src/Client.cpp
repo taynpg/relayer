@@ -2112,25 +2112,49 @@ Client::~Client()
         return;
     }
     impl_->destroying = true;
-    impl_->finished = true;
-    // 让所有异步回调失效：析构之后上层的 token 检查会失效，回调直接 return。
     impl_->alive.reset();
 
-    // **不在这里主动 close()**。
+    // 只有在 **io 线程**上才走 close 链。close() 会进 TransferPeer::cancel
+    // → TransferSender::cancelAll，那条路径假定自己在 io 线程上（它要碰
+    // Session 的写队列和发送窗口）；在别的线程上跑就是段错误（Release 实测
+    // 100% 崩，Debug 因内存布局不同恰好不崩）。
     //
-    // Client 的析构可能发生在任何线程（GUI 里是 Qt 主线程，而 io 线程通常
-    // 已经停了）。close() 会走进 TransferPeer::cancel → TransferSender::
-    // cancelAll，那条路径假定自己在 io 线程上——它要碰 Session 的写队列和
-    // 发送窗口。在主线程上跑这段就是段错误。
+    // 而**不 close 会漏连接**：Session 的读循环是 async_read 链，handler
+    // 持有 shared_ptr<Session>，socket 不关就永远等下去，Session 永不析构
+    // ——中继那边这条连接与它占的 id（`<ctrl>~d`）也就永不释放。下一次
+    // 连上来 claim 同一个名字会被拒，表现是"数据连接被关，每次接收都报
+    // session is closed"。
     //
-    // 这不是理论：GUI 的冒烟测试在 Release 下 100% 崩在这里，Debug 下因为
-    // 内存布局不同恰好不崩，查了很久。
-    //
-    // 连接会随成员析构自然关闭：shared_ptr<TransferLink>/<ControlLink>
-    // 释放 → Session 析构 → socket 关闭。代价是没走"发取消帧再 FIN"的
-    // 优雅路径，对端看到的就是"连接断了"——它本来就该看到这个。
-    //
-    // 想在 io 线程上优雅关闭，用 abort()（它就是给那条路径准备的）。
+    // 所以两头都要：io 线程上关（正常路径，靠析构或 shutdown()），
+    // 非 io 线程上不碰（交给 socket 析构，进程退出的场景够用）。
+    if (impl_->ctx.get_executor().running_in_this_thread()) {
+        if (impl_->data) {
+            impl_->data->close();
+        }
+        if (impl_->control) {
+            impl_->control->close();
+        }
+    }
+    impl_->finished = true;
+}
+
+void Client::shutdown()
+{
+    if (!impl_) {
+        return;
+    }
+    // 与析构同一套动作，但**由调用方保证在 io 线程上**（CoreService 的重连
+    // 路径就是这样用的）。先让回调失效，再关连接：关闭会同步触发 onClosed，
+    // 那时上层的 token 检查必须已经失效，否则会往一个正在拆的对象里回调。
+    impl_->destroying = true;
+    impl_->finished = true;
+    impl_->alive.reset();
+    if (impl_->data) {
+        impl_->data->close();
+    }
+    if (impl_->control) {
+        impl_->control->close();
+    }
 }
 
 void Client::sendFile(std::string sourcePath, std::string remoteName, std::string toPeerId)

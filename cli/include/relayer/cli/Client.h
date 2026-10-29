@@ -453,6 +453,18 @@ public:
     // "发送方突然消失"。正常退出走 finishIdle()。
     void abort();
 
+    // 同步关闭连接，**不产生任何结论回调**。只能在 io 线程上调用。
+    //
+    // 与 abort() 的分工：abort 是"用户要停"，会给上层一个"中止"结论；
+    // shutdown 是内部清理——重连前腾出连接与身份、把资源还给系统，不该
+    // 让上层以为发生了什么。
+    //
+    // 为什么必须有它：上一个 Client 不关干净，它占着数据连接的名字
+    // （`<控制连接 id>~d`）。新会话 claim 同一个名字会被服务端拒绝，
+    // 而拒绝的表现是**数据连接被关掉**，之后每次接收都报
+    // "session is closed"——控制连接却是好的，界面看起来一切正常。
+    void shutdown();
+
     [[nodiscard]] const std::string& assignedId() const noexcept;
 
 private:
