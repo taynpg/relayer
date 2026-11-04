@@ -224,6 +224,13 @@ private:
     // 兜底——真对不上会退回 kRootMismatch，上层丢弃残片重来。
     [[nodiscard]] std::uint32_t scanResumePoint() const;
 
+    // 已经**连续**写完的字节数（从头数起，遇到第一个洞就停）。
+    //
+    // abort(keepPartial=true) 用它把残片截到这个长度：写盘是乱序的，文件
+    // 长度会越过真正的连续区，而续传点只能从长度推——那个差值就是"下次
+    // 会被当成已有数据跳过、实际是零"的空洞。
+    [[nodiscard]] std::uint64_t contiguousWrittenBytes() const;
+
     // 关闭残片写流。finalize / abort 前必须调用，析构时由成员自动完成。
     //
     // 幂等，且不会与正在进行的写盘任务并发破坏状态：内部持 writeMu_，

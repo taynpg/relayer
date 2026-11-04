@@ -720,9 +720,45 @@ void TransferReceiver::abort(bool keepPartial)
     closeWriteStream();
     if (keepPartial) {
         // 连接断了不是用户的选择：残片留着，下次能续传。
+        //
+        // 但**先截到连续写完的前缀**。写盘是乱序的（每块 seek 到自己的
+        // 偏移，见 acceptChunk），文件长度因此不等于有效内容长度：末尾
+        // 那一批里可能还有没落盘的空洞，而长度已经越过了连续区。下次续传
+        // 的续传点只能从**长度**推（新进程没有位图），那些空洞就会被当成
+        // "已有数据"跳过——最终 Merkle 根对不上，整块残片作废。
+        //
+        // 截断之后"残片长度 = 已确认的连续字节数"成为跨进程的不变量。
+        // 硬杀（进程被 TerminateProcess）拦不住，那种情况只能靠最终校验
+        // 兜底——但断线重连这条路上不能再把残片赌坏。
+        const auto keepBytes = contiguousWrittenBytes();
+        const auto st = store_.stat(partPath_);
+        if (std::getenv("RELAYER_PROF") != nullptr) {
+            std::fprintf(stderr, "[prof] abort(keepPartial): size=%llu keepBytes=%llu\n",
+                         static_cast<unsigned long long>(st.size), static_cast<unsigned long long>(keepBytes));
+            std::fflush(stderr);
+        }
+        if (st.exists && st.size > keepBytes) {
+            (void)store_.resize(partPath_, keepBytes);
+        }
         return;
     }
     (void)store_.remove(partPath_);
+}
+
+std::uint64_t TransferReceiver::contiguousWrittenBytes() const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    std::uint32_t n = 0;
+    while (n < totalChunks_ && n < written_.size() && written_[n]) {
+        ++n;
+    }
+    if (n == 0) {
+        return 0;
+    }
+    if (n >= totalChunks_) {
+        return totalSize_;
+    }
+    return static_cast<std::uint64_t>(n) * chunkSize_;
 }
 
 }   // namespace relayer::core::transfer

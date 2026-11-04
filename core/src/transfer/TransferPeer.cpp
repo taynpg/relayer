@@ -1194,6 +1194,23 @@ void TransferPeer::finish(TransferOutcome outcome, Status status, std::string ta
     }
     finished_ = true;
 
+    // 接收方**收尾时必须把残片收拾干净**，哪怕这一次是失败退出的。
+    //
+    // 之前这里什么都不做，残片只在 cancel() 里才被 abort——而"自己先撞上
+    // 写失败 / ACK 发不出去"（链路已经断了，本端还没读到 EOF）这类失败
+    // 直接 finish 就走了。留下的残片长度越过了真正的连续区（写盘是乱序
+    // 的），下一次续传把它当成已有数据跳过，最终 merkle 根必然对不上：
+    // 一次断线浪费掉整块残片，而用户看到的是"续传了但校验失败"。
+    //
+    // keepPartial = true：这种失败不是用户的选择，下次还会用到。真正该
+    // 删残片的是"用户取消"，那条路由 cancel(keepPartial=false) 处理。
+    // kCompleted 跳过：那时残片已经改名成目标文件了，没有残片可收拾。
+    // kLocalCancelled 也跳过：cancel() 已经按调用方的意图处理过，
+    // 再 abort 一次语义上是在替它猜。
+    if (receiver_ != nullptr && outcome != TransferOutcome::kCompleted && outcome != TransferOutcome::kLocalCancelled) {
+        receiver_->abort(/*keepPartial=*/true);
+    }
+
     if (onDone_) {
         TransferResult result;
         result.outcome = outcome;

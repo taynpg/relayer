@@ -635,6 +635,51 @@ TEST_CASE("receiver handles an empty file", "[transfer][receiver][finalize]")
 // abort
 // ===========================================================================
 
+// ===========================================================================
+// 残片：keepPartial 之后必须仍是"正确的前缀"
+// ===========================================================================
+
+TEST_CASE("receiver abort(keepPartial) truncates the part to the contiguous prefix", "[transfer][receiver][resume]")
+{
+    // 续传点只能从**文件长度**推出来（新进程没有位图）。而写盘是乱序的，
+    // 长度会越过真正的连续区——中间那几个洞会被下一次续传当成"已有数据"
+    // 跳过，最终 merkle 根对不上，整块残片作废。
+    //
+    // 所以 abandon 时必须截到连续前缀。这条用例就是那个不变量的守门人：
+    // 只写第 0 块和第 3 块，留下 1、2 两个洞，然后看残片还剩多长。
+    filestore::MemFileStore store;
+    WorkerPool pool(1);
+
+    const auto content = makeContent(4 * kChunk);
+    const auto desc = makeDesc(content, kChunk);
+
+    TransferReceiver r(store, pool);
+    std::uint32_t resumeFrom = 0;
+    REQUIRE(r.open(desc, "out.bin", resumeFrom).ok());
+
+    REQUIRE(r.acceptChunk(0, content.data(), kChunk, inlinePost()).ok());
+    REQUIRE(r.acceptChunk(3, content.data() + 3 * kChunk, kChunk, inlinePost()).ok());
+    settle(r);
+    REQUIRE(r.writtenChunks() == 2);
+
+    // 乱序写入已经让文件长到 4 块
+    REQUIRE(store.stat("out.bin.relaypart").size == 4 * kChunk);
+
+    r.abort(/*keepPartial=*/true);
+
+    const auto st = store.stat("out.bin.relaypart");
+    REQUIRE(st.exists);
+    REQUIRE(st.size == kChunk);
+    REQUIRE(readAll(store, "out.bin.relaypart") == content.substr(0, kChunk));
+
+    // 下一次续传从这个长度接着要：第 1、2 块（以及被砍掉的第 3 块）都会重发。
+    // 目标名必须与上一次相同——续传认的是 `<目标>.relaypart` 这个约定。
+    TransferReceiver again(store, pool);
+    std::uint32_t resumeAgain = 0;
+    REQUIRE(again.open(desc, "out.bin", resumeAgain).ok());
+    REQUIRE(resumeAgain == 1);
+}
+
 TEST_CASE("receiver abort removes the part file", "[transfer][receiver]")
 {
     filestore::MemFileStore store;
