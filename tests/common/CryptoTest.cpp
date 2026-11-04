@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "relayer/common/crypto/Aes256Gcm.h"
+#include "relayer/common/crypto/Random.h"
 #include "relayer/common/crypto/Sha256.h"
 
 using namespace relayer::crypto;
@@ -423,4 +424,25 @@ TEST_CASE("AES-256-GCM open 拒绝过短的输入", "[crypto][gcm][edge]")
     aes256GcmEncrypt(key.data(), nonce.data(), nullptr, 0, nullptr, 0, nullptr, tag);
     REQUIRE(aes256GcmOpen(key.data(), nonce.data(), "", tag, sizeof(tag), out));
     REQUIRE(out.empty());
+}
+
+// ---------------------------------------------------------------------------
+// 平台 CSPRNG
+// ---------------------------------------------------------------------------
+
+TEST_CASE("fillRandom fills the buffer and rejects bad arguments", "[crypto][random]")
+{
+    std::uint8_t one = 0;
+    REQUIRE(fillRandom(&one, 1));
+
+    REQUIRE(fillRandom(nullptr, 0));         // 长度为 0 允许空指针
+    REQUIRE_FALSE(fillRandom(nullptr, 8));   // 长度非 0 但空指针是错误
+
+    // 两次取到的字节不该相同——不是"随机性测试"（那需要成千上万次），
+    // 而是"它真的在动"的最廉价哨兵。真返回常量的话加密会立刻失效。
+    Bytes a(32, 0);
+    Bytes b(32, 0);
+    REQUIRE(fillRandom(a.data(), a.size()));
+    REQUIRE(fillRandom(b.data(), b.size()));
+    REQUIRE(a != b);
 }

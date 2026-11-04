@@ -904,14 +904,8 @@ TEST_CASE("randomSalt produces distinct salts", "[auth][random]")
     REQUIRE(a != b);
 }
 
-TEST_CASE("fillRandom handles edge cases", "[auth][random]")
-{
-    std::uint8_t one = 0;
-    REQUIRE(fillRandom(&one, 1));
-
-    REQUIRE(fillRandom(nullptr, 0));         // 长度为 0 允许空指针
-    REQUIRE_FALSE(fillRandom(nullptr, 8));   // 长度非 0 但空指针是错误
-}
+// 边界用例（空长度 / 空指针）已经跟着实现搬到 tests/common/CryptoTest.cpp：
+// fillRandom 现在是 common 层的平台原语，载荷加密也用它，auth 不再单独测。
 
 // ===========================================================================
 // 身份绑定

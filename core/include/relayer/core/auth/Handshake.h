@@ -372,11 +372,8 @@ private:
 // 随机数
 // ---------------------------------------------------------------------------
 
-// 用系统 CSPRNG 填充。失败返回 false（几乎只在极端环境下发生：没有
-// /dev/urandom、BCryptGenRandom 不可用）。**不要**在失败时退化成 rand()：
-// 可预测的 nonce 会让重放防护完全失效，而此时握手看起来是"成功的"。
-[[nodiscard]] bool fillRandom(void* buf, std::size_t len) noexcept;
-
+// 平台 CSPRNG 本身在 `relayer/common/crypto/Random.h`（`crypto::fillRandom`）。
+// 这里只剩"握手要的两种长度"——认证层不该既管算法又管长度。
 [[nodiscard]] bool randomSalt(Salt& out) noexcept;
 [[nodiscard]] bool randomNonce(Nonce& out) noexcept;
 
