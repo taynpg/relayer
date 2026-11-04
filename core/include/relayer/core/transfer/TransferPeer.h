@@ -254,7 +254,11 @@ private:
     void sendAnswerSend(AnswerStatus status, std::uint32_t resumeFrom, std::string_view reason);
 
     // 两边共用
-    void sendFrame(protocol::Frame frame);
+    // reportFailure=false：这一帧只是"顺便通知对方"，发不出去不该改写
+    // 本端的结论。取消帧是唯一的用户：链路已经断了的时候它必然发不出去，
+    // 若还按失败处理，一次"链路断开"会被报成"传输失败：session is closed"
+    // ——真实原因（谁断的、为什么断）反而丢了。
+    void sendFrame(protocol::Frame frame, bool reportFailure = true);
     void finish(TransferOutcome outcome, Status status, std::string targetPath = {});
 
     asio::io_context& ctx_;

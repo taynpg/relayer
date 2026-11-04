@@ -674,6 +674,43 @@ TEST_CASE("local cancel notifies the peer", "[peer][integration]")
 // 错误路径
 // ===========================================================================
 
+// 链路已经断了之后再取消：结论必须是"链路断了"，不能变成"session is closed"。
+//
+// 这条用例守的是一个真实事故：数据连接断开时 TransferLink 会 cancel 各路
+// peer，而 cancel 要先发一条取消帧通知对方——那条帧在死链路上必然发不出去，
+// 于是失败被当成"传输失败：session is closed"报了上去。用户看到的是一句
+// 看不懂的内部措辞，真实原因（连接断了）反而丢了；GUI 还会把它当成一次
+// "传输失败"，把"等待重连"的提示盖掉。
+TEST_CASE("cancel on a dead link reports the link, not the session", "[peer][integration]")
+{
+    test::TempDir srcDir;
+    test::TempDir dstDir;
+    Harness h;
+
+    const auto content = makeContent(8 * kChunk);
+    const auto srcPath = srcDir.utf8() + "/dead.bin";
+    REQUIRE(writeAllStore(h.storeA, srcPath, content));
+
+    connectPair(h, [&] {
+        h.sender = TransferPeer::createSender(h.ctx, h.client, h.storeA, h.sendPool, srcPath, "dead.bin", "client-1", 6,
+                                              peerConfig(), [sink = h.senderSink](const TransferResult& r) {
+                                                  ++sink->calls;
+                                                  sink->result = r;
+                                              });
+    });
+
+    // 建好就断开，赶在摘要算完、第一个块发出去之前：这时 cancel 的那条
+    // 通知帧和真实断线时一样发不出去。
+    h.client->close();
+    REQUIRE(h.client->finished());
+
+    h.sender->cancel("数据连接断开");
+
+    REQUIRE(h.senderSink->calls == 1);
+    REQUIRE(h.senderSink->result.outcome == TransferOutcome::kLocalCancelled);
+    REQUIRE(h.senderSink->result.status.message == "数据连接断开");
+}
+
 TEST_CASE("sender fails fast when the source is missing", "[peer]")
 {
     // 这条不需要 socket：源文件不存在是本地错误，一个往返都不该走。

@@ -641,7 +641,7 @@ Status Session::claimPeerId(std::string_view id)
     return st;
 }
 
-Status Session::assignPeerId(std::string newId)
+Status Session::assignPeerId(std::string newId, std::int64_t requestIndex)
 {
     if (config_.role != Role::kServer) {
         return failStatus(ErrorCode::kProtocol, "assignPeerId is server-only");
@@ -657,6 +657,7 @@ Status Session::assignPeerId(std::string newId)
 
     Frame answer;
     answer.type = FrameType::kAnswerId;
+    answer.index = requestIndex;
     if (const auto st = encodeAnswerId(assignedId_, answer.body); !st.ok()) {
         return st;
     }

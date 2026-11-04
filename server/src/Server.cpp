@@ -40,6 +40,30 @@ Status Server::start()
         return Status::Fail(ErrorCode::kInvalidPath, "bad listen address: " + config_.listenAddress);
     }
 
+    // 端口上**已经有东西在监听**时直接报错，别硬起。
+    //
+    // Windows 的 SO_REUSEADDR 与 POSIX 同名但语义不同：它允许第二个 socket
+    // 绑到已被占用的端口上。于是两个 relayerd 都能打印"已启动"，而实际
+    // 连接**全都落到先启动的那个进程**——新起的那个等于不存在。用户看到
+    // 的是"中继明明起来了，客户端却连上了旧进程"，而两边的日志都正常，
+    // 排查方向会完全跑偏。
+    //
+    // 绑之前先连一下：连得上就说明有人在那儿。探测本身无害——对方 accept
+    // 之后立刻收到 EOF。
+    {
+        // 0.0.0.0 不能用来连（Windows 上直接失败），探回环。
+        const auto probeAddr = addr.is_unspecified() ? asio::ip::make_address("127.0.0.1") : addr;
+        asio::ip::tcp::socket probe(ctx_);
+        std::error_code probeEc;
+        probe.connect(asio::ip::tcp::endpoint(probeAddr, config_.port), probeEc);
+        if (!probeEc) {
+            probe.close(probeEc);
+            return Status::Fail(ErrorCode::kBusy, "端口 " + std::to_string(config_.port) +
+                                                      " 上已经有程序在监听（是不是还有一个 relayerd 没退？）。"
+                                                      "直接再起一个只会让它空转：连接会全部落到先启动的那个进程。");
+        }
+    }
+
     acceptor_.open(asio::ip::tcp::v4(), ec);
     if (ec) {
         return Status::Fail(ErrorCode::kIoError, "acceptor open failed: " + ec.message());
@@ -286,6 +310,12 @@ void Server::handleLocal(session::Session& self, const Frame& frame)
 
     Frame out;
     out.type = FrameType::kAnswerClientList;
+    // **回显请求号**（PROTOCOL.md §2.3：应答与对应请求同号）。客户端的
+    // ControlLink 是拿 `index` 去 pending_ 里配对应答的，不填就永远是 0，
+    // 于是"问在线列表"这条请求永远配不上——客户端干等满 10 秒超时，
+    // 而服务端这边一切正常。GUI 的在线列表因此长期是空的（CLI 的 ls 走的
+    // 是另一条路径，所以没暴露）。
+    out.index = frame.index;
     out.to = self.assignedId();
     out.body = std::move(body);
     (void)self.send(out);
@@ -307,6 +337,10 @@ void Server::handleClaimId(session::Session& self, const Frame& frame)
     auto reject = [&](session::IdAnswerStatus status) {
         Frame answer;
         answer.type = FrameType::kAnswerId;
+        // 同 §2.3：应答回显请求号。客户端目前按 claimPending_ 认这条应答，
+        // 不用 index；但协议写的是"同号"，服务端就该照协议来——不然哪天
+        // 客户端换成按号配对，这里会变成一个只有老服务端才有的坑。
+        answer.index = frame.index;
         std::vector<char> body;
         if (session::encodeAnswerId(status, std::string(), body).ok()) {
             answer.body = std::move(body);
@@ -362,7 +396,7 @@ void Server::handleClaimId(session::Session& self, const Frame& frame)
     sessions_.erase(oldId);
 
     renaming_ = true;
-    const Status st = self.assignPeerId(id);
+    const Status st = self.assignPeerId(id, frame.index);
     renaming_ = false;
     if (!st.ok()) {
         // 走到这里说明编码失败之类的内部问题（id 已经校验过）。会话此时

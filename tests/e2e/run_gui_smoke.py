@@ -187,6 +187,9 @@ def main() -> int:
         if "SMOKE_BROWSE ok=1" not in out:
             print("列举没有成功", file=sys.stderr)
             return 1
+        if "SMOKE_PEERLIST count=" not in out:
+            print("在线列表没回来（kAskClientList 的应答没配对？）", file=sys.stderr)
+            return 1
         if "SMOKE_SECURITY encrypted=1 compressed=1" not in out:
             print("设置没走到 ClientConfig（加密/压缩应显示为开）", file=sys.stderr)
             return 1

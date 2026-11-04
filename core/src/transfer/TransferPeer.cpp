@@ -1107,7 +1107,9 @@ void TransferPeer::cancel(std::string_view reason, bool keepPartial)
         f.type = FrameType::kFileRequestCancel;
         f.sessionId = sessionId_;
         f.body = std::move(body);
-        sendFrame(std::move(f));
+        // 尽力而为：这条帧没送到不影响本端结论。链路断了的时候它必然失败，
+        // 那时该报的是"链路断了"，不是"取消帧发不出去"。
+        sendFrame(std::move(f), /*reportFailure=*/false);
     }
 
     if (sender_) {
@@ -1148,7 +1150,7 @@ TransferProgress TransferPeer::progress() const
     return p;
 }
 
-void TransferPeer::sendFrame(protocol::Frame frame)
+void TransferPeer::sendFrame(protocol::Frame frame, bool reportFailure)
 {
     if (finished_) {
         return;
@@ -1188,7 +1190,7 @@ void TransferPeer::sendFrame(protocol::Frame frame)
     //
     // 服务端用 send() 发 to=<对端 id> 的帧是合法的：checkOutbound 只约束
     // from（必须是空或服务端自己的 id），to 想填谁都可以。
-    if (const auto st = session_->send(frame); !st.ok()) {
+    if (const auto st = session_->send(frame); !st.ok() && reportFailure) {
         finish(TransferOutcome::kFailed, st);
     }
 }

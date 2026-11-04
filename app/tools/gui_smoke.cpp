@@ -17,6 +17,8 @@
 //   SMOKE_ASSIGNED=<id>
 //   SMOKE_BROWSE ok=<0|1> root=<0|1> count=<n> summary=<text>
 //   SMOKE_SECURITY encrypted=<0|1> compressed=<0|1>
+//   SMOKE_PEERLIST count=<n>          （在线列表真的回来了；它走的是
+//                                      kAskClientList 那条请求/应答）
 //   SMOKE_RECONNECTED
 //   SMOKE_BROWSE ... phase=<1|2>      （--browse-twice 专用）
 //   SMOKE_FAIL <reason>
@@ -123,6 +125,7 @@ int main(int argc, char** argv)
     bool announced = false;
     int browseCount = 0;
     QString sessionId;
+    bool sawPeerList = false;
 
     // 会话提前结束（认证失败、中继断开）：直接报出来，别等到超时。
     // 四个参数（多一个 context object）不是风格问题：三个参数的
@@ -206,6 +209,16 @@ int main(int argc, char** argv)
         QTimer::singleShot(300, &app, [secondBrowse, attempt] { (*secondBrowse)(attempt + 1); });
     };
 
+    // 在线列表（askListOnStart 自动发的那条）。它和"浏览"是两条**独立**的
+    // 请求，都走控制连接，靠 frame.index 配对。这里单独断言一次的原因很
+    // 具体：服务端曾经忘了回显 index，于是这条请求永远配不上、干等 10 秒
+    // 超时，而端到端其它场景全绿——因为 CLI 的列举走的是另一条路径。
+    QObject::connect(&core, &relayer::app::CoreService::peerListReceived, &app, [&](const QList<relayer::app::PeerRow>& rows) {
+        sawPeerList = true;
+        std::printf("SMOKE_PEERLIST count=%lld\n", static_cast<long long>(rows.size()));
+        std::fflush(stdout);
+    });
+
     QObject::connect(&core, &relayer::app::CoreService::remoteBrowseFinished, &app,
                      [&](bool ok, bool root, const QString& summary, const QList<relayer::app::RemoteRow>& rows) {
                          browsed = true;
@@ -222,6 +235,27 @@ int main(int argc, char** argv)
                          if (browseTwice && phase == 1) {
                              // 给测试脚本 6 秒窗口去杀中继（它看到 phase=1 就动手）。
                              QTimer::singleShot(6000, &app, [secondBrowse] { (*secondBrowse)(0); });
+                             return;
+                         }
+                         if (selfSend.isEmpty() && !sawPeerList) {
+                             // 列举回来不等于列表回来了——它们是两条请求。
+                             // 等最多 3 秒；不来就当成失败，别拿"列举成功"
+                             // 掩盖"列表永远超时"。
+                             auto wait = std::make_shared<std::function<void(int)>>();
+                             *wait = [&app, &sawPeerList, wait](int n) {
+                                 if (sawPeerList) {
+                                     app.exit(0);
+                                     return;
+                                 }
+                                 if (n >= 30) {
+                                     std::printf("SMOKE_NO_PEERLIST\n");
+                                     std::fflush(stdout);
+                                     app.exit(9);
+                                     return;
+                                 }
+                                 QTimer::singleShot(100, &app, [wait, n] { (*wait)(n + 1); });
+                             };
+                             (*wait)(0);
                              return;
                          }
                          app.exit(0);

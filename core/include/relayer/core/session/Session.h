@@ -236,7 +236,10 @@ public:
     // 只做会话自己知道的两件事：改 assignedId_、发 kAnswerId。
     // **注册表（peers_/sessions_）的迁移是调用方的事**——Session 不持有
     // 那张表，也不该猜它的锁与生命周期。
-    [[nodiscard]] Status assignPeerId(std::string newId);
+    // requestIndex：对应 kClaimId 的请求号，会原样回显在 kAnswerId 里
+    // （PROTOCOL.md §2.3「应答与对应请求同号」）。默认 0 给"服务端内部
+    // 主动改名"那条路用——它不是应答，本来就没有请求号。
+    [[nodiscard]] Status assignPeerId(std::string newId, std::int64_t requestIndex = 0);
 
     [[nodiscard]] bool authenticated() const noexcept
     {
