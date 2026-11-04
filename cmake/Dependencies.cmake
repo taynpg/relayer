@@ -40,7 +40,10 @@ add_library(relayer_json INTERFACE)
 target_include_directories(relayer_json INTERFACE ${RELAYER_THIRD_PARTY_DIR}/nlohmann)
 
 add_library(relayer_miniz INTERFACE)
-target_include_directories(relayer_miniz INTERFACE ${RELAYER_THIRD_PARTY_DIR}/miniz)
+# SYSTEM 同 asio：miniz.h 里有一堆 `static MZ_FORCEINLINE` 的便捷函数，
+# 只用了其中两个时其余的会报 -Wunused-function，而本项目的 -Werror 会把
+# 它们变成错误。三方代码不该被我们的告警标准约束。
+target_include_directories(relayer_miniz SYSTEM INTERFACE ${RELAYER_THIRD_PARTY_DIR}/miniz)
 
 # spdlog：按 header-only 使用（vendored 版本只含头文件）。
 # 与 {fmt} 共用同一份 fmt，避免编译出两份格式化实现（否则会报符号冲突）。

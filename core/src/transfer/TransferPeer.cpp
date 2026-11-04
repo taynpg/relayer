@@ -435,7 +435,7 @@ void TransferPeer::sendReadyChunks()
         if (!paramsLogged) {
             paramsLogged = true;
             std::fprintf(stderr, "[prof] 参数: chunk=%u 窗口=%u块 读盘上限=%u 写盘上限=%u 缓冲上限=%u\n", sender_->chunkSize(),
-                         sender_->windowChunks(), config_.sender.maxReadInFlight, config_.receiver.maxWriteInFlight,
+                         sender_->windowChunks(), config_.sender.maxReadInFlight, config_.receiver.maxBufferedChunks,
                          config_.receiver.maxBufferedChunks);
             std::fflush(stderr);
         }
@@ -479,12 +479,16 @@ void TransferPeer::sendReadyChunks()
         f.index = static_cast<std::int64_t>(chunk.chunkIndex);
         f.to = toPeerId_;
         f.body = std::move(body);
+        if (chunk.compressed) {
+            f.flags = static_cast<std::uint16_t>(f.flags | protocol::kFlagCompressed);
+        }
 
         {
             ScopedTimer t(prof().frameNs);
             sendFrame(std::move(f));
         }
         ++stats_.chunksSent;
+        stats_.payloadBytesSent += chunk.data.size();
         chunkSentAt_[chunk.chunkIndex] = std::chrono::steady_clock::now();
     }
 
@@ -763,7 +767,9 @@ void TransferPeer::handleChunkData(const Frame& frame)
     Status st;
     {
         ScopedTimer t(prof().acceptNs);
-        st = receiver_->acceptChunk(chunk.chunkIndex, chunk.payload, chunk.payloadLen, post);
+        // 压缩标志逐帧看：同一路传输里"压得动的块"和"压不动的块"混着走，
+        // 按配置推断会让接收方把原文当 zlib 流去解。
+        st = receiver_->acceptChunk(chunk.chunkIndex, chunk.payload, chunk.payloadLen, post, frame.isCompressed());
     }
 
     if (st.code == ErrorCode::kAlreadyExists) {

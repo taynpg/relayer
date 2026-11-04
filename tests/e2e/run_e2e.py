@@ -408,6 +408,9 @@ def make_file(path: Path, size: int) -> str:
 
     不用 os.urandom：内容随机的话，失败重跑时无法区分"这次传输错了"还是
     "这次换了内容"。确定性内容让同样的失败可以反复复现。
+
+    注意这份内容**是可压缩的**：`(i*131+seed*17+7) & 0xFF` 的周期是 256 字节，
+    deflate 能压两个数量级。要"压不动的数据"用 make_random_file。
     """
     h = hashlib.sha256()
     remaining = size
@@ -420,6 +423,42 @@ def make_file(path: Path, size: int) -> str:
             h.update(block)
             remaining -= n
             seed += 1
+    return h.hexdigest()
+
+
+def make_text_file(path: Path, size: int) -> str:
+    """高重复文本：zlib 能压两个数量级，用来验证"压缩真的生效"。"""
+    line = b"2026-11-04 20:00:00 INFO relayer: chunk sent ok, throughput looks fine\n"
+    h = hashlib.sha256()
+    with open(path, "wb") as f:
+        written = 0
+        while written < size:
+            n = min(len(line) * 4096, size - written)
+            block = (line * (n // len(line) + 1))[:n]
+            f.write(block)
+            h.update(block)
+            written += n
+    return h.hexdigest()
+
+
+def make_random_file(path: Path, size: int, seed: bytes = b"relayer-e2e") -> str:
+    """确定性的**不可压缩**内容（sha256 计数器模式）。
+
+    为什么要专门造一个：上面那份 make_file 的周期只有 256 字节，deflate 一
+    眼就看穿了——拿它测"压不动就按原样发"，用例会永远通过，因为压缩其实
+    生效了。
+    """
+    h = hashlib.sha256()
+    with open(path, "wb") as f:
+        written = 0
+        counter = 0
+        while written < size:
+            block = hashlib.sha256(seed + counter.to_bytes(8, "little")).digest()
+            counter += 1
+            n = min(len(block), size - written)
+            f.write(block[:n])
+            h.update(block[:n])
+            written += n
     return h.hexdigest()
 
 
@@ -1415,6 +1454,82 @@ def drop_chunks(workdir: Path, bin_dir: Path) -> None:
         # 原始每个块一帧，丢了 2 块又各补一帧。总数对不上说明有块被发了
         # 两次以上——那通常意味着 ACK 丢了解析或窗口状态回退。
         expect_eq(stats.get("chunksSent"), total + len(dropped), "数据帧总数（原始 + 重传）")
+    finally:
+        c.shutdown()
+
+
+@scenario("compressed-transfer", "压缩载荷：可压缩文件上线字节远小于原文，内容一致")
+def compressed_transfer(workdir: Path, bin_dir: Path) -> None:
+    """压缩功能的端到端验收。
+
+    难点在于"内容对不对"**证明不了压缩生效**——压缩只改线上字节，Merkle
+    根始终按原文算，所以压缩没生效时内容照样对。唯一的证据是发送端的
+    `payloadBytesSent`（块载荷实际放上线的字节数）。
+
+    所以这条场景真正断言的是那个数字：8MB 文本压完应当远小于 1/4。
+    只比内容的话，把 --compress 接成一个空开关也能通过。
+    """
+    size = 8 << 20
+
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        src = c.src / "text.bin"
+        # 高重复文本：zlib 能压两个数量级。make_file 造的是伪随机内容，
+        # 那种数据压不动，正好留给"压不动就按原样发"的另一半（下面断言）。
+        want = make_text_file(src, size)
+
+        # 接收端不需要任何开关：压缩是逐帧标志位，不是配置协商。
+        recv, rid = c.start_receiver(idle_timeout=120)
+        sender = c.send(src, rid, extra=["--compress", "--stats", "--idle-timeout", "120"])
+
+        rc = c.wait_all([sender, recv], 180)
+        expect_eq(rc[0], 0, "发送端退出码")
+        expect_eq(rc[1], 0, "接收端退出码")
+
+        got = c.dst / "text.bin"
+        expect(got.exists(), "目标文件不存在")
+        expect_eq(sha256_of(got), want, "内容哈希")
+        expect_no_fragment(c.dst, "text.bin")
+
+        stats = parse_stats(sender.wait_for("STATS ", 5.0))
+        wire = stats.get("payloadBytesSent")
+        expect(wire is not None, "STATS 里没有 payloadBytesSent")
+        expect(wire < size // 4, f"压缩后的上线字节 {wire} 不够小（原文 {size}）——压缩可能没生效")
+        # 压缩不该带来重传：块变小之后一次能塞满窗口，对端的缓冲区必须
+        # 吃得下（曾经因为背压上限 16 < 窗口 48，这里会等满 3 秒重传超时）。
+        expect_eq(stats.get("chunksRetransmitted"), 0, "压缩传输不该有重传")
+    finally:
+        c.shutdown()
+
+
+@scenario("compressed-incompressible", "压缩载荷：压不动的数据按原样发，不白花 CPU")
+def compressed_incompressible(workdir: Path, bin_dir: Path) -> None:
+    """已经压过的数据（zip/jpg/随机字节）不该被"压缩"。
+
+    两个断言：
+      - 内容一致（原文通路的长度校验没被压缩分支破坏）；
+      - 上线字节恰好等于原文——说明每块都被 Deflate 的收益门槛挡回来了，
+        而不是"压了但变大"。
+    """
+    size = 4 << 20
+
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        src = c.src / "random.bin"
+        want = make_random_file(src, size)
+
+        recv, rid = c.start_receiver(idle_timeout=120)
+        sender = c.send(src, rid, extra=["--compress", "--stats", "--idle-timeout", "120"])
+
+        rc = c.wait_all([sender, recv], 180)
+        expect_eq(rc[0], 0, "发送端退出码")
+        expect_eq(rc[1], 0, "接收端退出码")
+        expect_eq(sha256_of(c.dst / "random.bin"), want, "内容哈希")
+
+        stats = parse_stats(sender.wait_for("STATS ", 5.0))
+        expect_eq(stats.get("payloadBytesSent"), size, "压不动的数据必须按原样发")
     finally:
         c.shutdown()
 

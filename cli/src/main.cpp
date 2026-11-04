@@ -80,6 +80,8 @@ void printUsage()
                 "                           （默认关闭：一次性操作应当有明确的失败结论）\n"
                 "      --reconnect-delay <sec>   第一次重试前等多久（默认 2，之后指数退避）\n"
                 "      --reconnect-attempts <n>  最多连续重试几次，0 = 不限（默认 0）\n"
+                "      --compress           发送时压缩块载荷（zlib）；压不动的块按原样发\n"
+                "                           只影响发送，接收方按帧上的标志位处理\n"
                 "  -q, --quiet              不打印进度，只在结束时输出一行结论\n"
                 "      --stats              结束时额外输出一行统计（STATS k=v ...），供脚本判断\n"
                 "  -h, --help               显示本帮助\n"
@@ -336,6 +338,9 @@ ParseResult parseArgs(int argc, char** argv)
             }
             r.args.config.reconnect.maxAttempts = static_cast<int>(n);
             r.args.config.reconnect.enabled = true;
+        } else if (a == "--compress") {
+            // 压缩块载荷（PROTOCOL.md §9.4.2）。只影响发送。
+            r.args.config.compress = true;
         } else if (a == "-q" || a == "--quiet") {
             r.args.quiet = true;
         } else if (a == "--stats") {
@@ -674,11 +679,15 @@ int main(int argc, char** argv)
     // 处理，而结论那行在失败时走 stderr。同一路输出（stdout）便于抓。
     if (a.stats) {
         const auto& s = outcome.stats;
+        // payloadBytesSent 是压缩功能唯一的外部证据：它和源文件大小一比
+        // 就知道压缩有没有真的生效（内容对不对看不出来——压缩只改线上
+        // 字节，不改 Merkle 根）。
         std::printf("STATS chunksSent=%llu chunksReceived=%llu chunksRetransmitted=%llu "
-                    "duplicateChunks=%llu acksSent=%llu acksReceived=%llu\n",
+                    "duplicateChunks=%llu acksSent=%llu acksReceived=%llu payloadBytesSent=%llu\n",
                     static_cast<unsigned long long>(s.chunksSent), static_cast<unsigned long long>(s.chunksReceived),
                     static_cast<unsigned long long>(s.chunksRetransmitted), static_cast<unsigned long long>(s.duplicateChunks),
-                    static_cast<unsigned long long>(s.acksSent), static_cast<unsigned long long>(s.acksReceived));
+                    static_cast<unsigned long long>(s.acksSent), static_cast<unsigned long long>(s.acksReceived),
+                    static_cast<unsigned long long>(s.payloadBytesSent));
         std::fflush(stdout);
     }
 

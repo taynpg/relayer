@@ -8,6 +8,7 @@
 add_executable(common_test
     common/Sha256Test.cpp
     common/CryptoTest.cpp
+    common/DeflateTest.cpp
 )
 target_link_libraries(common_test PRIVATE relayer_common Catch2::Catch2WithMain)
 target_include_directories(common_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

@@ -45,6 +45,9 @@ struct TransferStats {
     std::uint64_t duplicateChunks = 0;
     std::uint64_t acksSent = 0;
     std::uint64_t acksReceived = 0;
+    // 发送方：块载荷实际放上线的字节数（压缩后）。与源文件大小之比就是
+    // 压缩省了多少；接收方恒为 0。
+    std::uint64_t payloadBytesSent = 0;
 };
 
 // 在线对端（kAnswerClientList 的一项）。
@@ -141,6 +144,17 @@ struct ClientConfig {
     std::string host = "127.0.0.1";
     std::uint16_t port = 9527;
     std::string password;
+
+    // 压缩块载荷（PROTOCOL.md §9.4.2）。默认关。
+    //
+    // 只影响**发送**：接收方按每帧的标志位处理，所以"我开了压缩、对端没开"
+    // 不会出问题（对端照样能收）。反过来"对端开了、我没开"也没问题——
+    // 那本来就是不压缩地收。
+    //
+    // 值不值得开取决于文件类型：源码/日志/CSV 能省一半以上，已压缩的
+    // （zip/jpg/mp4）只会白白多花 CPU，而 Deflate 的收益门槛会把它挡掉
+    // （压不小就按原样发）。
+    bool compress = false;
 
     // 载荷加密的口令（PROTOCOL.md §6）。空 = 不加密。
     //

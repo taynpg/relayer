@@ -66,6 +66,13 @@ namespace relayer::core::transfer {
 struct ReceivedChunk {
     std::uint32_t chunkIndex = 0;
     std::vector<char> data;
+
+    // `data` 是压缩过的（zlib 流），解压在工作线程上做。
+    //
+    // 长度校验因此挪到解压之后：线上的长度是压缩后长度，与"这一块应该
+    // 多长"没有关系。`lengthOf(chunkIndex)` 仍然是权威——它既是解压的
+    // 容量上限（挡住压缩炸弹），也是"解出来够不够"的判据。
+    bool compressed = false;
 };
 
 class TransferReceiver
@@ -83,13 +90,12 @@ public:
         // 触发丢块重传（见 TransferSender::Config::windowBytes 的说明）。
         std::uint32_t maxBufferedChunks = 64;
 
-        // 同时在写盘的任务数上限。与上面那个是独立约束：
-        // 上面管"内存里堆着多少块"，这里管"磁盘上同时排着多少请求"。
-        //
-        // 慢盘时这里先满，快盘慢网时上面那个先满。分开才能看出瓶颈在哪。
-        // 同时写盘的块数。写盘本身在 writeMu_ 上串行（流的定位是共享
-        // 状态），所以这个数字只影响"排队深度"，不是并行度。
-        std::uint32_t maxWriteInFlight = 16;
+        // 曾经还有一个 maxWriteInFlight（"同时写盘的块数"），2026-11-04 删掉了：
+        // 它与上面那个数**统计的是同一个变量**（已收未落盘的块数），两个一起
+        // 卡等于取小值——实际生效的是 16 < 窗口 48，于是"一贴边就丢块"变成
+        // 了常态。而丢块的代价是等满重传超时（3 秒），见 TransferPeer 的
+        // checkRetransmit。写盘本身在 writeMu_ 上串行，所谓"并发写盘数"
+        // 只是线程池队列深度，不该当成独立的背压依据。
 
         // 落盘时是否 fsync。默认关：逐块 fsync 在机械盘上能把吞吐压到
         // 1/10，而它的收益只是"断电时不丢已 ACK 的块"。
@@ -145,6 +151,10 @@ public:
 
     // 收下一块，提交写盘。
     //
+    // compressed = true 表示 data 是 zlib 流，写盘之前要先解压。解压发生在
+    // **工作线程**上（跟着写盘任务走），所以这里的长度校验只管"压缩后长度
+    // 是否像个 zlib 流"，真正的长度校验在解压时按 lengthOf(chunkIndex) 卡。
+    //
     // 返回值：
     //   kOk        已受理（写盘是异步的，此刻还没落盘）
     //   kDuplicate 这一块已经收到并落盘了，丢弃即可——**不是错误**，
@@ -152,7 +162,8 @@ public:
     //   kBusy      背压上限到了，调用方应暂停并稍后重试（不要当失败处理，
     //              更不要断开连接）
     //   其他       chunkIndex 越界、描述非法、已取消等真错误
-    [[nodiscard]] Status acceptChunk(std::uint32_t chunkIndex, const void* data, std::size_t len, const PostFn& post);
+    [[nodiscard]] Status acceptChunk(std::uint32_t chunkIndex, const void* data, std::size_t len, const PostFn& post,
+                                     bool compressed = false);
 
     // 写盘完成后由投递回调调用。public 的理由同 TransferSender::onChunkReady。
     void onChunkWritten(ReceivedChunk chunk);
@@ -279,7 +290,7 @@ private:
     Status writeError_;
 
     // 在写但没回来的任务数。它和 written_.size() 是两件事：
-    // 前者是本类自己的在飞量（受 maxWriteInFlight 约束），
+    // 前者是本类自己的在飞量（受 maxBufferedChunks 约束），
     // 后者是"总共收了多少块"。
     std::uint32_t inFlight_ = 0;
 

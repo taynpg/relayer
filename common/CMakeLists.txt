@@ -22,9 +22,14 @@ add_library(relayer_common STATIC
     src/crypto/Sha256.cpp
     src/crypto/Aes256Gcm.cpp
     src/crypto/Random.cpp
+    src/compress/Deflate.cpp
 )
 
 target_include_directories(relayer_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# miniz：deflate/inflate。同样是"纯原语"，谁都能用；放在这一层之后，核心库
+# 的头文件里不再出现 tdefl/tinfl 的任何类型。
+target_link_libraries(relayer_common PUBLIC relayer_miniz_impl)
 
 relayer_set_warnings(relayer_common)
 

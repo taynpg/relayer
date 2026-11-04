@@ -9,11 +9,11 @@
 > 已实装：请求号配对表（`core/protocol/Pairing`）、数据通道协商
 > （`PROTOCOL.md` §11.13）、常驻控制连接（`core/net/ControlLink`，多请求并发、
 > 各自独立超时）、数据连接（`core/net/TransferLink`）、断线重连与断点续传、
-> 载荷加密（`--encrypt`）。**`cli::Client` 内部已经换成这两条连接**，公共 API
-> 一行未改，24 个三进程端到端场景全绿。
+> 载荷加密（`--encrypt`）、块载荷压缩（`--compress`）。**`cli::Client` 内部
+> 已经换成这两条连接**，公共 API 一行未改，26 个三进程端到端场景全绿。
 >
-> 待实装：压缩传输，以及按 v1 交互重写的界面（统一右键菜单 / 拖拽 /
-> 等待窗口 / 任务窗口）。
+> **待实装只剩界面**：按 v1 交互重写 Qt 前端（统一右键菜单 / 拖拽 / 等待窗口 /
+> 任务窗口），GUI 的重连与加密入口也并入那一项。
 >
 > 文档：[`docs/DESIGN.md`](docs/DESIGN.md) 是架构与决策（§3.3 双连接），
 > [`docs/PROTOCOL.md`](docs/PROTOCOL.md) 是线协议（唯一权威）。
@@ -33,7 +33,7 @@ CI 只在打 tag 时运行（`v*`），也支持手动触发。
 | 客户端 | 传输引擎接入双连接 | ✅ `cli::Client` |
 | 客户端 | 断线重连（重连后按残片续传） | ✅ `ClientConfig::ReconnectPolicy`（GUI 的接线并入界面重写） |
 | 界面 | v1 的面板与全部交互 | ⬜ |
-| 附加 | 压缩传输 | ⬜（目录打包已有；缺的是按块压缩载荷本身） |
+| 附加 | 压缩传输 | ✅ `--compress`（块载荷 deflate，逐帧决定） |
 | 附加 | 载荷加密（AES-256-GCM） | ✅ `--encrypt` / `protocol::PayloadCipher`（GUI 的输入框并入界面重写） |
 
 ---

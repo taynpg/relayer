@@ -36,6 +36,7 @@ transfer::TransferPeer::Config TransferLink::peerConfig() const
         c.chunkSize = config_.chunkSize;
     }
     c.overwriteExisting = config_.overwriteExisting;
+    c.sender.compress = config_.compress;
     c.finalizeTimeout = config_.idleTimeout;
     c.answerTimeout = config_.answerTimeout;
     return c;
@@ -269,6 +270,7 @@ void TransferLink::onJobDone(std::uint64_t id, const transfer::TransferResult& r
             info.duplicateChunks = st.duplicateChunks;
             info.acksSent = st.acksSent;
             info.acksReceived = st.acksReceived;
+            info.payloadBytesSent = st.payloadBytesSent;
         }
         if (handler_.onFinished) {
             handler_.onFinished(info, result);
@@ -324,6 +326,7 @@ TransferLink::JobInfo TransferLink::infoOf(const Job& job) const
         info.duplicateChunks = st.duplicateChunks;
         info.acksSent = st.acksSent;
         info.acksReceived = st.acksReceived;
+        info.payloadBytesSent = st.payloadBytesSent;
     }
     return info;
 }

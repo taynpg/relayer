@@ -236,7 +236,6 @@ TransferPeer::Config peerConfig(std::uint32_t chunkSize = kChunk)
     c.sender.windowChunks = 8;
     c.sender.maxReadInFlight = 8;
     c.receiver.maxBufferedChunks = 16;
-    c.receiver.maxWriteInFlight = 4;
     return c;
 }
 

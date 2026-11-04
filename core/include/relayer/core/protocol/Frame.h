@@ -240,6 +240,15 @@ enum FrameFlags : std::uint16_t {
     // body <= kBodyCrcLimit 时置位。大块数据不带——每 4MB 加 4 字节 CRC 的
     // 收益远不如分块 Merkle 校验，而且会让"帧长 = 头 + 载荷"的计算变复杂。
     kFlagBodyCrc = 1u << 2,
+
+    // body 是**压缩后**的（zlib 流，PROTOCOL.md §9.4.2）。
+    //
+    // 只出现在分块数据帧上，而且逐帧独立：压不动的块按原样发、不置这一位。
+    // 所以同一路传输里两种帧会混着走，接收方必须逐帧看标志位，不能按
+    // "这次传输开了压缩"推断。
+    //
+    // 与加密的组合顺序：**先压缩再加密**。接收方反过来先解密再解压。
+    kFlagCompressed = 1u << 3,
 };
 
 [[nodiscard]] constexpr bool hasFlag(std::uint16_t flags, FrameFlags f) noexcept
@@ -312,6 +321,10 @@ struct Frame {
     [[nodiscard]] bool hasBodyCrc() const noexcept
     {
         return hasFlag(flags, kFlagBodyCrc);
+    }
+    [[nodiscard]] bool isCompressed() const noexcept
+    {
+        return hasFlag(flags, kFlagCompressed);
     }
 };
 

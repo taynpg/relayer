@@ -10,6 +10,7 @@
 #include <thread>
 #include <utility>
 
+#include "relayer/common/compress/Deflate.h"
 #include "relayer/common/crypto/Sha256.h"
 #include "relayer/core/transfer/MerkleTree.h"
 
@@ -410,6 +411,22 @@ std::uint32_t TransferSender::pump(const PostFn& post)
             if (rp.on) {
                 rp.readNs += since(tRead);
                 rp.totalNs += since(tTask);
+            }
+
+            // 压缩就在这个线程上做——它已经是工作线程了。
+            //
+            // deflate 一块 256 KiB 是毫秒级；放到 io 线程上会让心跳、ACK、
+            // 写队列一起排队，吞吐反而崩。读盘任务本来就有 16 个并发，
+            // 压缩天然摊到这 16 个线程上。
+            //
+            // deflateBlock 对"压不动"的数据返回空，这里就按原样发：多一层
+            // 压缩标志却只省几字节，是净亏损。
+            if (config_.compress) {
+                auto packed = compression::deflateBlock(chunk.data.data(), chunk.data.size());
+                if (!packed.empty()) {
+                    chunk.data = std::move(packed);
+                    chunk.compressed = true;
+                }
             }
 
             if (post) {

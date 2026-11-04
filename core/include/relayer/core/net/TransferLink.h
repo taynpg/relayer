@@ -108,6 +108,13 @@ public:
         // 10ms 一次既无意义又浪费。
         std::chrono::milliseconds progressInterval{100};
 
+        // 压缩块载荷（PROTOCOL.md §9.4.2）。默认关。
+        //
+        // 只有发送方用得上；接收方按每帧的标志位处理，不需要跟着配置——
+        // 这也意味着"一端开压缩、另一端没开"是安全的：老的一端照样能收
+        // （协议里写的标志位，不是配置协商）。
+        bool compress = false;
+
         // 载荷加密（PROTOCOL.md §6）。空 = 不加密。
         //
         // 与控制连接用同一个（口令相同、密钥相同），由上层派生一次再传进来。
@@ -144,6 +151,10 @@ public:
         std::uint64_t duplicateChunks = 0;
         std::uint64_t acksSent = 0;
         std::uint64_t acksReceived = 0;
+
+        // 发送方：块载荷实际放上线的字节数（压缩后）。压缩省了多少就看它
+        // 与文件大小之比——这是压缩功能唯一的外部证据。
+        std::uint64_t payloadBytesSent = 0;
     };
 
     struct Handler {

@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "relayer/common/compress/Deflate.h"
 #include "relayer/common/crypto/Sha256.h"
 #include "relayer/core/transfer/MerkleTree.h"
 #include "relayer/filestore/MemFileStore.h"
@@ -389,7 +390,6 @@ TEST_CASE("receiver reports kBusy when the buffer is full", "[transfer][receiver
 
     TransferReceiver::Config cfg;
     cfg.maxBufferedChunks = 2;
-    cfg.maxWriteInFlight = 2;
 
     TransferReceiver r(store, pool, cfg);
     std::uint32_t resumeFrom = 0;
@@ -722,7 +722,6 @@ TEST_CASE("receiver works with a real worker pool", "[transfer][receiver][thread
 
     TransferReceiver::Config cfg;
     cfg.maxBufferedChunks = 32;
-    cfg.maxWriteInFlight = 4;
 
     TransferReceiver r(store, pool, cfg);
     const auto target = dir.path("out.bin");
@@ -752,4 +751,73 @@ TEST_CASE("receiver works with a real worker pool", "[transfer][receiver][thread
     INFO("finalize error: " << res.error.message);
     REQUIRE(res.status == CompleteStatus::kOk);
     REQUIRE(readAll(store, target) == content);
+}
+
+// ===========================================================================
+// 压缩块（PROTOCOL.md §9.4.2）
+// ===========================================================================
+
+TEST_CASE("receiver inflates compressed chunks before writing", "[transfer][receiver][compress]")
+{
+    // 压缩只改线上表示：写盘的是原文，叶子哈希也该按原文算。后者靠
+    // finalize 的根校验兜底（下一个用例），这里先确认文件内容。
+    filestore::MemFileStore store;
+    WorkerPool pool(1);
+
+    const auto content = makeContent(3 * kChunk + 100);
+    const auto desc = makeDesc(content, kChunk);
+
+    TransferReceiver r(store, pool);
+    std::uint32_t resumeFrom = 0;
+    REQUIRE(r.open(desc, "out.bin", resumeFrom).ok());
+
+    // 照发送方的规则来：压得动就发压缩块，压不动（最后那块只有 100 字节，
+    // 重复周期还不如开销大）就按原样发。混着走正是真实流量里的常态。
+    const auto total = chunkCountFor(content.size(), kChunk);
+    std::uint32_t compressedChunks = 0;
+    for (std::uint32_t i = 0; i < total; ++i) {
+        const auto off = static_cast<std::size_t>(i) * kChunk;
+        const auto len = static_cast<std::size_t>(chunkLengthAt(i, content.size(), kChunk));
+        const auto packed = compression::deflateBlock(content.data() + off, len);
+        if (packed.empty()) {
+            REQUIRE(r.acceptChunk(i, content.data() + off, len, inlinePost()).ok());
+            continue;
+        }
+        ++compressedChunks;
+        REQUIRE(r.acceptChunk(i, packed.data(), packed.size(), inlinePost(), /*compressed=*/true).ok());
+    }
+    REQUIRE(compressedChunks > 0);   // 至少要真的走过压缩那条路
+
+    settle(r);
+    REQUIRE(r.writtenChunks() == total);
+    REQUIRE(readAll(store, "out.bin.relaypart") == content);
+}
+
+TEST_CASE("receiver rejects a corrupted compressed chunk", "[transfer][receiver][compress]")
+{
+    // 解压失败必须变成一次**写失败**，而不是把半截数据写进去：
+    // 那块不能进 written_，否则 ACK 会声称它已落盘，发送方不再重传，
+    // 最终根校验失败时残片已经是一份混合了坏块的东西。
+    filestore::MemFileStore store;
+    WorkerPool pool(1);
+
+    const auto content = makeContent(2 * kChunk);
+    const auto desc = makeDesc(content, kChunk);
+
+    TransferReceiver r(store, pool);
+    std::uint32_t resumeFrom = 0;
+    REQUIRE(r.open(desc, "out.bin", resumeFrom).ok());
+
+    auto packed = compression::deflateBlock(content.data(), kChunk);
+    REQUIRE_FALSE(packed.empty());
+    packed[packed.size() / 2] = static_cast<char>(packed[packed.size() / 2] ^ 0xFF);
+
+    REQUIRE(r.acceptChunk(0, packed.data(), packed.size(), inlinePost(), /*compressed=*/true).ok());
+    settle(r);
+
+    REQUIRE_FALSE(r.writeError().ok());
+    REQUIRE(r.writtenChunks() == 0);
+
+    // 平白塞进来的"压缩"数据长度不对也要被挡下（不是 zlib 流就别装）。
+    REQUIRE_FALSE(r.acceptChunk(1, packed.data(), 4, inlinePost(), /*compressed=*/true).ok());
 }

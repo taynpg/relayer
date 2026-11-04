@@ -1087,6 +1087,7 @@ struct Client::Impl {
         dc.password = config.password;
         dc.noAuth = config.serverAllowNoAuth;
         dc.payloadCipher = cipher;
+        dc.compress = config.compress;
         dc.requestedId = dataId;
         dc.receiveDir = targetPath;
         dc.chunkSize = config.chunkSize;
@@ -2251,6 +2252,7 @@ struct Client::Impl {
         lastStats.duplicateChunks = job.duplicateChunks;
         lastStats.acksSent = job.acksSent;
         lastStats.acksReceived = job.acksReceived;
+        lastStats.payloadBytesSent = job.payloadBytesSent;
 
         if (job.sending) {
             // **被打断 ≠ 失败**：链路断了而已，作业还能接着发。

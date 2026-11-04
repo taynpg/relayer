@@ -7,9 +7,18 @@
 #include <cstring>
 #include <utility>
 
+#include "relayer/common/compress/Deflate.h"
 #include "relayer/core/transfer/MerkleTree.h"
 
 namespace relayer::core::transfer {
+
+namespace {
+
+// 压缩块的线上长度下限：zlib 头（2）+ 至少一个空块的 deflate 块 + adler32（4）。
+// 比这还短的东西不可能是我们发出来的，当作协议错而不是"解压失败"。
+constexpr std::size_t kMinCompressedChunk = 8;
+
+}   // namespace
 
 namespace {
 
@@ -71,8 +80,8 @@ TransferReceiver::TransferReceiver(filestore::IFileStore& store, WorkerPool& poo
     if (config_.maxBufferedChunks == 0) {
         config_.maxBufferedChunks = 1;
     }
-    if (config_.maxWriteInFlight == 0) {
-        config_.maxWriteInFlight = 1;
+    if (config_.maxBufferedChunks == 0) {
+        config_.maxBufferedChunks = 1;
     }
 }
 
@@ -278,10 +287,11 @@ bool TransferReceiver::hasCapacity() const
     // 判"在飞"而不是"received_ 里有多少 true"：received_ 是判重用的，
     // 一块写完之后它仍然留着（下次重传要能被判重），所以它的 true 数
     // 只增不减，拿来做容量判断会让上限永久占满。
-    return inFlight_ < config_.maxBufferedChunks && inFlight_ < config_.maxWriteInFlight;
+    return inFlight_ < config_.maxBufferedChunks;
 }
 
-Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void* data, std::size_t len, const PostFn& post)
+Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void* data, std::size_t len, const PostFn& post,
+                                     bool compressed)
 {
     if (!opened_) {
         return Status::Fail(ErrorCode::kUnknown, "acceptChunk before open");
@@ -304,8 +314,17 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void* data,
     // 长度必须与描述算出来的完全一致。多给的字节表示对端对块大小的理解
     // 与描述不符，少给的表示它对最后一块的处理不对——两者都会让最终根
     // 对不上，但"对不上"远不如"当场指出哪一块不对"好查。
+    //
+    // 压缩过的块例外：线上的长度是**压缩后**长度，与 want 没关系。那一层
+    // 校验挪到解压时（容量就是 want，解出来必须正好 want 字节），在这里
+    // 只能做一个下限检查——zlib 流至少 2 字节头 + 4 字节 adler32 再加内容。
     const auto want = lengthOf(chunkIndex);
-    if (len != want) {
+    if (compressed) {
+        if (len < kMinCompressedChunk) {
+            return Status::Fail(ErrorCode::kProtocol,
+                                "chunk " + std::to_string(chunkIndex) + " compressed payload too short: " + std::to_string(len));
+        }
+    } else if (len != want) {
         return Status::Fail(ErrorCode::kProtocol, "chunk " + std::to_string(chunkIndex) + " length " + std::to_string(len) +
                                                       " != expected " + std::to_string(want));
     }
@@ -325,7 +344,7 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void* data,
             return Status::Fail(ErrorCode::kAlreadyExists, "chunk " + std::to_string(chunkIndex) + " already in flight");
         }
 
-        if (inFlight_ >= config_.maxBufferedChunks || inFlight_ >= config_.maxWriteInFlight) {
+        if (inFlight_ >= config_.maxBufferedChunks) {
             return Status::Fail(ErrorCode::kBusy, "receiver buffer full, pause reading");
         }
 
@@ -341,9 +360,10 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void* data,
     // vector<char> 没有 assign(ptr, count) 的重载（只有迭代器版），
     // resize + memcpy 是这里最直接的写法：一次分配 + 一次拷贝，
     // 中间不经过临时 string。
-    chunk.data.resize(want);
-    if (want != 0) {
-        std::memcpy(chunk.data.data(), data, want);
+    chunk.compressed = compressed;
+    chunk.data.resize(compressed ? len : want);
+    if (!chunk.data.empty()) {
+        std::memcpy(chunk.data.data(), data, chunk.data.size());
     }
 
     runningTasks_.fetch_add(1, std::memory_order_acq_rel);
@@ -372,6 +392,24 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void* data,
                 post([this, idx, e = std::move(st)]() mutable { onChunkWriteFailed(idx, std::move(e)); });
             }
         };
+
+        // 压缩的块先解压。**在工作线程上做**，不在 io 线程上：
+        // inflate 一块 256 KiB 是毫秒级，压在 io 线程上会让 ACK 与心跳
+        // 一起排队，而 ACK 是发送方腾窗口的唯一来源。
+        //
+        // 容量写死成 lengthOf(idx)：这既是长度校验（必须正好解出这么多），
+        // 也是压缩炸弹的边界——小输入解不出大输出。
+        std::vector<char> plain;
+        if (c.compressed) {
+            const auto expected = lengthOf(idx);
+            if (!compression::inflateBlock(c.data.data(), c.data.size(), expected, plain)) {
+                fail(Status::Fail(ErrorCode::kProtocol,
+                                  "chunk " + std::to_string(idx) + " inflate failed (corrupted, truncated, or wrong length)"));
+                return;
+            }
+        }
+        const char* payload = c.compressed ? plain.data() : c.data.data();
+        const auto payloadLen = c.compressed ? plain.size() : c.data.size();
 
         // 整段 seek/write/flush/sync 必须在同一把锁里：流的读写位置是
         // 流内状态，两个线程交错 seek 会把这一块写到别的块的偏移上。
@@ -402,7 +440,7 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void* data,
                 }
                 if (ws.ok()) {
                     const auto t2 = WClock::now();
-                    ws = writeStream_->write(c.data.data(), c.data.size());
+                    ws = writeStream_->write(payload, payloadLen);
                     if (wp.on) {
                         wp.writeNs += sinceW(t2);
                     }
@@ -435,7 +473,9 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void* data,
         // 在写盘线程上算，天然摊到多个并发任务里。
         crypto::Sha256::Digest leaf{};
         if (ws.ok()) {
-            leaf = leafHash(c.data.data(), c.data.size(), chunkSize_);
+            // 叶子哈希必须算**原文**：Merkle 根是发送方对原始内容建的，
+            // 压缩只是线上表示。这里用的是解压后的 payload，不是 c.data。
+            leaf = leafHash(payload, payloadLen, chunkSize_);
         }
 
         if (ws.ok()) {

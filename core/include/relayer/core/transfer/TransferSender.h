@@ -44,6 +44,13 @@ namespace relayer::core::transfer {
 struct ReadChunk {
     std::uint32_t chunkIndex = 0;
     std::vector<char> data;
+
+    // 这一块的 `data` 是**压缩过**的（zlib 流），不是原文。
+    //
+    // 压缩在读盘线程上做完（见 TransferSender），不在 io 线程上：deflate
+    // 一块 256 KiB 是毫秒级的 CPU 活，压在 io 线程上会让心跳和 ACK 一起
+    // 停摆——那正是"传输期间界面像死了一样"的老毛病。
+    bool compressed = false;
 };
 
 // PostFn（投递函数）定义在 TransferPipeline.h——它与接收侧共用，
@@ -86,6 +93,16 @@ public:
         // 太小会让每批发不满窗口，太大只是把内存里未发的块堆高。
         // 16 与窗口 48 块匹配：两三批就能填满一个窗口。
         std::uint32_t maxReadInFlight = 16;
+
+        // 压缩块载荷（PROTOCOL.md §9.4.2）。默认关。
+        //
+        // 关着的时候多出来的只是一个 if：不做压缩、不置标志位、帧格式与
+        // 老版本完全一致。
+        //
+        // 打开之后**只影响线上字节数**：分块、窗口、ACK、Merkle 校验全都
+        // 按原文算——根是对原始内容建的，压缩只是为了少占带宽。这也是它
+        // 能随手开关的原因。
+        bool compress = false;
     };
 
     // 不拥有任何东西；store 与 pool 的生命周期必须覆盖本对象。
