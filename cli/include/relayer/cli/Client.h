@@ -142,6 +142,42 @@ struct ClientConfig {
     std::uint16_t port = 9527;
     std::string password;
 
+    // 断线重连（v1 `ReconHelper` 的语义）。
+    //
+    // 默认关：CLI 的一次性操作"连不上就报错退出"才是可脚本化的契约，而
+    // 默默重试会让 `send` 在脚本里挂到天荒地老。GUI 与 `recv --reconnect`
+    // 显式打开。
+    //
+    // 打开之后能自动恢复的只有**发送**：对端收的是 `<目标>.relaypart`，
+    // 残片按块对齐保留着，重发同一份文件时对端从断点续传
+    // （PROTOCOL.md §9.5）。接收做不到——文件在对方手上，得等它重新发起；
+    // 本端能做的只是把接收挂回去，别让"重连成功"变成"连接活着但收不到"。
+    struct ReconnectPolicy {
+        bool enabled = false;
+
+        // 第一次重试前等多久。给中继留出重启的时间，也避免断线瞬间的
+        // 重连风暴（中继重启时所有客户端会在同一刻掉线）。
+        std::chrono::milliseconds delay{2000};
+
+        // 指数退避的上限。第 n 次等 min(delay * 2^(n-1), maxDelay)。
+        std::chrono::milliseconds maxDelay{30000};
+
+        // 连续失败多少次就放弃。0 = 不限（GUI 的常驻连接用这个）。
+        int maxAttempts = 0;
+    };
+    ReconnectPolicy reconnect;
+
+    // 即将重连：第 attempt 次，delay 毫秒后开始。给界面/日志用。
+    //
+    // 单独一个回调而不是复用 onReceiveFailed：断线与"这一路传失败了"
+    // 是两件事，混进同一条通道后，用户看到的日志会把"重连中"读成"传输
+    // 失败"。它也不是 onDone——重连成功时操作并没有结束。
+    std::function<void(int attempt, std::chrono::milliseconds delay)> onReconnecting;
+
+    // 重连成功、控制连接恢复。被中断的发送会自己续上，这个回调是给界面
+    // 刷新"已连接"状态用的。
+    std::function<void()> onReconnected;
+
     // 显式声明"中继已关闭认证"（对应服务端的 --allow-no-auth）。
     //
     // 为什么不能从 password 为空自动推断：服务端侧的 ServerHandshake 明确

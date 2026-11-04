@@ -30,6 +30,7 @@ import argparse
 import codecs
 import hashlib
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -455,6 +456,35 @@ def expect_no_fragment(dst: Path, name: str) -> None:
     """
     part = dst / (name + ".relaypart")
     expect(not part.exists(), f"留下了残片 {part.name}（{part.stat().st_size if part.exists() else 0} 字节）")
+
+
+_PROGRESS_RE = re.compile(r"([0-9]+\.[0-9])%")
+
+
+def _wait_progress(p: "Process", lo: float, hi: float, timeout: float) -> float:
+    """等这个进程的进度落进 [lo, hi]，返回那个百分比。
+
+    只看**最后一条**进度行：日志是追加的，早期的小百分比会永久留在缓冲
+    里，扫全量的话一上来就命中第一个 4.4%，等于没等。
+
+    存在的理由：断线重连要在"正在搬字节"的瞬间下手。睡固定时间在慢机器
+    上会杀得太早（握手都没完成），在快机器上会杀得太晚（已经传完），
+    两种都会让用例悄悄退化成"什么都没测"。
+    """
+    deadline = time.monotonic() + timeout
+    last = 0.0
+    while time.monotonic() < deadline:
+        for line in reversed(p.pill()):
+            m = _PROGRESS_RE.search(line)
+            if m:
+                last = float(m.group(1))
+                if lo <= last <= hi:
+                    return last
+                break
+        if p.proc.poll() is not None:
+            break
+        time.sleep(0.02)
+    raise E2EFailure(f"{p.name} 的进度一直没落进 {lo:g}-{hi:g}%（最后看到 {last:g}%）\n{p.tail()}")
 
 
 # ---------------------------------------------------------------------------
@@ -1112,6 +1142,81 @@ def resume_valid(workdir: Path, bin_dir: Path) -> None:
         expect(got.exists(), "续传之后目标文件不存在")
         expect_eq(sha256_of(got), want, "续传后的内容哈希")
         expect_no_fragment(c.dst, "resume.bin")
+    finally:
+        c.shutdown()
+
+
+@scenario("reconnect-resume", "传输中杀掉中继再拉起：两端自动重连，残片续传，内容一致")
+def reconnect_resume(workdir: Path, bin_dir: Path) -> None:
+    """断线重连的端到端验收。
+
+    为什么要杀**中继**而不是杀某个客户端：杀客户端测的是"对端消失"，
+    那是另一条路径（idle 超时 + kPeerGone）。中继死掉时两端都是受害者，
+    这正是重连机制该起作用的情形，也是真实场景里最常见的一种（中继重启、
+    网络抖动）。
+
+    三个断言缺一不可：
+
+      - 两端都从"断线"里自己爬出来（日志里有 RECONNECTED，退出码 0）；
+      - 断线瞬间的残片是**源文件的前缀**（不是带空洞的残片）——这一条
+        是回归防线：写盘是乱序的，文件长度会越过连续区，那种残片被当成
+        "已经有数据"来续传，最终 merkle 根必然对不上；
+      - 最终内容逐字节一致，且不留下 .relaypart。
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        src = c.src / "payload.bin"
+        want = make_file(src, 64_000_000)
+
+        # 两个 --id 是必须的：重连之后要回到同一个身份，否则发送方按
+        # 旧 id 协商数据连接会一直撞"对端不在了"。GUI 一直如此（身份由
+        # 用户定），这里的命令行参数就是它的等价物。
+        recv, rid = c.start_receiver(idle_timeout=120, extra=["--id", "rx", "--reconnect", "--reconnect-delay", "1"])
+        expect_eq(rid, "rx", "声明身份后的 ASSIGNED_ID")
+
+        # 16KB 分块不是为了压测，是为了让 64MB 传得够久——不然在快机器上
+        # 还没来得及杀，传输就结束了，这条用例会悄悄退化成"什么都没测"。
+        sender = c.send(src, rid,
+                        extra=["--id", "tx", "--reconnect", "--reconnect-delay", "1",
+                               "--chunk-size", "16384", "--idle-timeout", "120"])
+
+        # 等它真的动起来再杀。进度行是唯一的"已经开始搬字节"的证据；
+        # 只睡固定时间会在慢机器上杀太早（握手都没完成）、在快机器上
+        # 杀太晚（已经传完）。
+        pct = _wait_progress(recv, lo=3.0, hi=95.0, timeout=90)
+        expect(sender.proc.poll() is None, f"发送端在 {pct:.1f}% 之前就退出了，没测到重连")
+
+        c.server.kill()
+        # 留一点时间让接收端 abort 并把残片截到连续前缀，再取样。
+        time.sleep(0.6)
+        part = c.dst / "payload.bin.relaypart"
+        expect(part.exists(), "断线之后没有留下残片（续传就无从谈起）")
+        have = part.stat().st_size
+        expect(0 < have < 64_000_000, f"残片大小不合理：{have}")
+        with open(part, "rb") as f:
+            head = f.read(have)
+        with open(src, "rb") as f:
+            expect_eq(hashlib.sha256(head).hexdigest(), hashlib.sha256(f.read(have)).hexdigest(),
+                      f"残片（{have} 字节）必须是源文件的前缀")
+
+        # 客户端退避 1 秒后开始重试，这里把中继拉回来接住它。
+        c.start_server()
+
+        rc = c.wait_all([sender, recv], 120)
+        expect_eq(rc[0], 0, "发送端退出码")
+        expect_eq(rc[1], 0, "接收端退出码")
+
+        for p in (sender, recv):
+            lines = p.pill()
+            expect(any("RECONNECTED" in x for x in lines), f"{p.name} 没有重连成功\n{p.tail()}")
+            expect(any("RECONNECTING attempt=1" in x for x in lines), f"{p.name} 没有记录重连尝试\n{p.tail()}")
+
+        got = c.dst / "payload.bin"
+        expect(got.exists(), "重连之后目标文件不存在")
+        expect_eq(got.stat().st_size, 64_000_000, "目标文件大小")
+        expect_eq(sha256_of(got), want, "重连续传后的内容哈希")
+        expect_no_fragment(c.dst, "payload.bin")
     finally:
         c.shutdown()
 

@@ -190,6 +190,17 @@ public:
         return bytesReceived_;
     }
 
+    // 底层 TCP 是否还开着（kOpen）。
+    //
+    // 与"会话已结束"不是一件事：对端把连接关了之后，本端要等到下一次读
+    // 出错才会走关闭流程。这中间的一段时间里，send 会以
+    // "connection is not open" 失败，而会话状态看起来一切正常。
+    // 上层判"这次失败是本端链路没了，还是对端拒绝了业务"时要用它。
+    [[nodiscard]] bool isActive() const noexcept
+    {
+        return state_ == ConnectionState::kOpen;
+    }
+
 private:
     Connection(asio::io_context& ctx, asio::ip::tcp::socket socket, ConnectionHandler handler, ConnectionOptions options);
 
@@ -197,11 +208,6 @@ private:
     void startWrite();
     void notifyEstablished();
     void doClose(Status reason);
-
-    [[nodiscard]] bool isActive() const noexcept
-    {
-        return state_ == ConnectionState::kOpen;
-    }
 
     asio::strand<asio::io_context::executor_type> strand_;
     asio::ip::tcp::socket socket_;

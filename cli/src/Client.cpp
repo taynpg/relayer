@@ -59,6 +59,13 @@ namespace transfer = core::transfer;
 constexpr auto kNegotiateRetryDelay = std::chrono::milliseconds(200);
 constexpr int kNegotiateMaxAttempts = 40;
 
+// 重连之后的协商预算。
+//
+// 对端这时往往也在重连：它要先连上中继、再把数据连接拿起来，才轮得到
+// 应答我们。8 秒在这个场景里偏紧——"对端其实回来了，发送方已经放弃"。
+// 150 × 200ms = 30 秒，仍然有界。
+constexpr int kNegotiateMaxAttemptsAfterReconnect = 150;
+
 // 慢请求的应答时限：目录取回与解压的应答在**对端压缩/解压完成之后**才发
 // （PROTOCOL.md §11.10.2 / §11.12），几十秒是正常值。
 constexpr auto kSlowAskTimeout = std::chrono::seconds(120);
@@ -95,7 +102,7 @@ struct Client::Impl {
     Impl(asio::io_context& ctxIn, ClientConfig cfg, std::function<void(const ProgressReport&)> prog,
          std::function<void(const Outcome&)> done)
         : ctx(ctxIn), config(std::move(cfg)), onProgress(std::move(prog)), onDone(std::move(done)),
-          alive(std::make_shared<char>(0)), idleTimer(ctxIn), watchdog(ctxIn), connectTimer(ctxIn)
+          alive(std::make_shared<char>(0)), reconnectTimer(ctxIn), idleTimer(ctxIn), watchdog(ctxIn), connectTimer(ctxIn)
     {
     }
 
@@ -156,7 +163,25 @@ struct Client::Impl {
 
     // 在飞的一路发送。进度与结论都按 job 存：并发时"这条进度是谁的"
     // 必须能区分，只有一组全局数字的界面会把 B 的进度画到 C 那一行。
-    struct SendEntry {
+    //
+    // ## 为什么按"本进程的稳定编号"存，而不是按 TransferLink 的 job id
+    //
+    // 重连会把数据连接整个换掉，旧 job id 随之作废；而这里的作业要跨重连
+    // 存活（断点续传靠它）。所以两套编号分开：
+    //   SendJob::id        本进程内稳定，重连前后是同一个
+    //   SendJob::linkJobId 当前挂在哪条数据连接上的哪一路；0 = 已被打断、等续发
+    struct SendJob {
+        std::uint64_t id = 0;
+        std::uint64_t linkJobId = 0;
+
+        std::string source;
+        std::string remoteName;   // 已经定好的落点名（不交给下层去猜）
+        std::string peerId;       // 对端的**控制连接** id：重连后重新协商要用
+        std::string peerDataId;   // 当前已知的对端数据连接 id
+
+        // 已经因为断线重发过几次。
+        int attempts = 0;
+
         std::function<void(const Outcome&)> done;
         std::function<void(const ProgressReport&)> progress;
 
@@ -165,7 +190,32 @@ struct Client::Impl {
         std::chrono::steady_clock::time_point lastAt = std::chrono::steady_clock::now();
         double speed = 0.0;
     };
-    std::map<std::uint64_t, SendEntry> sends;
+    std::map<std::uint64_t, SendJob> sends;              // key = 稳定编号
+    std::map<std::uint64_t, std::uint64_t> linkToSend;   // linkJobId → 稳定编号
+    std::uint64_t nextSendId = 1;
+
+    // ---- 断线重连 ----
+    //
+    // 三个状态说清楚：
+    //   suspended        断线了、正在重连（或等下一次重试）。这期间不结束
+    //                    操作，也不让空闲看门狗把"没有进展"判成对端失联。
+    //                    **整个重连周期都为真**，不按单次尝试重置。
+    //   reconnectPending 当前这一次已经在排队/握手。断线会同时惊动多条路径
+    //                    （控制连接的 onClosed、数据连接的 onClosed、连接
+    //                    看门狗），没有它，"重试 3 次"会被记成 1 次断线
+    //                    失败 3 次。
+    //   reconnectAttempts 连续失败次数。成功后清零，放弃时用来报"N 次"。
+    //   awaitReconnectReady 控制连接已重建、还没拿到最终身份。身份定下来
+    //                    之前不能恢复数据连接——它的名字取决于身份。
+    asio::steady_timer reconnectTimer;
+    int reconnectAttempts = 0;
+    bool suspended = false;
+    bool reconnectPending = false;
+    bool awaitReconnectReady = false;
+
+    // 主动替换/关闭控制连接期间为真：那种 onClosed 是"我们自己干的"，
+    // 不该被当成断线（否则重建连接这个动作本身就会触发一次重连）。
+    bool closingControl = false;
 
     Action action = Action::kList;
     std::string assignedId;
@@ -244,10 +294,12 @@ struct Client::Impl {
         watchdog.cancel();
         connectTimer.cancel();
         idleTimer.cancel();
+        reconnectTimer.cancel();
 
         // 会话级结论统一由下面这次 onDone 发出，正在进行的子操作不再单独
         // 回调（上层收到两个结论会把同一项算两遍）。
         sends.clear();
+        linkToSend.clear();
         negotiations.clear();
         dataWaiters.clear();
 
@@ -336,6 +388,14 @@ struct Client::Impl {
             lastActivity = std::chrono::steady_clock::now();
             return;
         }
+        if (suspended) {
+            // 重连期间没有字节进展是**预期**的：数据连接正在重建、发送方
+            // 正在等对端接受续传。这里要是照常判定，症状是"刚断线两秒就
+            // 报对端失联"，把重连机制彻底抵消掉。
+            lastActivity = std::chrono::steady_clock::now();
+            lastActivityBytes = lastBytes;
+            return;
+        }
         if (lastBytes != lastActivityBytes) {
             lastActivityBytes = lastBytes;
             lastActivity = std::chrono::steady_clock::now();
@@ -363,6 +423,16 @@ struct Client::Impl {
     // ---------------------------------------------------------------------
 
     void connect()
+    {
+        startControlLink(/*first=*/true);
+        armHardTimeout();
+        armIdleWatch();
+    }
+
+    // 建（或重建）控制连接。首次与重连共用同一份装配代码——两条路径要是
+    // 各写一遍，迟早有一条忘了某个 handler，而症状是"重连成功之后 XX 就不
+    // 好使了"，最难查。
+    void startControlLink(bool first)
     {
         ControlLink::Config cc;
         cc.host = config.host;
@@ -393,20 +463,43 @@ struct Client::Impl {
             return serveRequest(req, answer);
         };
 
+        // 旧对象先关掉再换：重连时 `control` 里那条连接已经死了（或者正在
+        // 死的路上），留着它只会让 canOperate() 之类的地方读到过期的状态。
+        if (control) {
+            closingControl = true;
+            control->close();
+            closingControl = false;
+        }
         control = ControlLink::connect(ctx, std::move(cc), std::move(h));
-        armHardTimeout();
-        armIdleWatch();
 
         // 连接 / 认证的整体时限。握手本身有超时，这里兜的是"连 TCP 都没
         // 建立起来且没人报错"的情形。
+        //
+        // 重连时它也要重新上弦：中继重启期间 TCP 会立刻被拒（那条路径由
+        // onClosed 收尾），但"连上了、握手却停住"只能靠这个上限。
+        connectTimer.cancel();
         connectTimer.expires_after(config.connectTimeout);
         std::weak_ptr<char> ct = alive;
-        connectTimer.async_wait([this, ct](const std::error_code& ec) {
-            if (ec || ct.expired() || finished || startedOnce) {
+        connectTimer.async_wait([this, ct, first](const std::error_code& ec) {
+            if (ec || ct.expired() || finished) {
                 return;
             }
-            finish(false, "连不上中继（" + std::to_string(config.connectTimeout.count()) + " 秒内没完成认证）",
-                   Status::Fail(ErrorCode::kTimeout, "connect timeout"));
+            if (first && startedOnce) {
+                return;   // 首次连接已经就绪，看门狗完成使命
+            }
+            if (first) {
+                finish(false, "连不上中继（" + std::to_string(config.connectTimeout.count()) + " 秒内没完成认证）",
+                       Status::Fail(ErrorCode::kTimeout, "connect timeout"));
+                return;
+            }
+            // 重连的这一次也没走完握手：计入一次失败，接着退避重试。
+            //
+            // 先把"这一次还在进行"的标记清掉：scheduleReconnect 靠它防重入，
+            // 带着它调进来会**被自己的防重入挡回去**，于是既没有重试也没有
+            // 结论——进程挂到天荒地老（症状：断线后两端都静默不动）。
+            reconnectPending = false;
+            awaitReconnectReady = false;
+            scheduleReconnect("连不上中继（" + std::to_string(config.connectTimeout.count()) + " 秒内没完成认证）");
         });
     }
 
@@ -453,6 +546,12 @@ struct Client::Impl {
         }
 
         if (startedOnce) {
+            // 重连后的恢复点。等**最终身份**再动：数据连接叫 `<身份>~d`，
+            // 拿临时号建出来的连接，对端缓存的名字下一次就失效。
+            if (awaitReconnectReady && identityFinal) {
+                awaitReconnectReady = false;
+                onLinkRestored();
+            }
             return;
         }
         startedOnce = true;
@@ -481,7 +580,7 @@ struct Client::Impl {
                                Status::Fail(ErrorCode::kTimeout, "data channel negotiation failed"));
                         return;
                     }
-                    startSend(peerPathSource, peerPathRemoteName, peerDataId);
+                    startSend(peerPathSource, peerPathRemoteName, toPeerId, peerDataId);
                 });
             });
             return;
@@ -544,7 +643,7 @@ struct Client::Impl {
                                Status::Fail(ErrorCode::kTimeout, "self negotiate failed"));
                         return;
                     }
-                    startSend(config.selfSendPath, std::string(), peerDataId, [this](const Outcome& o) {
+                    startSend(config.selfSendPath, std::string(), assignedId, peerDataId, [this](const Outcome& o) {
                         // 成功不做额外动作：接收侧收完会自己 finish。失败要
                         // 提前结束，否则进程挂在"等文件"上，看不出是自检发送
                         // 出了问题。
@@ -559,9 +658,16 @@ struct Client::Impl {
 
     void onControlClosed(Status why)
     {
-        if (finished) {
+        if (finished || closingControl) {
+            // closingControl：这是 startControlLink 里我们自己关掉旧连接的
+            // 动作，不是断线。当成断线处理会让"重建连接"本身触发一次重连。
             return;
         }
+
+        // 这一次尝试（退避后的重连）也失败了：清掉"正在连"，让下一次还能
+        // 排进去。suspended 保持为真——整个重连周期还没结束。
+        reconnectPending = false;
+        awaitReconnectReady = false;
 
         // 声明标识被拒：这不是"网络断了"，措辞必须让用户知道该改什么。
         // 两种原因的处置完全不同——被占用是要么换名字、要么关掉占用的那台；
@@ -584,8 +690,314 @@ struct Client::Impl {
 
         // 连接没了，正在跑的传输不会有结论。报一次连接级失败——重试剩余
         // 工作没有意义（批次执行者凭 connectionLost 打住）。
-        const bool userClosed = why.code == ErrorCode::kCancelled;
+        const bool userClosed = why.code == ErrorCode::kCancelled && !suspended;
+
+        if (!userClosed && config.reconnect.enabled) {
+            // 网络问题：进重连。**不结束操作**——发送的作业会挂在这里，
+            // 等链路回来之后按断点续传重发（见 resumeSends）。
+            //
+            // 会话级状态必须在这里清干净：缓存的"对方数据连接 id"是上一
+            // 条链路上的事实，对方可能也重连过（id 变了）。一次往返换掉
+            // 一整类"帧投进虚空、要干等应答超时"的故障。
+            peerDataIds.clear();
+            negotiations.clear();
+            dataState = DataState::kIdle;
+            // 先排重连再拆数据连接：数据连接一关就会回调 scheduleRecovery，
+            // 而那时 suspended 已经置位，它会被挡回去——不这么排，一次断线
+            // 会记成两次失败。
+            scheduleReconnect(msg);
+            suspendDataLink();
+            return;
+        }
+
         finish(false, userClosed ? "已断开" : "与中继的连接已断开：" + msg, std::move(why), true);
+    }
+
+    // ---------------------------------------------------------------------
+    // 断线重连
+    // ---------------------------------------------------------------------
+
+    // 挂起当前的数据连接。不能 reset：本函数可能正跑在**这条链路自己的**
+    // 回调栈上（Session 的 onClosed → 这里），最后一个 shared_ptr 一放，
+    // 对象就在自己的成员函数里被销毁了。close() 不析构，够用。
+    void suspendDataLink()
+    {
+        if (data) {
+            data->close();
+        }
+    }
+
+    // 等下一次重试的时间。指数退避：中继重启时所有客户端会同时掉线，
+    // 固定间隔会让它们在同一刻撞回来。
+    std::chrono::milliseconds backoffFor(int attempt) const
+    {
+        auto delay = config.reconnect.delay;
+        for (int i = 1; i < attempt && delay < config.reconnect.maxDelay; ++i) {
+            delay *= 2;
+        }
+        return delay < config.reconnect.maxDelay ? delay : config.reconnect.maxDelay;
+    }
+
+    // 断线恢复的**唯一入口**。两条链路各自可能断，处置不同：
+    //   - 只是数据连接断了（控制连接还活着）：立刻重建那一条，不消耗重试
+    //     次数。控制连接陪着再握手一次纯属浪费，而 PBKDF2 两万次迭代在
+    //     低端机上是上百毫秒。
+    //   - 控制连接也没了：走带退避的重连。
+    void scheduleRecovery()
+    {
+        if (finished || destroying) {
+            return;
+        }
+        if (!config.reconnect.enabled) {
+            return;
+        }
+        if (control != nullptr && control->ready()) {
+            dataState = DataState::kIdle;
+            std::weak_ptr<char> token = alive;
+            asio::post(ctx, [this, token] {
+                if (token.expired() || finished) {
+                    return;
+                }
+                // 恢复的接力棒交出去了：从这里开始是新链路自己的事。
+                // 不清它的话空闲看门狗会永久停摆（"一直以为在重连"）。
+                suspended = false;
+                resumeSends();
+            });
+            return;
+        }
+        scheduleReconnect("数据连接与中继断开");
+    }
+
+    void scheduleReconnect(const std::string& why)
+    {
+        if (finished || destroying) {
+            return;
+        }
+        // 已经在重连流程里了（等退避 / 新连接正在握手）。
+        if (reconnectPending) {
+            return;
+        }
+        if (config.reconnect.maxAttempts > 0 && reconnectAttempts >= config.reconnect.maxAttempts) {
+            giveUpReconnect(why);
+            return;
+        }
+
+        suspended = true;
+        reconnectPending = true;
+        ++reconnectAttempts;
+        const auto delay = backoffFor(reconnectAttempts);
+
+        if (config.onReconnecting) {
+            config.onReconnecting(reconnectAttempts, delay);
+        }
+
+        reconnectTimer.cancel();
+        reconnectTimer.expires_after(delay);
+        std::weak_ptr<char> token = alive;
+        reconnectTimer.async_wait([this, token](const std::error_code& ec) {
+            if (ec || token.expired() || finished) {
+                return;
+            }
+            awaitReconnectReady = true;
+            startControlLink(/*first=*/false);
+        });
+    }
+
+    // 重连次数用尽：把挂着的结论一次发清楚，别让界面停在"重连中"。
+    //
+    // 先给每个被挂起的发送一个"连接级失败"，再走 finish——finish 会清空
+    // sends 但不会回调它们的 done，那些等待者就永远收不到结论了。
+    void giveUpReconnect(const std::string& why)
+    {
+        suspended = false;
+        reconnectPending = false;
+        awaitReconnectReady = false;
+
+        // 排队等数据连接的那批先唤醒：它们的回调里通常握着某一路发送的
+        // done（"数据连接不可用"），不唤醒就永远没有结论。
+        auto waiters = std::move(dataWaiters);
+        dataWaiters.clear();
+        for (auto& w : waiters) {
+            w(false);
+        }
+
+        auto jobs = std::move(sends);
+        sends.clear();
+        linkToSend.clear();
+        for (auto& [id, job] : jobs) {
+            if (!job.done) {
+                continue;
+            }
+            Outcome o;
+            o.ok = false;
+            o.summary = "与中继的连接已断开，重连失败：" + why;
+            o.status = Status::Fail(ErrorCode::kTimeout, "reconnect exhausted");
+            o.connectionLost = true;
+            job.done(o);
+        }
+
+        finish(false, "与中继的连接已断开（重连 " + std::to_string(reconnectAttempts) + " 次未成功）：" + why,
+               Status::Fail(ErrorCode::kTimeout, "reconnect exhausted"), true);
+    }
+
+    // 重连成功、身份已定。恢复链路与被中断的发送。
+    void onLinkRestored()
+    {
+        suspended = false;
+        reconnectPending = false;
+        reconnectAttempts = 0;
+        reconnectTimer.cancel();
+        // 连接看门狗是**每次尝试**重新上弦的（见 startControlLink），所以
+        // 成功之后必须撤掉这一次的。不撤的话它 15 秒后会以"这次重连没成功"
+        // 为由再排一次重连——一次正常的恢复变成了一次假断线。
+        connectTimer.cancel();
+
+        // 上一条链路上的缓存全部作废（见 onControlClosed 的注释）。
+        peerDataIds.clear();
+        negotiations.clear();
+        claimWaitStarted = false;
+        dataState = DataState::kIdle;
+
+        if (config.onReconnected) {
+            config.onReconnected();
+        }
+
+        // 先刷在线列表：对端可能在这段时间里换了 id，界面上那张表已经过期。
+        if (action == Action::kReceive && config.askListOnStart) {
+            requestPeerList();
+        }
+
+        resumeSends();
+    }
+
+    // 把被打断的发送重新挂上。接收侧只需要把 receiver 挂回去——文件在
+    // 对方手上，得等它重新发起（本端能做的到此为止，别假装能"续收"）。
+    void resumeSends()
+    {
+        if (finished) {
+            return;
+        }
+        if (action == Action::kReceive || config.keepReceiving) {
+            ensureDataLink([](bool) {});
+        }
+
+        // 先快照：resumeSend 可能同步失败并回调 done，从而 erase 掉某一项，
+        // 直接遍历 map 会踩失效的迭代器。
+        std::vector<std::uint64_t> ids;
+        for (const auto& [id, job] : sends) {
+            if (job.linkJobId == 0) {
+                ids.push_back(id);
+            }
+        }
+        for (const auto id : ids) {
+            resumeSend(id);
+        }
+    }
+
+    void resumeSend(std::uint64_t id)
+    {
+        auto it = sends.find(id);
+        if (it == sends.end() || it->second.linkJobId != 0) {
+            return;
+        }
+        ++it->second.attempts;
+
+        ensureDataLink([this, id](bool ok) {
+            auto it2 = sends.find(id);
+            if (it2 == sends.end()) {
+                return;
+            }
+            if (!ok) {
+                concludeSend(id, "数据连接不可用（重连后仍无法建立）", Status::Fail(ErrorCode::kIoError, "data link failed"));
+                return;
+            }
+            auto& job = it2->second;
+            negotiateDataId(
+                job.peerId,
+                [this, id](bool ok2, std::string peerDataId) {
+                    auto it3 = sends.find(id);
+                    if (it3 == sends.end()) {
+                        return;
+                    }
+                    if (!ok2) {
+                        concludeSend(id, "对端不可达（重连后第 " + std::to_string(it3->second.attempts) + " 次续传失败）",
+                                     Status::Fail(ErrorCode::kTimeout, "data channel negotiation failed"));
+                        return;
+                    }
+                    it3->second.peerDataId = std::move(peerDataId);
+                    attachSend(id);
+                },
+                kNegotiateMaxAttemptsAfterReconnect);
+        });
+    }
+
+    // 给一路发送一个失败的结论并摘掉它。
+    void concludeSend(std::uint64_t id, std::string summary, Status st)
+    {
+        auto it = sends.find(id);
+        if (it == sends.end()) {
+            return;
+        }
+        auto done = std::move(it->second.done);
+        sends.erase(it);
+        if (done) {
+            Outcome o;
+            o.ok = false;
+            o.summary = std::move(summary);
+            o.status = std::move(st);
+            done(o);
+        }
+    }
+
+    // 把一路已经登记好的发送真正挂到数据连接上。首次发送与重连后续发
+    // 共用这里，两处各写一遍的话，"续发时漏了 linkToSend"这种错只会
+    // 在断线之后才暴露。
+    bool attachSend(std::uint64_t id)
+    {
+        auto it = sends.find(id);
+        if (it == sends.end()) {
+            return false;
+        }
+        auto& job = it->second;
+        if (finished || data == nullptr || !data->ready() || job.peerDataId.empty()) {
+            concludeSend(id, "数据连接不可用", Status::Fail(ErrorCode::kIoError, "data link not ready"));
+            return false;
+        }
+
+        const auto linkId = data->sendFile(job.source, job.remoteName, job.peerDataId);
+        if (linkId == 0) {
+            concludeSend(id, "发送失败：源文件打不开，或同一文件已在发送中",
+                         Status::Fail(ErrorCode::kIoError, "sendFile rejected"));
+            return false;
+        }
+        job.linkJobId = linkId;
+        linkToSend[linkId] = id;
+        return true;
+    }
+
+    // 控制类请求失败的统一出口。
+    //
+    // 断线时 ControlLink 先让所有挂起的请求失败（failAll），**然后**才回调
+    // onClosed。也就是说这个失败回调跑的时候，"这次断开值不值得重连"还没
+    // 定论。直接 finish 会让重连机制永远没机会启动——症状是"断一次线，
+    // 整个会话没了"，而重连代码看起来毫无问题。
+    //
+    // 所以把结论往后推一拍：那时 onClosed 已经跑过，suspended / finished
+    // 都有定论。真要重连就丢掉这条结论（这次请求随连接一起作废），否则
+    // 照原样结束。
+    void failRequest(std::string summary, Status st)
+    {
+        if (!config.reconnect.enabled) {
+            finish(false, std::move(summary), std::move(st), true);
+            return;
+        }
+        std::weak_ptr<char> token = alive;
+        asio::post(ctx, [this, token, summary = std::move(summary), st = std::move(st)]() mutable {
+            if (token.expired() || finished || suspended) {
+                return;
+            }
+            finish(false, std::move(summary), std::move(st), true);
+        });
     }
 
     // ---------------------------------------------------------------------
@@ -701,6 +1113,18 @@ struct Client::Impl {
             // 数据连接断了不影响控制连接：列举、浏览、改名都还能用。
             // 只有正在跑的传输会失败（TransferLink 自己会逐个报出来）。
             claimWait.cancel();
+
+            // 开着重连时，排队等数据连接的调用方**不能就地失败**：它们等的
+            // 是同一条链路的重建，而下面马上就会去重建。留着等 markDataReady
+            // 一起唤醒，否则一次断线会把正在排队的发送全判成"数据连接不可用"
+            // ——重连机制反而制造失败。
+            if (config.reconnect.enabled && !finished) {
+                dataState = DataState::kIdle;
+                // 控制连接还活着时它只重建这一条，顺手把被打断的发送续上。
+                scheduleRecovery();
+                return;
+            }
+
             auto waiters = std::move(dataWaiters);
             dataWaiters.clear();
             for (auto& w : waiters) {
@@ -757,7 +1181,13 @@ struct Client::Impl {
     }
 
     // 换对端的数据连接 id。一次往返，结果缓存。
-    void negotiateDataId(std::string peerId, std::function<void(bool, std::string)> cb)
+    //
+    // maxAttempts 只对"对端回 kNotReady"生效（它还在握手）。默认 40 × 200ms
+    // = 8 秒，覆盖 PBKDF2 在慢机器上的时间；重连之后的续发要用更长的预算，
+    // 因为对端自己也在重连——它得先连上中继、再把自己的数据连接拿起来，
+    // 才轮得到应答我们。8 秒在这个场景里偏紧，症状是"对端其实回来了，
+    // 但发送方已经放弃了"。
+    void negotiateDataId(std::string peerId, std::function<void(bool, std::string)> cb, int maxAttempts = kNegotiateMaxAttempts)
     {
         if (peerId.empty()) {
             cb(false, {});
@@ -774,10 +1204,10 @@ struct Client::Impl {
             return;
         }
         n.inFlight = true;
-        askDataChannel(peerId, 1);
+        askDataChannel(peerId, 1, maxAttempts);
     }
 
-    void askDataChannel(const std::string& peerId, int attempt)
+    void askDataChannel(const std::string& peerId, int attempt, int maxAttempts)
     {
         if (finished || control == nullptr || dataState != DataState::kReady) {
             finishNegotiation(peerId, false, {});
@@ -786,42 +1216,43 @@ struct Client::Impl {
 
         std::weak_ptr<char> token = alive;
         auto body = core::session::encodeAskDataChannel(dataId);
-        const bool asked = control->ask(
-            FrameType::kAskDataChannel, peerId, std::move(body), [this, token, peerId, attempt](const ControlLink::Answer& a) {
-                if (token.expired()) {
-                    return;
-                }
-                if (!a.ok) {
-                    finishNegotiation(peerId, false, {});
-                    return;
-                }
-                core::session::DataChannelStatus status = core::session::DataChannelStatus::kRejected;
-                std::string peerDataId;
-                std::string err;
-                if (!core::session::decodeAnswerDataChannel(a.body, status, peerDataId, err)) {
-                    finishNegotiation(peerId, false, {});
-                    return;
-                }
-                if (status == core::session::DataChannelStatus::kOk && !peerDataId.empty()) {
-                    peerDataIds[peerId] = peerDataId;
-                    finishNegotiation(peerId, true, peerDataId);
-                    return;
-                }
-                if (status == core::session::DataChannelStatus::kNotReady && attempt < kNegotiateMaxAttempts) {
-                    // 对端的数据连接还在握手。等一会儿再问——这不是
-                    // 错误，协议里明写了它是"暂时建不起来"。
-                    auto timer = std::make_shared<asio::steady_timer>(ctx);
-                    timer->expires_after(kNegotiateRetryDelay);
-                    timer->async_wait([this, token, peerId, attempt, timer](const std::error_code& ec) {
-                        if (ec || token.expired()) {
-                            return;
-                        }
-                        askDataChannel(peerId, attempt + 1);
-                    });
-                    return;
-                }
-                finishNegotiation(peerId, false, {});
-            });
+        const bool asked =
+            control->ask(FrameType::kAskDataChannel, peerId, std::move(body),
+                         [this, token, peerId, attempt, maxAttempts](const ControlLink::Answer& a) {
+                             if (token.expired()) {
+                                 return;
+                             }
+                             if (!a.ok) {
+                                 finishNegotiation(peerId, false, {});
+                                 return;
+                             }
+                             core::session::DataChannelStatus status = core::session::DataChannelStatus::kRejected;
+                             std::string peerDataId;
+                             std::string err;
+                             if (!core::session::decodeAnswerDataChannel(a.body, status, peerDataId, err)) {
+                                 finishNegotiation(peerId, false, {});
+                                 return;
+                             }
+                             if (status == core::session::DataChannelStatus::kOk && !peerDataId.empty()) {
+                                 peerDataIds[peerId] = peerDataId;
+                                 finishNegotiation(peerId, true, peerDataId);
+                                 return;
+                             }
+                             if (status == core::session::DataChannelStatus::kNotReady && attempt < maxAttempts) {
+                                 // 对端的数据连接还在握手。等一会儿再问——这不是
+                                 // 错误，协议里明写了它是"暂时建不起来"。
+                                 auto timer = std::make_shared<asio::steady_timer>(ctx);
+                                 timer->expires_after(kNegotiateRetryDelay);
+                                 timer->async_wait([this, token, peerId, attempt, maxAttempts, timer](const std::error_code& ec) {
+                                     if (ec || token.expired()) {
+                                         return;
+                                     }
+                                     askDataChannel(peerId, attempt + 1, maxAttempts);
+                                 });
+                                 return;
+                             }
+                             finishNegotiation(peerId, false, {});
+                         });
         if (!asked) {
             finishNegotiation(peerId, false, {});
         }
@@ -1107,12 +1538,13 @@ struct Client::Impl {
         // ControlLink 在本函数返回后**同步**把应答放进写队列，所以这里排的
         // 任务一定排在应答之后——上面的顺序依赖这一点。
         const std::string peerDataId = peerDataIds.at(req.from);
+        const std::string peerId = req.from;   // 重连后重新协商要用
         std::weak_ptr<char> token = alive;
-        asio::post(ctx, [this, token, sendPath, sendName, peerDataId, packPath] {
+        asio::post(ctx, [this, token, sendPath, sendName, peerId, peerDataId, packPath] {
             if (token.expired() || finished) {
                 return;
             }
-            startSend(sendPath, sendName, peerDataId, [packPath](const Outcome&) {
+            startSend(sendPath, sendName, peerId, peerDataId, [packPath](const Outcome&) {
                 // 传完（成功、失败、取消）都删：留着的临时包只会越积越多，
                 // 而它已经没用了。
                 if (packPath.empty()) {
@@ -1468,7 +1900,7 @@ struct Client::Impl {
                     return;
                 }
                 if (!a.ok) {
-                    finish(false, "取在线列表失败：" + a.status.message, a.status);
+                    failRequest("取在线列表失败：" + a.status.message, a.status);
                     return;
                 }
                 std::string err;
@@ -1520,7 +1952,7 @@ struct Client::Impl {
                                  return;
                              }
                              if (!a.ok) {
-                                 finish(false, "对端没有响应（可能已离线）", a.status);
+                                 failRequest("对端没有响应（可能已离线）", a.status);
                                  return;
                              }
                              core::session::FileListStatus status = core::session::FileListStatus::kOk;
@@ -1723,10 +2155,16 @@ struct Client::Impl {
     // 发送
     // ---------------------------------------------------------------------
 
-    void startSend(const std::string& source, const std::string& remoteName, const std::string& peerDataId,
-                   std::function<void(const Outcome&)> done = {}, std::function<void(const ProgressReport&)> progress = {})
+    // 发起一次发送。
+    //
+    // 两段式：这里只**登记**作业（重连之后还要按这份登记重发），真正挂到
+    // 数据连接上是 attachSend 的事。分两段是为了让"被打断 → 续发"和"第一次
+    // 发"走同一条代码路径——两份实现里迟早有一份忘了同步 linkToSend。
+    void startSend(const std::string& source, const std::string& remoteName, const std::string& peerId,
+                   const std::string& peerDataId, std::function<void(const Outcome&)> done = {},
+                   std::function<void(const ProgressReport&)> progress = {})
     {
-        if (finished || data == nullptr || !data->ready()) {
+        if (finished || data == nullptr || !data->ready() || peerDataId.empty()) {
             if (done) {
                 Outcome o;
                 o.ok = false;
@@ -1742,23 +2180,20 @@ struct Client::Impl {
         // resolveWithin 直接判越界（或落成 `<接收目录>/D:/...` 这种怪路径）。
         const std::string name = remoteName.empty() ? fileNameOf(source) : remoteName;
 
-        const auto jobId = data->sendFile(source, name, peerDataId);
-        if (jobId == 0) {
-            if (done) {
-                Outcome o;
-                o.ok = false;
-                o.summary = "发送失败：源文件打不开，或同一文件已在发送中";
-                o.status = Status::Fail(ErrorCode::kIoError, "sendFile rejected");
-                done(o);
-            }
-            return;
-        }
-        if (done || progress) {
-            SendEntry e;
-            e.done = std::move(done);
-            e.progress = std::move(progress);
-            sends.emplace(jobId, std::move(e));
-        }
+        SendJob job;
+        job.id = nextSendId++;
+        job.source = source;
+        job.remoteName = name;
+        job.peerId = peerId;
+        job.peerDataId = peerDataId;
+        job.done = std::move(done);
+        job.progress = std::move(progress);
+
+        const auto id = job.id;
+        sends.emplace(id, std::move(job));
+        // 失败时 attachSend 已经把结论发出去了（走 concludeSend，会 erase
+        // 这一项），这里不需要再补一次。
+        (void)attachSend(id);
     }
 
     // 一路传输的结论。发送与接收共用这个入口（job 的 sending 标志区分）。
@@ -1776,11 +2211,36 @@ struct Client::Impl {
         lastStats.duplicateChunks = job.duplicateChunks;
         lastStats.acksSent = job.acksSent;
         lastStats.acksReceived = job.acksReceived;
+
         if (job.sending) {
+            // **被打断 ≠ 失败**：链路断了而已，作业还能接着发。
+            //
+            // 关键在于保住作业本身（source/remoteName/peerId），把它从
+            // 数据连接上摘下来（linkJobId = 0），等重连后由 resumeSends
+            // 重新挂上。对端那边的 `.relaypart` 还按块对齐躺着，续传会
+            // 跳过已经落盘的块（PROTOCOL.md §9.5）。
+            //
+            // 这里不判 suspended：数据连接的 onClosed **晚于**各 job 的
+            // 结论，那时 suspended 还没置位。判据只有"是本端链路断了"
+            // 加上"开了重连"。
+            if (job.interrupted && config.reconnect.enabled && !finished) {
+                if (const auto it = linkToSend.find(job.id); it != linkToSend.end()) {
+                    if (auto jt = sends.find(it->second); jt != sends.end()) {
+                        jt->second.linkJobId = 0;
+                    }
+                    linkToSend.erase(it);
+                }
+                suspended = true;   // 空闲看门狗就此停手（见 checkIdle）
+                return;
+            }
+
             std::function<void(const Outcome&)> done;
-            if (const auto it = sends.find(job.id); it != sends.end()) {
-                done = std::move(it->second.done);
-                sends.erase(it);
+            if (const auto it = linkToSend.find(job.id); it != linkToSend.end()) {
+                if (const auto jt = sends.find(it->second); jt != sends.end()) {
+                    done = jt->second.done;
+                    sends.erase(jt);
+                }
+                linkToSend.erase(it);
             }
             Outcome o;
             o.ok = (r.outcome == transfer::TransferOutcome::kCompleted);
@@ -1820,11 +2280,22 @@ struct Client::Impl {
             return;
         }
 
-        onReceivedFile(r);
+        onReceivedFile(r, job.interrupted);
     }
 
-    void onReceivedFile(const transfer::TransferResult& r)
+    void onReceivedFile(const transfer::TransferResult& r, bool interrupted = false)
     {
+        // 接收侧遇到链路断开：文件在对方手上，本端没法"续收"，但也不该
+        // 就此结束——对方重连之后会重新发起，本端的 receiver 已经挂回去了。
+        // 所以报一条失败（让日志说清楚发生了什么）然后继续等。
+        if (interrupted && config.reconnect.enabled && !finished) {
+            suspended = true;
+            if (config.onReceiveFailed) {
+                config.onReceiveFailed("连接中断，等待重连后由对端重新发起");
+            }
+            return;
+        }
+
         if (r.outcome == transfer::TransferOutcome::kCompleted) {
             // 最终进度报一次满的。否则最后一行停在"99%"，用户会怀疑是不是
             // 没走完——虽然结论已经说了成功。
@@ -1907,23 +2378,28 @@ struct Client::Impl {
         const auto now = std::chrono::steady_clock::now();
 
         // 发送中的一路：这条进度只属于它，直接交给它的回调。
-        if (const auto it = sends.find(job.id); it != sends.end()) {
-            auto& e = it->second;
-            const auto dt = std::chrono::duration<double>(now - e.lastAt).count();
-            if (dt > 0.0 && job.bytesDone >= e.lastBytes) {
-                e.speed = static_cast<double>(job.bytesDone - e.lastBytes) / dt;
+        //
+        // 两级查表：TransferLink 给的是它自己的 job id，重连后会变；稳定
+        // 编号才是这一路在界面上那一行的身份。
+        if (const auto link = linkToSend.find(job.id); link != linkToSend.end()) {
+            if (const auto it = sends.find(link->second); it != sends.end()) {
+                auto& e = it->second;
+                const auto dt = std::chrono::duration<double>(now - e.lastAt).count();
+                if (dt > 0.0 && job.bytesDone >= e.lastBytes) {
+                    e.speed = static_cast<double>(job.bytesDone - e.lastBytes) / dt;
+                }
+                e.lastBytes = job.bytesDone;
+                e.lastAt = now;
+                lastBytes = job.bytesDone;   // 空闲看门狗也用这个
+                if (e.progress) {
+                    ProgressReport r;
+                    r.bytesDone = job.bytesDone;
+                    r.bytesTotal = job.bytesTotal;
+                    r.bytesPerSecond = e.speed;
+                    e.progress(r);
+                }
+                return;
             }
-            e.lastBytes = job.bytesDone;
-            e.lastAt = now;
-            lastBytes = job.bytesDone;   // 空闲看门狗也用这个
-            if (e.progress) {
-                ProgressReport r;
-                r.bytesDone = job.bytesDone;
-                r.bytesTotal = job.bytesTotal;
-                r.bytesPerSecond = e.speed;
-                e.progress(r);
-            }
-            return;
         }
 
         // 接收（唯一一路）：走全局回调，与旧行为一致。
@@ -1996,7 +2472,7 @@ struct Client::Impl {
                     return;
                 }
                 if (!a.ok) {
-                    finish(false, "取回请求没有响应（对端可能已离线）", a.status);
+                    failRequest("取回请求没有响应（对端可能已离线）", a.status);
                     return;
                 }
                 core::session::FilePullStatus status = core::session::FilePullStatus::kRejected;
@@ -2222,7 +2698,7 @@ bool Client::sendOnSession(std::string sourcePath, std::string remoteName, std::
                 }
                 return;
             }
-            p->negotiateDataId(toPeerId, [p, token, sourcePath, remoteName, done,
+            p->negotiateDataId(toPeerId, [p, token, sourcePath, remoteName, toPeerId, done,
                                           progress = std::move(progress)](bool ok2, std::string peerDataId) mutable {
                 if (token.expired()) {
                     return;
@@ -2237,7 +2713,7 @@ bool Client::sendOnSession(std::string sourcePath, std::string remoteName, std::
                     }
                     return;
                 }
-                p->startSend(sourcePath, remoteName, peerDataId, done, std::move(progress));
+                p->startSend(sourcePath, remoteName, toPeerId, peerDataId, done, std::move(progress));
             });
         });
     return true;
@@ -2419,11 +2895,16 @@ void Client::cancelSend()
 {
     // 先拷出 id 再取消：cancel 会同步触发 onFinished，而那个回调会 erase
     // sends 里的项——直接遍历 map 会踩失效的迭代器。
+    //
+    // 只取**当前挂在链路上**的那些：被打断、等着续发的作业没有可取消的
+    // 对象，它们会在 resumeSends 时被重新挂上。
     std::vector<std::uint64_t> ids;
     ids.reserve(impl_->sends.size());
-    for (const auto& [id, done] : impl_->sends) {
-        (void)done;
-        ids.push_back(id);
+    for (const auto& [id, job] : impl_->sends) {
+        (void)id;
+        if (job.linkJobId != 0) {
+            ids.push_back(job.linkJobId);
+        }
     }
     for (const auto id : ids) {
         if (impl_->data) {
@@ -2439,7 +2920,9 @@ void Client::abort()
     }
     impl_->finished = true;
     impl_->watchdog.cancel();
+    impl_->reconnectTimer.cancel();
     impl_->sends.clear();
+    impl_->linkToSend.clear();
     if (impl_->data) {
         impl_->data->close();
     }

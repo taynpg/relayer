@@ -117,6 +117,16 @@ public:
         std::uint64_t bytesDone = 0;
         std::uint64_t bytesTotal = 0;
 
+        // 这一路是被**本端这条数据连接断开**收掉的：不是对端取消，也不是
+        // 用户取消。
+        //
+        // 为什么要单独标出来：两者的用户可见结论完全不同。用户取消是
+        // "已取消"，作业就此结束；链路断了是"被打断"，上层若开了重连，
+        // 应当保留作业、等重连后接着发（对端的 .relaypart 会从断点续传）。
+        // 靠 outcome 分不出来——TransferPeer::cancel 给的都是
+        // kLocalCancelled（见 TransferLink::onSessionClosed）。
+        bool interrupted = false;
+
         // 传输层计数，在 onFinished 时是最终值（进度回调里是过程值）。
         //
         // 为什么带在这里而不是让上层再去问：job 在 onFinished 之后就可能
@@ -190,7 +200,6 @@ private:
         std::string path;
         std::shared_ptr<transfer::TransferPeer> peer;
     };
-
     transfer::TransferPeer::Config peerConfig() const;
 
     void onSessionReady(std::string assignedId);
@@ -205,6 +214,14 @@ private:
     void reportProgress();
 
     [[nodiscard]] JobInfo infoOf(const Job& job) const;
+
+    // 本端这条链路是不是已经没了。
+    //
+    // 只看 `interrupted_` 不够：断线时**谁先发现**是竞速的。Session 的读循环
+    // 报错会走 onSessionClosed（那里置 interrupted_），但这之前 2ms 级的
+    // tick 完全可能先撞上 send 失败，让某一路 job 带着 kFailed 结束——那时
+    // onSessionClosed 还没跑。判据要落在"会话还在不在"这个事实上。
+    [[nodiscard]] bool linkGone() const noexcept;
 
     asio::io_context& ctx_;
     Config config_;
@@ -231,6 +248,11 @@ private:
     std::chrono::steady_clock::time_point jobStartedAt_{};
     bool ready_ = false;
     bool closing_ = false;
+
+    // "正在拆这条连接"。onSessionClosed 里置位，各 job 的结论在它置位期间
+    // 产生——JobInfo::interrupted 就从这里来（见那个字段的注释）。
+    bool interrupted_ = false;
+
     bool claimSent_ = false;
     std::string assignedId_;
 };

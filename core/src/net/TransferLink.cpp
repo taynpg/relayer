@@ -133,6 +133,11 @@ void TransferLink::onSessionClosed(Status why)
     ready_ = false;
     const Status reason = why.ok() ? Status::Fail(ErrorCode::kCancelled, "数据连接已关闭") : why;
 
+    // 从现在到本函数结束，各 job 的结论都是"本端链路没了"引起的。标在位
+    // 成员上而不是逐个 job 上：接收侧那条路径没有 Job 对象（receiver_ 是
+    // 独立成员），两处用一个标志才不会漏。
+    interrupted_ = true;
+
     // 先把在跑的传输收掉（它们的结论必须回来，否则界面会停在"传输中"），
     // 再通知上层。
     if (receiver_ && !receiver_->finished()) {
@@ -148,6 +153,7 @@ void TransferLink::onSessionClosed(Status why)
     for (auto& p : peers) {
         p->cancel("数据连接断开", /*keepPartial=*/true);
     }
+    interrupted_ = false;
 
     if (handler_.onClosed) {
         handler_.onClosed(reason);
@@ -249,6 +255,7 @@ void TransferLink::onJobDone(std::uint64_t id, const transfer::TransferResult& r
         info.id = id;
         info.sending = false;
         info.path = result.targetPath;
+        info.interrupted = linkGone();
         if (receiver_) {
             // receiver_ 在这一刻还活着（reset 在回调之后），计数读得到。
             const auto p = receiver_->progress();
@@ -304,6 +311,7 @@ TransferLink::JobInfo TransferLink::infoOf(const Job& job) const
     info.id = job.id;
     info.sending = job.sending;
     info.path = job.path;
+    info.interrupted = linkGone();
     if (job.peer) {
         const auto p = job.peer->progress();
         info.bytesDone = p.bytesDone;
@@ -317,6 +325,19 @@ TransferLink::JobInfo TransferLink::infoOf(const Job& job) const
         info.acksReceived = st.acksReceived;
     }
     return info;
+}
+
+bool TransferLink::linkGone() const noexcept
+{
+    if (interrupted_ || closing_) {
+        return true;
+    }
+    // 两种"链路没了"都要认：
+    //   - finished()：本端已经走过关闭流程；
+    //   - !linkAlive()：对端关掉了连接，本端要等下一次读出错才知道。
+    //     那之前的 send 会以 "connection is not open" 失败，某一路 job
+    //     正是这么结束的——只看 finished() 会把这种断线误判成对端拒绝。
+    return session_ == nullptr || session_->finished() || !session_->linkAlive();
 }
 
 void TransferLink::scheduleTick()

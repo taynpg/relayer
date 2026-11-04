@@ -241,6 +241,16 @@ public:
     {
         return finished_;
     }
+
+    // 底层 TCP 还连着吗。
+    //
+    // 与 finished() 的区别见 Connection::isActive：对端关掉连接之后、
+    // 本端读到 EOF 之前，会话"还没结束"但已经发不出任何东西了。上层要判
+    // "这次传输失败是本端链路没了，还是对端真的拒绝了业务"，只能看这个。
+    [[nodiscard]] bool linkAlive() const noexcept
+    {
+        return conn_ != nullptr && conn_->isActive();
+    }
     [[nodiscard]] Role role() const noexcept
     {
         return config_.role;

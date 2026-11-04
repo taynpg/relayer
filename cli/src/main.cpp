@@ -74,6 +74,10 @@ void printUsage()
                 "      --idle-timeout <sec> 传输开始后多久没有进展就判定对端失联（默认 60）\n"
                 "                           传输开始前不计时：recv 会一直等，除非给 --hard-timeout\n"
                 "      --hard-timeout <sec> 整个操作的硬上限，0 表示不限（默认 0）\n"
+                "      --reconnect          断线后自动重连；发送会从对端的残片续传\n"
+                "                           （默认关闭：一次性操作应当有明确的失败结论）\n"
+                "      --reconnect-delay <sec>   第一次重试前等多久（默认 2，之后指数退避）\n"
+                "      --reconnect-attempts <n>  最多连续重试几次，0 = 不限（默认 0）\n"
                 "  -q, --quiet              不打印进度，只在结束时输出一行结论\n"
                 "      --stats              结束时额外输出一行统计（STATS k=v ...），供脚本判断\n"
                 "  -h, --help               显示本帮助\n"
@@ -292,6 +296,38 @@ ParseResult parseArgs(int argc, char** argv)
                 return r;
             }
             r.args.config.hardTimeout = std::chrono::seconds(n);
+        } else if (a == "--reconnect") {
+            // 断线重连（v1 ReconHelper 的语义）。默认关：CLI 的一次性
+            // 操作"连不上就报错退出"才是可脚本化的契约。
+            r.args.config.reconnect.enabled = true;
+        } else if (a == "--reconnect-delay") {
+            std::string v;
+            if (!takeValue(a, v)) {
+                return r;
+            }
+            std::uint64_t n = 0;
+            if (!parseU64(v, n) || n == 0 || n > 600) {
+                r.error = "重连间隔非法: " + v;
+                return r;
+            }
+            r.args.config.reconnect.delay = std::chrono::seconds(n);
+            // 上限至少不低于首试间隔，否则退避公式没有意义。
+            if (r.args.config.reconnect.maxDelay < r.args.config.reconnect.delay) {
+                r.args.config.reconnect.maxDelay = r.args.config.reconnect.delay;
+            }
+            r.args.config.reconnect.enabled = true;
+        } else if (a == "--reconnect-attempts") {
+            std::string v;
+            if (!takeValue(a, v)) {
+                return r;
+            }
+            std::uint64_t n = 0;
+            if (!parseU64(v, n) || n > 10000) {
+                r.error = "重连次数非法: " + v;
+                return r;
+            }
+            r.args.config.reconnect.maxAttempts = static_cast<int>(n);
+            r.args.config.reconnect.enabled = true;
         } else if (a == "-q" || a == "--quiet") {
             r.args.quiet = true;
         } else if (a == "--stats") {
@@ -554,8 +590,28 @@ int main(int argc, char** argv)
     // 把终端刷满，而用户真正要看的只有最后那行结论。quiet 时连这行都省。
     bool progressDirty = false;
 
+    relayer::cli::ClientConfig config = a.config;
+    if (config.reconnect.enabled) {
+        // 契约行（大写、定格式），e2e 靠它们断言"真的重连过"。
+        // 重连不是失败，所以写 stdout 且不打成错误——把"重连中"读成
+        // "传输失败"是这类日志最常见的误读。
+        config.onReconnecting = [quiet = a.quiet](int attempt, std::chrono::milliseconds delay) {
+            const auto secs = static_cast<long long>(std::chrono::duration_cast<std::chrono::seconds>(delay).count());
+            if (!quiet) {
+                std::fprintf(stderr, "\n连接断开，%lld 秒后重连（第 %d 次）\n", secs, attempt);
+                std::fflush(stderr);
+            }
+            std::printf("RECONNECTING attempt=%d delay_ms=%lld\n", attempt, static_cast<long long>(delay.count()));
+            std::fflush(stdout);
+        };
+        config.onReconnected = [] {
+            std::printf("RECONNECTED\n");
+            std::fflush(stdout);
+        };
+    }
+
     auto client = std::make_shared<relayer::cli::Client>(
-        ctx, a.config,
+        ctx, config,
         [quiet = a.quiet, &progressDirty](const relayer::cli::ProgressReport& p) {
             if (quiet) {
                 return;
