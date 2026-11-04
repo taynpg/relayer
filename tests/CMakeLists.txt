@@ -32,6 +32,7 @@ add_executable(core_test
     core/ControlLinkTest.cpp
     core/TransferLinkTest.cpp
     core/PairingTest.cpp
+    core/PayloadCipherTest.cpp
     core/AuthTest.cpp
     core/StateMachineTest.cpp
     core/MerkleTreeTest.cpp

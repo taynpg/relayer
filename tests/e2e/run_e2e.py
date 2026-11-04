@@ -723,6 +723,73 @@ def fixed_id(workdir: Path, bin_dir: Path) -> None:
         c.shutdown()
 
 
+@scenario("encrypted-transfer", "载荷加密：两端同口令可传，内容一致")
+def encrypted_transfer(workdir: Path, bin_dir: Path) -> None:
+    """PROTOCOL.md §6 的端到端验收。
+
+    这一层只能证明"加密开关打开之后，功能没坏"。它**证明不了**密文真的
+    不可读——那件事靠单元测试（PayloadCipher 的错密钥/篡改/AAD 用例）。
+    两层各管一件事，别指望 e2e 替单元测试把关。
+
+    唯一能在这里加的一条：中继是照常工作的（它既不拒收加密帧，也不需要
+    口令），所以"中继不知情"这个前提也顺带被验证了。
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        src = c.src / "secret.bin"
+        want = make_file(src, 4_000_000)
+
+        recv, rid = c.start_receiver(idle_timeout=120, extra=["--encrypt", "s3cret"])
+        sender = c.send(src, rid, extra=["--encrypt", "s3cret", "--idle-timeout", "120"])
+
+        rc = c.wait_all([sender, recv], 180)
+        expect_eq(rc[0], 0, "发送端退出码")
+        expect_eq(rc[1], 0, "接收端退出码")
+
+        got = c.dst / "secret.bin"
+        expect(got.exists(), "目标文件不存在")
+        expect_eq(sha256_of(got), want, "加密传输后的内容哈希")
+        expect_no_fragment(c.dst, "secret.bin")
+    finally:
+        c.shutdown()
+
+
+@scenario("encrypted-mismatch", "载荷加密：一端没配口令时快速失败，且不写任何文件")
+def encrypted_mismatch(workdir: Path, bin_dir: Path) -> None:
+    """配置不一致必须**当场失败**，不能静默降级成明文。
+
+    这是加密功能最容易做错的地方：接收端拿到解不开的帧，如果"算了，当作
+    没加密处理"，用户会以为自己传的是密文。正确行为是断开并说清楚原因。
+
+    三个断言：
+      - 两端都非零退出（不是挂到超时才发现）；
+      - 目标目录**空**（没有半截文件、没有残片）；
+      - 接收端的结论里明确提到载荷加密，而不是一句"连接已断开"。
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        src = c.src / "secret.bin"
+        make_file(src, 4_000_000)
+
+        # 接收端没给 --encrypt
+        recv, rid = c.start_receiver(idle_timeout=30)
+        sender = c.send(src, rid, extra=["--encrypt", "s3cret", "--idle-timeout", "30", "--hard-timeout", "30"])
+
+        rc = c.wait_all([sender, recv], 90)
+        expect(rc[0] != 0, "发送端应当失败（对端解不开）")
+        expect(rc[1] != 0, "接收端应当失败（收到解不开的帧）")
+
+        leftovers = sorted(p.name for p in c.dst.iterdir())
+        expect_eq(leftovers, [], f"配置不一致时不该留下任何文件，实际有 {leftovers}")
+
+        lines = recv.pill()
+        expect(any("载荷加密" in x for x in lines), f"接收端的报错没有指出是加密配置问题\n{recv.tail()}")
+    finally:
+        c.shutdown()
+
+
 @scenario("self-send", "自投：一个进程把自己的文件发给自己（服务端绕回本连接）")
 def self_send(workdir: Path, bin_dir: Path) -> None:
     """PROTOCOL.md §11.3.1 的端到端验收。

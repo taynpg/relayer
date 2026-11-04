@@ -17,6 +17,7 @@ session::SessionConfig makeSessionConfig(const ControlLink::Config& cfg)
     sc.role = session::Role::kClient;
     sc.clientPassword = cfg.password;
     sc.server.allowNoAuth = cfg.noAuth;
+    sc.payloadCipher = cfg.payloadCipher;
     return sc;
 }
 }   // namespace

@@ -13,6 +13,7 @@
 #include "relayer/common/Status.h"
 #include "relayer/core/auth/Handshake.h"
 #include "relayer/core/protocol/Frame.h"
+#include "relayer/core/protocol/PayloadCipher.h"
 #include "relayer/core/session/SessionPolicy.h"
 #include "relayer/core/transport/Connection.h"
 #include "relayer/core/transport/Heartbeat.h"
@@ -94,6 +95,17 @@ struct SessionConfig {
     //
     // 与 initialPeerId 的关系：本回调优先，返回空串时退回那个字段。
     std::function<std::string()> allocatePeerId;
+
+    // 载荷加密（PROTOCOL.md §6）。空 = 不加密。
+    //
+    // **只对客户端有意义**：中继必须能读帧头里的 `to` 才能转发，而 body
+    // 它本来就不看——但它也没有口令，所以它既不解密也不该拒绝带加密位的
+    // 帧（拒绝就等于把加密变成"中继不让你用"）。
+    //
+    // 加密的范围是"发给**对端**的帧"（`to` 非空）。发给中继的帧（在线表、
+    // 声明身份、心跳、数据通道协商）必须保持明文，因为中继要处理它们。
+    // 这条规则比"按帧类型白名单"简单，也不怕将来加新帧时漏登记。
+    std::shared_ptr<const protocol::PayloadCipher> payloadCipher;
 
     // 底层连接参数透传
     ConnectionOptions connection;
@@ -379,6 +391,11 @@ private:
     std::uint64_t framesRejected_ = 0;
     std::uint64_t handshakeTimeouts_ = 0;
     std::uint64_t heartbeatTimeouts_ = 0;
+
+    // 从 config_ 拷出来的载荷加密器。拷一份而不是每次读 config_：成员
+    // 初始化顺序没问题，而且 send() 在热路径上（每个块帧一次），少一层
+    // 间接有意义。
+    std::shared_ptr<const protocol::PayloadCipher> cipher_;
 };
 
 }   // namespace relayer::core::session

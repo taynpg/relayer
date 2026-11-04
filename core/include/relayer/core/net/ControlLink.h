@@ -12,6 +12,7 @@
 
 #include "relayer/common/Status.h"
 #include "relayer/core/protocol/Frame.h"
+#include "relayer/core/protocol/PayloadCipher.h"
 
 namespace relayer::core::session {
 class Session;
@@ -65,6 +66,13 @@ public:
         // 不是越大越好：每个在飞请求占一个计时器，而且对端可能串行处理。
         // 256 远超 GUI 的实际并发（列举 + 若干元信息查询）。
         std::size_t maxInFlight = 256;
+
+        // 载荷加密（PROTOCOL.md §6）。空 = 不加密。
+        //
+        // 由上层派生一次再传进来，而不是每建一条连接派生一次：PBKDF2
+        // 两万次迭代在建连路径上是实打实的延迟，而控制连接与数据连接
+        // 用的是同一个口令、同一把密钥。
+        std::shared_ptr<const protocol::PayloadCipher> payloadCipher;
     };
 
     // 一次请求的结论。ok=false 时 status 说明原因（超时 / 连接断开 /

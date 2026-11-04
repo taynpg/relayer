@@ -62,6 +62,8 @@ void printUsage()
                 "      --password <pw>      认证口令\n"
                 "      --no-auth            中继已用 --allow-no-auth 启动时必须加这个\n"
                 "                           （与 --password 互斥；不自动推断，防止漏填口令静默降级）\n"
+                "      --encrypt <pass>     载荷加密口令（两端必须相同）。中继看不到文件内容，\n"
+                "                           但它与 --password 是两回事：认证口令中继也知道\n"
                 "      --id <name>          声明本机标识（重连后保持不变；被别人占用则连接失败）\n"
                 "      --self-send <file>   自检：recv 时把这个文件发给自己（验完整链路）\n"
                 "      --self-browse        自检：recv 时在接收会话上列一次本机根目录\n"
@@ -259,6 +261,12 @@ ParseResult parseArgs(int argc, char** argv)
             // 显式声明"中继已关闭认证"。与 --password 互斥的校验放在
             // 解析后的统一检查里，和子命令必备参数的检查放在一起。
             r.args.config.serverAllowNoAuth = true;
+        } else if (a == "--encrypt") {
+            // 载荷加密的口令（PROTOCOL.md §6）。与 --password 刻意分开：
+            // 那个是给中继的，中继知道；这个只在对端之间共享。
+            if (!takeValue(a, r.args.config.encryptPassphrase)) {
+                return r;
+            }
         } else if (a == "--id") {
             if (!takeValue(a, r.args.config.requestedId)) {
                 return r;

@@ -83,7 +83,7 @@ ConnectionHandler makeHandler(const std::weak_ptr<Session>& weak)
 
 Session::Session(asio::io_context& ctx, SessionConfig config, SessionHandler handler)
     : ctx_(ctx), config_(std::move(config)), handler_(std::move(handler)), handshakeTimer_(ctx), heartbeatTimer_(ctx),
-      selfId_(config_.serverId)
+      selfId_(config_.serverId), cipher_(config_.payloadCipher)
 {
 }
 
@@ -351,8 +351,38 @@ void Session::handleInbound(const Frame& frame)
         return;
     }
 
+    // 载荷加密的解开点（PROTOCOL.md §6）。
+    //
+    // 放在这里而不是更早：握手帧、id 应答、心跳都是"给中继的"，永远不会
+    // 带加密位；能走到这一层的加密帧一定是给本端的业务帧。放在更早的地方
+    // 会让"中继要不要解密"这种问题冒出来——它没有口令，也不该有。
+    //
+    // 中继侧不过这一关（role 判断）：它转发加密帧时既不解密也不拒绝。
+    // 拒绝就等于"中继不让你们用加密"，那是本工具不该有的权力。
+    Frame opened;
+    const Frame* business = &frame;
+    if (frame.isEncrypted() && config_.role == Role::kClient) {
+        if (cipher_ == nullptr) {
+            // 措辞必须让用户知道该改什么：这不是网络问题。
+            ++framesRejected_;
+            finish(
+                failStatus(ErrorCode::kAuthFailed, "peer sent an encrypted payload but this side has no passphrase configured"),
+                true);
+            return;
+        }
+        if (!cipher_->open(frame, opened)) {
+            // GCM 不区分"口令不一致"与"被篡改"，我们也不编一个假原因。
+            ++framesRejected_;
+            finish(failStatus(ErrorCode::kAuthFailed,
+                              "payload decryption failed (passphrase mismatch, or the frame was tampered with)"),
+                   true);
+            return;
+        }
+        business = &opened;
+    }
+
     if (handler_.onFrame) {
-        handler_.onFrame(*this, frame);
+        handler_.onFrame(*this, *business);
     }
 }
 
@@ -559,6 +589,25 @@ Status Session::send(const Frame& frame)
         // **不**断开连接：这是本地实现 bug，对端没做错事。断开只会把问题
         // 推给对端，让排查方向跑偏。
         return failStatus(ErrorCode::kProtocol, check.reason);
+    }
+
+    // 载荷加密（PROTOCOL.md §6）：只管**发给对端**的帧。
+    //
+    // 判据用 `to` 是否为空，而不是帧类型白名单：
+    //   - `to` 为空 = 发给中继，它必须读懂 body（声明身份、心跳、在线表），
+    //     加密了就转不动；
+    //   - `to` 非空 = 发给某个对端，中继只按 `to` 路由、从不看 body。
+    // 白名单的坏处是"将来加一种帧忘了登记"会静默漏加密，而这条规则不会。
+    //
+    // 中继侧不会走到这里：它的 role 不是 kClient（见 SessionConfig 的注释）。
+    if (cipher_ != nullptr && config_.role == Role::kClient && !frame.to.empty() && !frame.isEncrypted()) {
+        Frame sealed;
+        if (!cipher_->seal(frame, sealed)) {
+            // 拿不到系统随机数。**不**退化成明文发送：用户以为加密了，
+            // 实际没有，那是最坏的结果。
+            return failStatus(ErrorCode::kIoError, "payload cipher: cannot obtain a random nonce");
+        }
+        return deliver(sealed);
     }
 
     return deliver(frame);

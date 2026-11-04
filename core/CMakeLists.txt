@@ -15,6 +15,7 @@
 add_library(relayer_core STATIC
     src/protocol/Frame.cpp
     src/protocol/Pairing.cpp
+    src/protocol/PayloadCipher.cpp
     src/auth/Handshake.cpp
     src/auth/HandshakeClient.cpp
     src/auth/HandshakeServer.cpp

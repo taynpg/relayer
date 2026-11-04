@@ -11,6 +11,7 @@
 #include <string_view>
 
 #include "relayer/common/Status.h"
+#include "relayer/core/protocol/PayloadCipher.h"
 #include "relayer/core/transfer/TransferPeer.h"
 #include "relayer/core/transfer/WorkerPool.h"
 #include "relayer/filestore/IFileStore.h"
@@ -106,6 +107,11 @@ public:
         // 进度上报间隔。比 tick 稀疏得多——每次上报都要跨线程投递回 GUI，
         // 10ms 一次既无意义又浪费。
         std::chrono::milliseconds progressInterval{100};
+
+        // 载荷加密（PROTOCOL.md §6）。空 = 不加密。
+        //
+        // 与控制连接用同一个（口令相同、密钥相同），由上层派生一次再传进来。
+        std::shared_ptr<const protocol::PayloadCipher> payloadCipher;
     };
 
     // 一路传输的对外视图。

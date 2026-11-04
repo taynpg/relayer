@@ -12,6 +12,7 @@
 #include "relayer/common/crypto/Sha256.h"
 #include "relayer/core/net/ControlLink.h"
 #include "relayer/core/net/TransferLink.h"
+#include "relayer/core/protocol/PayloadCipher.h"
 #include "relayer/core/session/DataChannel.h"
 #include "relayer/core/session/FileList.h"
 #include "relayer/core/session/FileOp.h"
@@ -102,8 +103,12 @@ struct Client::Impl {
     Impl(asio::io_context& ctxIn, ClientConfig cfg, std::function<void(const ProgressReport&)> prog,
          std::function<void(const Outcome&)> done)
         : ctx(ctxIn), config(std::move(cfg)), onProgress(std::move(prog)), onDone(std::move(done)),
-          alive(std::make_shared<char>(0)), reconnectTimer(ctxIn), idleTimer(ctxIn), watchdog(ctxIn), connectTimer(ctxIn)
+          alive(std::make_shared<char>(0)), reconnectTimer(ctxIn), idleTimer(ctxIn), watchdog(ctxIn), connectTimer(ctxIn),
+          cipher(protocol::PayloadCipher::fromPassphrase(config.encryptPassphrase))
     {
+        // 口令派生只做一次（PBKDF2 两万次迭代）：控制连接与数据连接用的是
+        // 同一个口令、同一把密钥。空口令返回 nullptr，表示"不加密"——
+        // 刻意不用"空密钥加密"，那样"忘填口令"会变成静默的弱加密。
     }
 
     // ---- 常量 ----
@@ -279,6 +284,9 @@ struct Client::Impl {
     // 让每一种失败都有一个明确的结论。
     asio::steady_timer connectTimer;
 
+    // 载荷加密（PROTOCOL.md §6）。空 = 不加密。由口令派生一次，两条连接共用。
+    std::shared_ptr<const protocol::PayloadCipher> cipher;
+
     // ---------------------------------------------------------------------
     // 收尾
     // ---------------------------------------------------------------------
@@ -439,6 +447,7 @@ struct Client::Impl {
         cc.port = config.port;
         cc.password = config.password;
         cc.noAuth = config.serverAllowNoAuth;
+        cc.payloadCipher = cipher;
         cc.requestedId = config.requestedId;
 
         ControlLink::Handler h;
@@ -576,8 +585,7 @@ struct Client::Impl {
                 }
                 negotiateDataId(toPeerId, [this](bool ok2, std::string peerDataId) {
                     if (!ok2) {
-                        finish(false, "对端的数据连接不可用（对方可能正在关闭或未升级协议）",
-                               Status::Fail(ErrorCode::kTimeout, "data channel negotiation failed"));
+                        finish(false, negotiationFailed(), Status::Fail(ErrorCode::kTimeout, "data channel negotiation failed"));
                         return;
                     }
                     startSend(peerPathSource, peerPathRemoteName, toPeerId, peerDataId);
@@ -688,13 +696,29 @@ struct Client::Impl {
             msg += "（中继可能以 --allow-no-auth 启动，客户端请加 --no-auth 重试）";
         }
 
+        // 载荷加密配置不一致。这两种情况的原文是协议层的英文说明（那是给
+        // 开发者看的），对用户要换成"你该改什么"。
+        //
+        // 靠字符串匹配而不是错误码：两者都是 kAuthFailed（语义上确实都是
+        // "这条连接不可信"），而这里需要的只是把动作说清楚。上一处
+        // non-auth frame 的提示也是同一种做法，保持一致。
+        if (msg.find("encrypted payload") != std::string::npos) {
+            msg += "（对端启用了载荷加密：本端也要加 --encrypt，且口令必须相同）";
+        } else if (msg.find("payload decryption failed") != std::string::npos) {
+            msg += "（载荷解密失败：两端的 --encrypt 口令不一致，或数据在链路上被改动）";
+        }
+
         // 连接没了，正在跑的传输不会有结论。报一次连接级失败——重试剩余
         // 工作没有意义（批次执行者凭 connectionLost 打住）。
         const bool userClosed = why.code == ErrorCode::kCancelled && !suspended;
 
-        if (!userClosed && config.reconnect.enabled) {
+        if (!userClosed && config.reconnect.enabled && why.code != ErrorCode::kAuthFailed) {
             // 网络问题：进重连。**不结束操作**——发送的作业会挂在这里，
             // 等链路回来之后按断点续传重发（见 resumeSends）。
+            //
+            // kAuthFailed 排除在外：口令错、载荷解密失败这类问题不会因为
+            // 重试而变好，重连只会把一个明确的配置错误变成"重连中…"，
+            // 然后无限重试下去。
             //
             // 会话级状态必须在这里清干净：缓存的"对方数据连接 id"是上一
             // 条链路上的事实，对方可能也重连过（id 变了）。一次往返换掉
@@ -975,6 +999,21 @@ struct Client::Impl {
         return true;
     }
 
+    // 数据通道协商失败时的措辞。
+    //
+    // 单独一个函数是因为它有多处调用，而其中一句提示只在"本端开了载荷
+    // 加密"时才有意义：口令不一致的表现就是"对端对我的请求毫无反应"
+    // （它解不开，只能把连接断掉），本端看到的却是一句笼统的"不接受"。
+    // 不提一句的话，用户会去查网络、查版本，就是不会想到口令。
+    std::string negotiationFailed() const
+    {
+        std::string msg = "对端的数据连接不可用（对方可能正在关闭或未升级协议）";
+        if (cipher != nullptr) {
+            msg += "；若两端都启用了载荷加密，请确认 --encrypt 口令一致";
+        }
+        return msg;
+    }
+
     // 控制类请求失败的统一出口。
     //
     // 断线时 ControlLink 先让所有挂起的请求失败（failAll），**然后**才回调
@@ -1047,6 +1086,7 @@ struct Client::Impl {
         dc.port = config.port;
         dc.password = config.password;
         dc.noAuth = config.serverAllowNoAuth;
+        dc.payloadCipher = cipher;
         dc.requestedId = dataId;
         dc.receiveDir = targetPath;
         dc.chunkSize = config.chunkSize;
@@ -2452,8 +2492,7 @@ struct Client::Impl {
             }
             negotiateDataId(config.pullFrom, [this, archive](bool ok2, std::string) {
                 if (!ok2) {
-                    finish(false, "对端的数据连接不可用（对方可能正在关闭或未升级协议）",
-                           Status::Fail(ErrorCode::kTimeout, "data channel negotiation failed"));
+                    finish(false, negotiationFailed(), Status::Fail(ErrorCode::kTimeout, "data channel negotiation failed"));
                     return;
                 }
                 doPull(archive);
@@ -2816,7 +2855,7 @@ bool Client::pullOnSession(std::string peerId, std::string relPath, bool archive
             if (!ok2) {
                 Outcome o;
                 o.ok = false;
-                o.summary = "对端的数据连接不可用（对方可能正在关闭或未升级协议）";
+                o.summary = p->negotiationFailed();
                 o.status = Status::Fail(ErrorCode::kTimeout, "data channel negotiation failed");
                 done(o);
                 return;
