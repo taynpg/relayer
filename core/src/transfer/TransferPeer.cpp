@@ -18,7 +18,15 @@ namespace {
 using protocol::Frame;
 using protocol::FrameType;
 
-constexpr auto kAckInterval = std::chrono::milliseconds(20);
+// pump 里检查 ACK 的兜底节流。真正让流水线转起来的是"落盘完成即回 ACK"
+// （见 onChunkWritten 的回调），这里只是兜底：如果某条路径没能触发事件驱动
+// 的 ACK，至少一个 tick 内会补上。
+constexpr auto kAckInterval = std::chrono::milliseconds(2);
+
+// 事件驱动 ACK 的合并窗口：落盘回调里直接回 ACK 时，距上一次 ACK 至少隔
+// 这么久，否则留给 pump 合并。太小会退化成"每块一个 ACK"（发送端每次只能
+// 腾出一个窗口位），太大又白等。
+constexpr auto kAckCoalesce = std::chrono::milliseconds(2);
 
 // ---------------------------------------------------------------------------
 // 吞吐探针（临时诊断，RELAYER_PROF=1 打开）
@@ -45,7 +53,13 @@ struct Prof {
     std::uint64_t submitted = 0;   // sender_->pump 返回的提交块数累计
     std::uint64_t pumpIdle = 0;    // 提交为 0 的轮数（读盘在飞满 / 窗口满）
     std::uint64_t acks = 0;
-    std::uint64_t ackAdvance = 0;   // ackThrough 累计推进块数
+    std::uint64_t ackAdvance = 0;     // ackThrough 累计推进块数
+    std::uint64_t acksSent = 0;       // 本端发出的 ACK 帧数
+    std::uint64_t digestNs = 0;       // 发送前整文件摘要
+    std::uint64_t finalizeNs = 0;     // 接收端收尾建根
+    std::uint64_t ackRecvGapNs = 0;   // 收到的相邻 ACK 的到达间隔
+    std::uint64_t ackRecvGapCount = 0;
+    ProfClock::time_point lastAckAt{};
     std::uint64_t readInFlightSum = 0;
     std::uint64_t busy = 0;   // 接收端拒绝受理的块数（背压丢块）
     // 每次 pump 发出的块数分布：bins[i] = "发出 i 块"的轮数，最后一个桶是 >=9。
@@ -86,6 +100,14 @@ struct Prof {
                      mpumps > 0 ? static_cast<double>(readInFlightSum) / mpumps : 0.0);
         std::fprintf(stderr, "[prof] recv: chunks=%.0f decode=%.0fms accept=%.0fms 背压丢块=%.0f\n", min,
                      static_cast<double>(decodeNs) / 1e6, static_cast<double>(acceptNs) / 1e6, static_cast<double>(busy));
+        std::fprintf(stderr, "[prof] 摘要: 发送前建根=%.0fms 接收端收尾建根=%.0fms\n", static_cast<double>(digestNs) / 1e6,
+                     static_cast<double>(finalizeNs) / 1e6);
+        std::fprintf(stderr, "[prof] ACK: 发出=%.0f 收到=%.0f 收到间隔均=%.1fms 首块→ACK均=%.1fms\n",
+                     static_cast<double>(acksSent), static_cast<double>(acks),
+                     ackRecvGapCount > 0 ? static_cast<double>(ackRecvGapNs) / 1e6 / static_cast<double>(ackRecvGapCount) : 0.0,
+                     firstChunkToAckCount > 0
+                         ? static_cast<double>(firstChunkToAckNs) / 1e6 / static_cast<double>(firstChunkToAckCount)
+                         : 0.0);
         std::fprintf(stderr, "[prof] ACK 间隔均=%.1fms  首块→ACK 均=%.1fms\n",
                      ackGapCount > 0 ? static_cast<double>(ackGapNs) / 1e6 / static_cast<double>(ackGapCount) : 0.0,
                      firstChunkToAckCount > 0
@@ -207,9 +229,16 @@ void TransferPeer::startSending()
     //
     // 代价是"发请求"这个动作被推迟到摘要算完，期间对端什么都不收到。
     // 这在语义上是对的——请求体里的 sha256 本来就得等摘要出来才能填。
-    const auto st = sender_->computeDigest([self = shared_from_this()](TransferSender::DigestResult digest) {
+    const auto digestT0 = ProfClock::now();
+    const auto st = sender_->computeDigest([self = shared_from_this(), digestT0](TransferSender::DigestResult digest) {
         // 回调在 WorkerPool 线程上。所有状态归 strand 管，必须投回去。
-        asio::post(self->ctx_, [self, digest = std::move(digest)] { self->onDigestReady(std::move(digest)); });
+        asio::post(self->ctx_, [self, digest = std::move(digest), digestT0] {
+            if (prof().on) {
+                prof().digestNs = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(ProfClock::now() - digestT0).count());
+            }
+            self->onDigestReady(std::move(digest));
+        });
     });
 
     if (!st.ok()) {
@@ -331,6 +360,15 @@ void TransferPeer::handleChunkAck(const Frame& frame)
 
     ++stats_.acksReceived;
     ++prof().acks;
+    if (prof().on) {
+        const auto nowAck = ProfClock::now();
+        if (prof().lastAckAt != ProfClock::time_point{}) {
+            prof().ackRecvGapNs += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(nowAck - prof().lastAckAt).count());
+            ++prof().ackRecvGapCount;
+        }
+        prof().lastAckAt = nowAck;
+    }
     prof().ackAdvance += std::min<std::uint64_t>(ack.ackThrough, 0xFFFFFFFFULL);
     sender_->applyAck(ack);
 
@@ -381,6 +419,15 @@ void TransferPeer::sendReadyChunks()
     // 不能直接执行：读盘在线程池上，回调里要动 sender_ 的成员（取块、
     // 改状态），而 sender_ 同时被 strand 上的 pump 碰。投回 io_context
     // 让它与 pump 落在同一线程上——本层没有额外加锁，全靠这个串行化。
+    // 这里**故意不**"读盘完成就立刻发"。
+    //
+    // 试过，反而更糟：读盘是一块一块完成的，逐块触发发送就变成"1024 轮
+    // 各发 1 块"，退化成最差的停等（实测每轮 1 块、吞吐 73 MB/s 不升）。
+    // 批量才是吞吐的来源——一批 16 块和一批 1 块的往返成本一模一样。
+    //
+    // 批量的边界由 TransferLink 的 tick 决定（见 Config::tickInterval）：
+    // tick 越短，每批攒的块越少但周转越快；那块的时间尺度要用实测定，
+    // 不能靠"事件驱动就一定更快"的直觉。
     const PostFn post = [&ctx = ctx_](std::function<void()> fn) { asio::post(ctx, std::move(fn)); };
 
     if (prof().on) {
@@ -402,6 +449,9 @@ void TransferPeer::sendReadyChunks()
         std::fflush(stderr);
     }
     prof().submitted += submitted;
+    if (prof().on) {
+        prof().readInFlightSum += sender_->pendingReads();
+    }
     if (submitted == 0) {
         ++prof().pumpIdle;
     }
@@ -692,9 +742,19 @@ void TransferPeer::handleChunkData(const Frame& frame)
 
             // 落盘这件事本身改变了"能确认到哪"，必须让 ACK 重发。
             self->ackPending_ = true;
-            if (self->receiver_->allChunksReceived()) {
-                // 收齐了就不等 pump 的 20ms 节流，立刻回一次，
-                // 否则对端要多等一个周期才进收尾。
+
+            // **落盘完成就回 ACK，不等 pump。**
+            //
+            // pump 是 tick 驱动的（产品里 10ms 一轮，实测 17.6ms），而 ACK
+            // 是发送端腾窗口的唯一来源。等 pump 意味着每一批数据后面固定挂
+            // 一个 tick：实测 ACK 间隔 42ms、吞吐 47 MB/s，而同样的链路在
+            // "ACK 立即发"时能到 100+。
+            //
+            // 用 2ms 的合并窗口而不是每块一个：ackThrough 一次只前进一块时，
+            // 发送端每次也只腾出一个窗口位，反而退化成停等；2ms 能攒十几块。
+            const bool recent = self->lastAckSent_ != std::chrono::steady_clock::time_point{} &&
+                                std::chrono::steady_clock::now() - self->lastAckSent_ < kAckCoalesce;
+            if (!recent || self->receiver_->allChunksReceived()) {
                 self->sendAck();
             }
         });
@@ -716,11 +776,17 @@ void TransferPeer::handleChunkData(const Frame& frame)
 
     if (st.code == ErrorCode::kBusy) {
         ++prof().busy;
-        // 背压。此刻**不能**回 ACK 说收到了——这一块没被受理。让它停在
-        // 对端的窗口里，等我们消化完它自然会重传。
+        // 背压：这一块没被受理（缓冲满了）。**必须立刻回一次 ACK**。
         //
-        // 但也不能什么都不做：如果一直 busy，对端会一直等。这里的选择是
-        // "先不回，等 pump 之后再试"——对端的重传超时会推动它。
+        // 原先这里是直接 return，什么都不做——理由是"不能让对端以为收到了"。
+        // 但那样对端只能等**重传超时**（秒级）才知道该退，这段时间窗口
+        // 一直被这些块占着，整条链路停摆。实测 1GB 传输因此出现约 20 次
+        // 重传、吞吐从 227 掉到 179。
+        //
+        // ACK 走的是 buildCurrentAck()，它基于 **written_**（已落盘），所以
+        // 这次 ACK 不会声称收到了这一块——它只是把"我确认到哪"告诉对端，
+        // 对端据此把后面那些块判成"需要重传"，立刻补发，而不是干等超时。
+        selfAckAfterBackpressure();
         return;
     }
 
@@ -822,6 +888,7 @@ void TransferPeer::sendAck()
     sendFrame(std::move(f));
 
     ++stats_.acksSent;
+    ++prof().acksSent;
     ackPending_ = false;
     const auto nowAck = std::chrono::steady_clock::now();
     if (prof().on) {
@@ -838,6 +905,19 @@ void TransferPeer::sendAck()
         }
     }
     lastAckSent_ = nowAck;
+}
+
+void TransferPeer::selfAckAfterBackpressure()
+{
+    // 背压时立刻把"确认到哪"告诉对端。带上节流：缓冲满意味着会有连续的
+    // kBusy，每块一个 ACK 纯属浪费反向带宽，而 ackThrough 在这段时间里
+    // 根本没前进。
+    const bool recent =
+        lastAckSent_ != std::chrono::steady_clock::time_point{} && std::chrono::steady_clock::now() - lastAckSent_ < kAckCoalesce;
+    ackPending_ = true;
+    if (!recent) {
+        sendAck();
+    }
 }
 
 void TransferPeer::sendAnswerSend(AnswerStatus status, std::uint32_t resumeFrom, std::string_view reason)

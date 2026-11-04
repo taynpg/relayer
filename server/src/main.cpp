@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "relayer/common/Console.h"
+#include "relayer/common/TimerResolution.h"
 #include "relayer/server/Server.h"
 
 // relayerd 的入口。
@@ -180,6 +181,7 @@ ParseResult parseArgs(int argc, char** argv)
 
 int main(int argc, char** argv)
 {
+    const relayer::common::TimerResolutionGuard timerGuard;
     // 终端编码先修好再输出任何东西：下面所有中文报错都是 UTF-8 字节串，
     // 而 Windows 控制台默认按代码页（中文系统 GBK）解释字节，不修就是乱码。
     // init() 管 C++ 流，use_utf8_locale() 管 printf 系（本文件全用 printf，

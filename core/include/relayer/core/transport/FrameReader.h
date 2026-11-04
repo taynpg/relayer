@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <deque>
 #include <vector>
 
 #include "relayer/common/Status.h"
@@ -57,10 +56,13 @@ public:
     // 要把能解的帧全部解完，不能只解一个就回去等。
     [[nodiscard]] bool next(protocol::Frame& frame, Status& status);
 
-    // 当前缓冲的字节数（诊断用）
+    // 当前**尚未消费**的字节数（诊断用）。
+    //
+    // 注意语义：不是"容器里有多少字节"。容器尾部可能还留着已经消费过的
+    // 前缀等压缩（见 consume 的说明），那些不再算作缓冲。
     [[nodiscard]] std::size_t buffered() const noexcept
     {
-        return buffer_.size();
+        return available();
     }
 
     // 已成功解出的帧数（诊断用）
@@ -81,12 +83,45 @@ public:
     void clear() noexcept;
 
 private:
-    // 用 deque<char> 而不是 vector<char>：需要从头部消费字节，vector 的
-    // erase(begin(), begin()+n) 是 O(n) 搬移，粘包场景下会变成二次复杂度。
-    // deque 的 pop_front 是 O(1)。
-    std::deque<char> buffer_;
+    // **vector + 读指针**，不是 deque<char>。
+    //
+    // 原先用 deque 的理由是"要从头部消费字节，deque 的 pop_front 是 O(1)"。
+    // 那个理由只在"每次消费几个字节"时成立，而实际消费模式是**每帧
+    // 256KiB~1MiB**，且原实现是逐字节做的：
+    //
+    //     for (i < frameLen) contiguous.push_back(*it++);   // 逐字节跨 deque 块
+    //     for (i < consumed) buffer_.pop_front();           // 逐字节弹出
+    //
+    // 一帧 256 KiB 就是 26 万次迭代器操作 + 26 万次 pop_front，实测单帧
+    // 4-5ms。256 KiB 分块下整体稳定在 40 MB/s，而且**块越大越慢**——
+    // 这正是"调块大小、调窗口、调并发全都没用"的原因：瓶颈根本不在那些
+    // 参数上，而在这里的逐字节搬运。
+    //
+    // 换成 vector + readPos_ 之后：整帧只需一次 memcpy，消费只需一次加法。
+    // 头部垃圾的压缩是摊销 O(1)——压一次搬动的字节数不少于搬动前累积的
+    // 已消费量，而它们每字节只会被搬一次。
+    std::vector<char> buffer_;
+    std::size_t readPos_ = 0;
+
+    // 复用给 unpackFrame 的连续缓冲。每帧一次 resize（只增不减）比每帧
+    // 新建一个 vector 省一次分配——高频路径上这仍然值。
+    std::vector<char> scratch_;
+
     std::uint64_t framesRead_ = 0;
     std::uint64_t garbageBytes_ = 0;
+
+    [[nodiscard]] std::size_t available() const noexcept
+    {
+        return buffer_.size() - readPos_;
+    }
+
+    [[nodiscard]] const char* readPtr() const noexcept
+    {
+        return buffer_.data() + readPos_;
+    }
+
+    // 消费 n 字节。读指针过半时压缩一次，避免容器无限增长。
+    void consume(std::size_t n) noexcept;
 };
 
 }   // namespace relayer::core::transport

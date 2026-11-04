@@ -2,9 +2,13 @@
 
 #include "MainWindow.h"
 #include "SingleInstance.h"
+#include "relayer/common/TimerResolution.h"
 
 int main(int argc, char* argv[])
 {
+    // GUI 自己跑事件循环，同样受 Windows 默认 15.6ms 定时器分辨率影响；
+    // 而传输引擎的推进完全按 tick 走（见 TimerResolution.h）。
+    const relayer::common::TimerResolutionGuard timerGuard;
     QApplication app(argc, argv);
     QApplication::setApplicationName("relayer");
     QApplication::setApplicationVersion(RELAYER_VERSION);

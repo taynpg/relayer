@@ -18,6 +18,7 @@
 add_library(relayer_common STATIC
     src/Status.cpp
     src/Console.cpp
+    src/TimerResolution.cpp
     src/crypto/Sha256.cpp
     src/crypto/Aes256Gcm.cpp
 )
@@ -25,3 +26,10 @@ add_library(relayer_common STATIC
 target_include_directories(relayer_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 relayer_set_warnings(relayer_common)
+
+if(WIN32)
+    # timeBeginPeriod：把系统定时器分辨率从 15.6ms 提到 1ms。传输引擎的推进
+    # 完全按 tick 走，默认分辨率会把每次 tick 向上取整到 15.6ms，吞吐因此
+    # 被钉死（实测 25-48 MB/s）。见 TimerResolution.h 里的详细说明。
+    target_link_libraries(relayer_common PUBLIC winmm)
+endif()

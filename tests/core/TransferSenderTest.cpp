@@ -488,10 +488,9 @@ TEST_CASE("digest matches an independent computation", "[transfer][sender]")
     const auto d = sender.computeDigestSync();
     REQUIRE(d.status.ok());
 
-    // 整文件 SHA-256：直接用 common 里的实现，走的是另一条代码路径。
-    crypto::Sha256 sha;
-    sha.update(content.data(), content.size());
-    REQUIRE(d.sha256Hex == crypto::Sha256::hex(sha.digest()));
+    // 整文件 SHA-256 **不再计算**（没有消费方，见 PROTOCOL §9.4 的说明）。
+    // 这里断言为空，防止哪天有人"顺手把它加回来"却又没人用。
+    REQUIRE(d.sha256Hex.empty());
 
     // Merkle 根：用 rootOfBuffer 独立算，它不经过 MerkleBuilder。
     const auto expectedRoot = rootOfBuffer(content.data(), content.size(), kChunk);
@@ -513,8 +512,7 @@ TEST_CASE("digest of an empty file", "[transfer][sender]")
     // 空文件的 Merkle 根是 SHA256("")，不是全零。
     REQUIRE(d.merkleRootHex == toHex(emptyRoot()));
 
-    crypto::Sha256 sha;
-    REQUIRE(d.sha256Hex == crypto::Sha256::hex(sha.digest()));
+    REQUIRE(d.sha256Hex.empty());
 }
 
 TEST_CASE("digest callback form delivers a result", "[transfer][sender]")
@@ -539,7 +537,7 @@ TEST_CASE("digest callback form delivers a result", "[transfer][sender]")
     REQUIRE(waitUntil([&called] { return called.load(std::memory_order_acquire); }));
     REQUIRE(got.status.ok());
     REQUIRE(got.merkleRootHex.size() == 64);
-    REQUIRE(got.sha256Hex.size() == 64);
+    REQUIRE(got.sha256Hex.empty());
 }
 
 // ===========================================================================

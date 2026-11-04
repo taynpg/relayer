@@ -118,6 +118,8 @@ Status TransferReceiver::open(const TransferDesc& desc, std::string_view targetP
         std::lock_guard<std::mutex> lock(mu_);
         written_.assign(totalChunks_, false);
         received_.assign(totalChunks_, false);
+        leafHashes_.assign(totalChunks_, crypto::Sha256::Digest{});
+        leafReady_.assign(totalChunks_, false);
     }
 
     // 目标已存在：一律拒绝，不按大小放宽。
@@ -429,6 +431,21 @@ Status TransferReceiver::acceptChunk(std::uint32_t chunkIndex, const void* data,
             return;
         }
 
+        // 顺手把叶子哈希算掉：内容此刻就在手上，再读一遍纯属浪费。
+        // 在写盘线程上算，天然摊到多个并发任务里。
+        crypto::Sha256::Digest leaf{};
+        if (ws.ok()) {
+            leaf = leafHash(c.data.data(), c.data.size(), chunkSize_);
+        }
+
+        if (ws.ok()) {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (c.chunkIndex < leafHashes_.size()) {
+                leafHashes_[c.chunkIndex] = leaf;
+                leafReady_[c.chunkIndex] = true;
+            }
+        }
+
         if (post) {
             post([this, cc = std::move(c)]() mutable { onChunkWritten(std::move(cc)); });
         }
@@ -575,61 +592,73 @@ TransferReceiver::FinalizeResult TransferReceiver::finalize(std::string_view exp
         return out;
     }
 
-    // 重读残片算根。为什么不在写的时候顺手攒叶子：写盘是乱序的，攒叶子
-    // 得按块号拼回去，那等于在内存里再留一份完整文件。重读一遍是顺序读，
-    // 代价换来"内存占用与文件大小无关"。
-    Status readStatus;
-    auto in = store_.openRead(partPath_, readStatus);
-    if (!in) {
-        out.status = CompleteStatus::kWriteFailed;
-        out.error = readStatus.ok() ? Status::Fail(ErrorCode::kIoError, "open part file for verify failed") : readStatus;
-        return out;
+    // 用**写盘时攒下的叶子哈希**建树，不再重读残片。
+    //
+    // 原先这里 openRead + 顺序读一遍 + 每块算 leafHash，在 io 线程上串行
+    // 跑：256MB 实测 800ms，是端到端时间里仅次于"发送前建根"的一块。
+    // 而每一块的哈希在写盘那一刻就已经能算了——内容就在手上。
+    //
+    // 内存代价是 chunkCount × 32 字节（1GB / 256KB = 128KB），并且这一份
+    // 数据本来就要按块号索引，与"是否留一份完整文件"完全无关。
+    std::vector<crypto::Sha256::Digest> leaves;
+    bool allReady = false;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        leaves = leafHashes_;
+        allReady = leaves.size() == totalChunks_ && leafReady_.size() == totalChunks_ &&
+                   std::all_of(leafReady_.begin(), leafReady_.end(), [](bool b) { return b; });
     }
 
-    MerkleBuilder builder(chunkSize_);
-    std::vector<char> buf(chunkSize_);
-    std::uint64_t remaining = totalSize_;
-
-    while (remaining > 0) {
-        const auto want = static_cast<std::size_t>(std::min<std::uint64_t>(remaining, buf.size()));
-
-        std::size_t got = 0;
-        while (got < want) {
-            Status rs;
-            const auto n = in->read(buf.data() + got, want - got, rs);
-            if (!rs.ok()) {
-                out.status = CompleteStatus::kWriteFailed;
-                out.error = std::move(rs);
-                return out;
-            }
-            if (n == 0) {
-                // 上面已经比过长度了，走到这里说明文件在比对之后变短了
-                // （另一个进程在动它）。当作写失败，让上层重来。
-                out.status = CompleteStatus::kWriteFailed;
-                out.error = Status::Fail(ErrorCode::kIoError, "part file shrank during verify");
-                return out;
-            }
-            got += n;
-        }
-
-        if (auto bs = builder.addChunk(buf.data(), want); !bs.ok()) {
-            out.status = CompleteStatus::kShapeMismatch;
-            out.error = std::move(bs);
+    if (allReady) {
+        out.actualRootHex = toHex(computeRoot(leaves));
+    } else {
+        // 有块没算过（续传：残片里已有的块不走写盘路径），回退到重读。
+        //
+        // 这条路径只续传时才走，且只在这时才有意义——新传输全部块都经过
+        // 写盘，叶子哈希是齐的。回退保持正确性优先：多读一遍是几百毫秒，
+        // 而拿默认值拼出来的根会让整个校验失败、残片被删。
+        Status readStatus;
+        auto in = store_.openRead(partPath_, readStatus);
+        if (!in) {
+            out.status = CompleteStatus::kWriteFailed;
+            out.error = readStatus.ok() ? Status::Fail(ErrorCode::kIoError, "open part file for verify failed") : readStatus;
             return out;
         }
-        remaining -= want;
+
+        MerkleBuilder builder(chunkSize_);
+        std::vector<char> buf(chunkSize_);
+        std::uint64_t remaining = totalSize_;
+        while (remaining > 0) {
+            const auto want = static_cast<std::size_t>(std::min<std::uint64_t>(remaining, buf.size()));
+            std::size_t got = 0;
+            while (got < want) {
+                Status rs;
+                const auto n = in->read(buf.data() + got, want - got, rs);
+                if (!rs.ok()) {
+                    out.status = CompleteStatus::kWriteFailed;
+                    out.error = std::move(rs);
+                    return out;
+                }
+                if (n == 0) {
+                    out.status = CompleteStatus::kWriteFailed;
+                    out.error = Status::Fail(ErrorCode::kIoError, "part file shrank during verify");
+                    return out;
+                }
+                got += n;
+            }
+            if (auto bs = builder.addChunk(buf.data(), want); !bs.ok()) {
+                out.status = CompleteStatus::kShapeMismatch;
+                out.error = std::move(bs);
+                return out;
+            }
+            remaining -= want;
+        }
+
+        // 读流必须在这里关掉：Windows 上 MoveFileEx 对"仍有打开句柄的源文件"
+        // 会失败（ERROR_SHARING_VIOLATION），而下面紧接着就是 atomicReplace。
+        in.reset();
+        out.actualRootHex = toHex(builder.root());
     }
-
-    out.actualRootHex = toHex(builder.root());
-
-    // 读流必须在这里关掉，不能等 finalize 返回。
-    //
-    // Windows 上 MoveFileEx 对"仍有打开句柄的源文件"会失败（ERROR_SHARING_VIOLATION），
-    // 而下面的 atomicReplace 正是移动这个残片。POSIX 上未关闭的读句柄不挡 rename，
-    // 所以这个 bug 只在 Windows 上出现——表现是"校验全过、就是改不了名"。
-    //
-    // 显式 reset 而不是靠作用域：后面还有比根、改名的逻辑，作用域要拖到最后。
-    in.reset();
 
     // 根比对。大小写不敏感：十六进制在描述里规定是小写，但对方实现
     // 若给了大写，拒绝它没有意义——那是同一份内容。

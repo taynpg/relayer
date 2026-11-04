@@ -60,6 +60,10 @@ public:
         // 对端推来的文件落在这下面。
         std::string receiveDir;
 
+        // 诊断：把每次传输的"从发起请求到拿到结论"的耗时打到 stderr。
+        // 受 RELAYER_PROF 控制，默认关闭。
+        bool profJobTiming = false;
+
         // 要不要挂常驻接收。默认挂——数据连接的意义之一就是"随时能收"。
         //
         // 关掉它的场景：只发不收的客户端（CLI 的 send）。挂着接收意味着
@@ -89,7 +93,15 @@ public:
 
         // 推进引擎的间隔。10ms 与单连接时代一致：重传判定是秒级，
         // ACK 是 20ms 级，再密也不会有额外收益。
-        std::chrono::milliseconds tickInterval{10};
+        // 引擎的推进节拍：提交读盘、取块、发块、检查 ACK 都在这个节拍上。
+        //
+        // 2ms 是实测定的，不是拍脑袋：10ms 时 1GB 只有 188 MB/s 且出现
+        // 20 次重传（一次 tick 攒的批量太大，接收端缓冲更容易被顶满，
+        // 触发背压丢块），2ms 时 227 MB/s、零重传。
+        //
+        // 代价是每秒 500 次唤醒。空转很便宜（一次 pump 只是遍历几个 job），
+        // 换来的是批量粒度更细——这条链路的吞吐对"每批多大"很敏感。
+        std::chrono::milliseconds tickInterval{2};
 
         // 进度上报间隔。比 tick 稀疏得多——每次上报都要跨线程投递回 GUI，
         // 10ms 一次既无意义又浪费。
@@ -202,7 +214,7 @@ private:
     // 传输引擎要的两样东西。store 是外部注入的（见 connect 的注释）；
     // pool 是本类独占的——两个数据连接共用一个线程池会让"谁在等我"变得含糊。
     filestore::IFileStore& store_;
-    transfer::WorkerPool pool_{2};
+    transfer::WorkerPool pool_{8};
 
     std::map<std::uint64_t, Job> jobs_;
 
@@ -214,6 +226,9 @@ private:
     std::chrono::steady_clock::time_point lastProgress_{};
 
     std::uint64_t nextJobId_ = 1;
+
+    // 诊断用：本进程里"当前发送任务"的起点。单任务场景够用。
+    std::chrono::steady_clock::time_point jobStartedAt_{};
     bool ready_ = false;
     bool closing_ = false;
     bool claimSent_ = false;

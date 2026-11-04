@@ -237,6 +237,10 @@ private:
     void handleChunkData(const protocol::Frame& frame);
     void handleCompleteRequest(const protocol::Frame& frame);
     void sendAck();
+
+    // 背压（acceptChunk 返回 kBusy）时立刻回一次 ACK，把"确认到哪"告诉
+    // 对端，让它马上重发而不是等重传超时。带合并节流。
+    void selfAckAfterBackpressure();
     void sendAnswerSend(AnswerStatus status, std::uint32_t resumeFrom, std::string_view reason);
 
     // 两边共用

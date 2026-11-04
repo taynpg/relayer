@@ -23,6 +23,7 @@ session::SessionConfig makeSessionConfig(const TransferLink::Config& cfg)
 TransferLink::TransferLink(asio::io_context& ctx, Config config, filestore::IFileStore& store, Handler handler)
     : ctx_(ctx), config_(std::move(config)), handler_(std::move(handler)), store_(store), tick_(ctx)
 {
+    config_.profJobTiming = std::getenv("RELAYER_PROF") != nullptr;
 }
 
 TransferLink::~TransferLink() = default;
@@ -201,6 +202,7 @@ std::uint64_t TransferLink::sendFile(std::string sourcePath, std::string remoteN
         return 0;
     }
     jobs_.emplace(id, std::move(job));
+    jobStartedAt_ = std::chrono::steady_clock::now();
     return id;
 }
 
@@ -278,6 +280,18 @@ void TransferLink::onJobDone(std::uint64_t id, const transfer::TransferResult& r
     // 那时 jobs_ 必须已经干净。
     Job job = std::move(it->second);
     jobs_.erase(it);
+
+    // 诊断：传输期（从 sendFile 到拿到结论）。它是"引擎自己跑了多久"，
+    // 与端到端命令耗时的差就是握手 + 摘要计算 + 收尾。
+    if (config_.profJobTiming && jobStartedAt_ != std::chrono::steady_clock::time_point{}) {
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - jobStartedAt_).count();
+        const auto p = job.peer ? job.peer->progress() : transfer::TransferProgress{};
+        const double mb = static_cast<double>(p.bytesTotal) / (1024.0 * 1024.0);
+        std::fprintf(stderr, "[prof] job 传输期=%.0fms %.1fMB => %.1f MB/s (outcome=%d)\n", ms, mb,
+                     ms > 0.0 ? mb / (ms / 1000.0) : 0.0, static_cast<int>(result.outcome));
+        std::fflush(stderr);
+        jobStartedAt_ = {};
+    }
 
     if (handler_.onFinished) {
         handler_.onFinished(infoOf(job), result);

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "relayer/common/Status.h"
+#include "relayer/core/transfer/MerkleTree.h"
 #include "relayer/core/transfer/TransferPayload.h"
 #include "relayer/core/transfer/TransferPipeline.h"
 #include "relayer/core/transfer/WorkerPool.h"
@@ -77,13 +78,18 @@ public:
         // 上限换算成内存是确定的（maxBufferedChunks × chunkSize）。
         // 默认 16 × 256 KiB = 4 MiB 未落盘缓冲；块大小调到 4 MiB 时会变成
         // 64 MiB，调大块之前先想想这个数。
-        std::uint32_t maxBufferedChunks = 16;
+        // "已收未落盘"的块数上限，也就是背压的着力点。64 块 × 256 KiB
+        // = 16 MiB。它要明显大于发送端的窗口（48 块），否则两边一贴边就
+        // 触发丢块重传（见 TransferSender::Config::windowBytes 的说明）。
+        std::uint32_t maxBufferedChunks = 64;
 
         // 同时在写盘的任务数上限。与上面那个是独立约束：
         // 上面管"内存里堆着多少块"，这里管"磁盘上同时排着多少请求"。
         //
         // 慢盘时这里先满，快盘慢网时上面那个先满。分开才能看出瓶颈在哪。
-        std::uint32_t maxWriteInFlight = 4;
+        // 同时写盘的块数。写盘本身在 writeMu_ 上串行（流的定位是共享
+        // 状态），所以这个数字只影响"排队深度"，不是并行度。
+        std::uint32_t maxWriteInFlight = 16;
 
         // 落盘时是否 fsync。默认关：逐块 fsync 在机械盘上能把吞吐压到
         // 1/10，而它的收益只是"断电时不丢已 ACK 的块"。
@@ -231,6 +237,24 @@ private:
     std::string targetPath_;
     std::string partPath_;
     std::uint32_t chunkSize_ = 0;
+
+    // 每块的叶子哈希，在**写盘时顺手算**（那时内容就在手上）。
+    //
+    // 原先 finalize 要重读一遍残片来算根，理由是"写盘是乱序的，按块号拼
+    // 回去等于在内存里再留一份完整文件"——那个推理不成立：这里存的是
+    // 每块 32 字节的摘要，1GB / 256KB 也只是 128KB。
+    //
+    // 代价对比很清楚：重读一遍是 800ms（256MB，实测，且是在 io 线程上
+    // 串行算 SHA-256），而顺手算是**零额外 I/O**，还摊到十几个写盘任务上
+    // 并发完成。
+    std::vector<crypto::Sha256::Digest> leafHashes_;
+
+    // 哪些块的叶子哈希真的算过。
+    //
+    // **续传时会有空洞**：残片里已有的块不会再走写盘路径，它们的哈希也就
+    // 没算过。此时不能拿 leafHashes_ 建树（会用默认值算出错误的根，表现为
+    // "校验失败"），必须回退到"重读残片"。这个标记就是那两者的分界。
+    std::vector<bool> leafReady_;
     std::uint64_t totalSize_ = 0;
     std::uint32_t totalChunks_ = 0;
     TransferDesc desc_;

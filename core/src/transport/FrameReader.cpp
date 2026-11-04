@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 
 namespace relayer::core::transport {
 
@@ -39,7 +40,11 @@ Status FrameReader::append(const char* data, std::size_t len)
 
     // 先检查上限再插入：如果直接插进去再判断，超大输入已经占用了内存，
     // 检查就失去意义了。
-    if (buffer_.size() + len > kMaxBufferedBytes) {
+    //
+    // 配额按**未消费**字节算，不是容器大小：容器尾部可能还留着已消费的
+    // 前缀等着压缩（见 consume），把它们算进来会让"连续收几千个小帧"
+    // 误判成溢出。
+    if (available() + len > kMaxBufferedBytes) {
         return Status::Fail(ErrorCode::kProtocol, "frame reader buffer overflow: peer is not sending valid frames");
     }
 
@@ -82,21 +87,16 @@ bool FrameReader::next(protocol::Frame& frame, Status& status)
         // 现在只在两种情况下拷贝：找 magic 时最多 4 字节，以及整帧确实收齐
         //   之后拷一次。每次 read 的常态开销降到几十字节。
         // ------------------------------------------------------------------
-        const std::size_t avail = buffer_.size();
+        const std::size_t avail = available();
 
         // 不足一个固定头：连帧长都读不出来，等下一次 append。
         if (avail < protocol::frame::kFixedHeaderSize) {
             return false;
         }
 
-        // 拷出固定头。36 字节，代价与缓冲大小无关。
+        // 拷出固定头。36 字节，一次 memcpy，与缓冲大小无关。
         char head[protocol::frame::kFixedHeaderSize];
-        {
-            std::size_t i = 0;
-            for (auto it = buffer_.begin(); i < sizeof(head); ++it, ++i) {
-                head[i] = *it;
-            }
-        }
+        std::memcpy(head, readPtr(), sizeof(head));
 
         // 先找 magic。magic 不在开头说明前面是垃圾（连接中段混入的字节，
         // 或者上一条流没排干净）。逐字节丢掉，直到 magic 落在开头。
@@ -113,18 +113,14 @@ bool FrameReader::next(protocol::Frame& frame, Status& status)
             skip = (avail > 3) ? (avail - 3) : 0;
             if (skip > 0) {
                 garbageBytes_ += skip;
-                for (std::size_t i = 0; i < skip; ++i) {
-                    buffer_.pop_front();
-                }
+                consume(skip);
             }
             return false;
         }
 
         if (skip > 0) {
             garbageBytes_ += skip;
-            for (std::size_t i = 0; i < skip; ++i) {
-                buffer_.pop_front();
-            }
+            consume(skip);
             // 丢掉垃圾之后缓冲可能已经不足一个固定头了，重新判断。
             continue;
         }
@@ -139,7 +135,7 @@ bool FrameReader::next(protocol::Frame& frame, Status& status)
         // 缓冲上限然后断连。跳过 1 字节是最便宜的正确做法。
         if (frameLen < protocol::frame::kMinFrameSize || frameLen > protocol::frame::kMaxFrameSize) {
             garbageBytes_ += 1;
-            buffer_.pop_front();
+            consume(1);
             continue;
         }
 
@@ -154,23 +150,17 @@ bool FrameReader::next(protocol::Frame& frame, Status& status)
         // ------------------------------------------------------------------
         // 第二步：整帧收齐了，拷这一次交给 unpackFrame 做完整校验与解析。
         // ------------------------------------------------------------------
-        std::vector<char> contiguous;
-        contiguous.reserve(frameLen);
-        {
-            std::size_t i = 0;
-            for (auto it = buffer_.begin(); i < frameLen; ++it, ++i) {
-                contiguous.push_back(*it);
-            }
-        }
+        // 一次 memcpy 把整帧摊平。scratch_ 复用（只增不减），避免每帧一次
+        // 分配——这条路径每 256 KiB 就走一次。
+        scratch_.resize(frameLen);
+        std::memcpy(scratch_.data(), readPtr(), frameLen);
 
         std::size_t consumed = 0;
-        const auto result = protocol::unpackFrame(contiguous.data(), contiguous.size(), frame, consumed);
+        const auto result = protocol::unpackFrame(scratch_.data(), scratch_.size(), frame, consumed);
 
         switch (result) {
         case protocol::UnPackResult::kOk:
-            for (std::size_t i = 0; i < consumed; ++i) {
-                buffer_.pop_front();
-            }
+            consume(consumed);
             ++framesRead_;
             return true;
 
@@ -180,9 +170,7 @@ bool FrameReader::next(protocol::Frame& frame, Status& status)
                 // 否掉了它，于是只跳过 consumed 字节继续找。这与上面的帧长
                 // 检查是两层过滤：前者便宜但粗，后者完整但需要整帧。
                 garbageBytes_ += consumed;
-                for (std::size_t i = 0; i < consumed; ++i) {
-                    buffer_.pop_front();
-                }
+                consume(consumed);
                 continue;
             }
             // consumed == 0：整帧都拷出来了却说缺字节，只能继续等。
@@ -204,6 +192,29 @@ bool FrameReader::next(protocol::Frame& frame, Status& status)
 void FrameReader::clear() noexcept
 {
     buffer_.clear();
+    readPos_ = 0;
+}
+
+void FrameReader::consume(std::size_t n) noexcept
+{
+    readPos_ += n;
+    if (readPos_ > buffer_.size()) {
+        // 调用方多消费了。不该发生；夹住比让 readPos_ 越界安全——
+        // 越界之后 available() 会下溢成一个巨大的数，表现为"永远等不够"。
+        readPos_ = buffer_.size();
+    }
+
+    // 压缩：读指针过半时把已消费的前缀搬掉。
+    //
+    // 两个条件缺一不可——
+    //   阈值（readPos_ >= 64 KiB）：小帧场景下别每帧搬一次；
+    //   过半（readPos_ * 2 >= size）：保证摊销 O(1)，否则"消费一点搬一点"
+    //   会退化成 O(n²)。
+    constexpr std::size_t kCompactThreshold = 64u * 1024;
+    if (readPos_ >= kCompactThreshold && readPos_ * 2 >= buffer_.size()) {
+        buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(readPos_));
+        readPos_ = 0;
+    }
 }
 
 }   // namespace relayer::core::transport
