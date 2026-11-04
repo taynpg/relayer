@@ -782,6 +782,17 @@ struct Client::Impl {
                 if (token.expired() || finished) {
                     return;
                 }
+                // 这一步是"只有数据连接断了"的分支，但排进队列之后控制连接
+                // 完全可能也断了（两条 TCP 的死讯本来就差不了几毫秒）：那时
+                // 重连已经排上，恢复的接力棒该交给 onLinkRestored。
+                //
+                // 不查这一下会开一个很难看的窗口：这里把 suspended 清成
+                // false，随后到达的"请求失败"回调就会以为"链路是好的、
+                // 这条请求真的失败了"，直接结束整个会话——症状是断线后
+                // 偶尔整个会话没了，而不是重连。
+                if (reconnectPending || control == nullptr || !control->ready()) {
+                    return;
+                }
                 // 恢复的接力棒交出去了：从这里开始是新链路自己的事。
                 // 不清它的话空闲看门狗会永久停摆（"一直以为在重连"）。
                 suspended = false;
@@ -1032,7 +1043,12 @@ struct Client::Impl {
         }
         std::weak_ptr<char> token = alive;
         asio::post(ctx, [this, token, summary = std::move(summary), st = std::move(st)]() mutable {
-            if (token.expired() || finished || suspended) {
+            if (token.expired() || finished) {
+                return;
+            }
+            // 还在重连周期里（或者连链路都没回来）：这条请求是那次断线的
+            // 副产品，交给重连接管，别让它替用户做"会话结束"的决定。
+            if (suspended || reconnectPending || control == nullptr || !control->ready()) {
                 return;
             }
             finish(false, std::move(summary), std::move(st), true);

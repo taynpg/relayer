@@ -48,6 +48,86 @@ def wait_listen(port: int, timeout: float = 20.0) -> None:
     raise SystemExit(f"中继在 {timeout:.0f}s 内没开始监听 {port}")
 
 
+def run_reconnect_case(server_exe: Path, smoke: Path, tmp: Path) -> int:
+    """杀掉中继再拉起来：界面这一层的常驻会话必须自己重连上。
+
+    为什么值得单独一条：重连逻辑在 CLI 有 e2e（`reconnect-resume`），但
+    "CoreService 到底有没有把 ReconnectPolicy 打开"只有这里能证——它是一行
+    配置，写错了不会报错，只会在真实断线时表现为"整个会话没了"。
+
+    时序：脚本看到 `phase=1` 就杀中继，1.5 秒后在同一端口拉起来。客户端那边
+    等 6 秒再发第二次列举，中间那段时间要么在退避、要么已经重连上。
+    """
+    recv = tmp / "recv-reconnect"
+    recv.mkdir(exist_ok=True)
+    settings = tmp / "settings-reconnect"
+    settings.mkdir(exist_ok=True)
+    port = free_port()
+
+    server_log = open(tmp / "server-reconnect.log", "wb")
+    server = subprocess.Popen(
+        [str(server_exe), "--port", str(port), "--allow-no-auth"],
+        stdout=server_log,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+    )
+    try:
+        wait_listen(port)
+        proc = subprocess.Popen(
+            [str(smoke), "--port", str(port), "--dir", str(recv), "--id", "gui-smoke",
+             "--settings-dir", str(settings), "--browse-twice"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        lines: list[str] = []
+        killed = False
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            lines.append(line)
+            print(line)
+            if "phase=1" in line and not killed:
+                killed = True
+                server.kill()
+                server.wait()
+                time.sleep(1.5)
+                server = subprocess.Popen(
+                    [str(server_exe), "--port", str(port), "--allow-no-auth"],
+                    stdout=server_log,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                )
+                wait_listen(port)
+
+        rc = proc.wait(timeout=60)
+        out = "\n".join(lines)
+        if rc != 0:
+            print(f"gui_smoke（重连）退出码 {rc}", file=sys.stderr)
+            return 1
+        if "SMOKE_RECONNECTED" not in out:
+            print("没有发生重连（CoreService 大概没打开 ReconnectPolicy）", file=sys.stderr)
+            return 1
+        # 第二次列举必须 ok=1。逐行找而不是 `in out`：ok=0 的行也满足
+        # "含 phase=2"，只查子串会把失败看成成功。
+        second = [ln for ln in lines if "phase=2" in ln]
+        if not second or "ok=1" not in second[0]:
+            print("重连之后的第二次列举没有成功", file=sys.stderr)
+            return 1
+        return 0
+    finally:
+        if server.poll() is None:
+            server.terminate()
+            try:
+                server.wait(5)
+            except subprocess.TimeoutExpired:
+                server.kill()
+        server_log.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", required=True, help="可执行文件目录")
@@ -68,6 +148,10 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="relayer-gui-smoke-"))
     recv = tmp / "recv"
     recv.mkdir()
+    # QSettings 的落点：临时目录。不隔离的话这个测试会往用户真实设置里写
+    # "开启加密 + 测试口令"，跑一次就把人家的客户端改了。
+    settings = tmp / "settings"
+    settings.mkdir()
     port = free_port()
 
     server_log = open(tmp / "server.log", "wb")
@@ -79,8 +163,12 @@ def main() -> int:
     )
     try:
         wait_listen(port)
+        # --compress / --encrypt 走的是**真实路径**：先写 QSettings，再由
+        # CoreService::makeConfig 读出来。所以这一条同时验了"设置对话框存
+        # 的东西真的被消费了"——键名写错的话下面那条断言会红。
         r = subprocess.run(
-            [str(smoke), "--port", str(port), "--dir", str(recv), "--id", "gui-smoke"],
+            [str(smoke), "--port", str(port), "--dir", str(recv), "--id", "gui-smoke",
+             "--settings-dir", str(settings), "--compress", "--encrypt", "smoke-pass"],
             capture_output=True,
             text=True,
             timeout=60,
@@ -99,7 +187,13 @@ def main() -> int:
         if "SMOKE_BROWSE ok=1" not in out:
             print("列举没有成功", file=sys.stderr)
             return 1
-        return 0
+        if "SMOKE_SECURITY encrypted=1 compressed=1" not in out:
+            print("设置没走到 ClientConfig（加密/压缩应显示为开）", file=sys.stderr)
+            return 1
+
+        # 第二条：断线重连。用同一份可执行文件、另一个端口跑。
+        print("--- 断线重连 ---")
+        return run_reconnect_case(server, smoke, tmp)
     finally:
         proc.terminate()
         try:

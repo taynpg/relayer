@@ -33,9 +33,24 @@ inline constexpr const char* kReceiverAutoRetry = "receiver/autoRetry";         
 inline constexpr const char* kReceiverRetryInterval = "receiver/retryInterval";   // 秒
 inline constexpr const char* kReceiverRetryMax = "receiver/retryMax";             // 次，0=一直
 
+// 传输（Setting 对话框；CoreService::makeConfig 消费）
+//
+// 与 v1 的对应关系：v1 的「压缩传输」和「加密传输」是两个组，各有开关
+// （加密还有口令）。v2 拿到对应物之后按同样的形状补回来：
+//   - compress   → 对应 v1 的 cbCompress（v1 那个阈值是"单包上限"，
+//                  属于打包流程；v2 的打包上限是协议常量，不做成选项）
+//   - encrypt    → 对应 v1 的 cbEncrypt + edEncryptKey
+inline constexpr const char* kSenderCompress = "sender/compress";                   // bool
+inline constexpr const char* kSecurityEncrypt = "security/encrypt";                 // bool
+inline constexpr const char* kSecurityEncryptPass = "security/encryptPassphrase";   // string
+
 // 上述键的默认值
 inline constexpr bool kAutoRetryDefault = true;
 inline constexpr int kRetryIntervalDefault = 3;   // 秒
 inline constexpr int kRetryMaxDefault = 3;        // 次
+// 压缩默认关：它吃 CPU，而不压缩时两端行为完全一致（见 PROTOCOL §9.4.2）。
+inline constexpr bool kSenderCompressDefault = false;
+// 加密默认关：要求两端事先约定同一个口令，而"打开就能用"是这个工具的前提。
+inline constexpr bool kSecurityEncryptDefault = false;
 }   // namespace settings
 }   // namespace relayer::app

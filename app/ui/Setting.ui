@@ -95,6 +95,60 @@
     </widget>
    </item>
    <item>
+    <widget class="QGroupBox" name="gbTransport">
+     <property name="title">
+      <string>传输</string>
+     </property>
+     <layout class="QVBoxLayout" name="verticalLayout_4">
+      <item>
+       <widget class="QCheckBox" name="ckCompress">
+        <property name="text">
+         <string>压缩发送的数据（文本类文件能省一半以上，已压缩的文件自动跳过）</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="horizontalLayout_4">
+        <item>
+         <widget class="QCheckBox" name="ckEncrypt">
+          <property name="text">
+           <string>加密载荷（中继看不到文件内容）</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="lbEncryptPass">
+          <property name="text">
+           <string>口令：</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLineEdit" name="edEncryptPass">
+          <property name="echoMode">
+           <enum>QLineEdit::EchoMode::Password</enum>
+          </property>
+          <property name="placeholderText">
+           <string>两端必须填同一个口令</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="lbEncryptHint">
+        <property name="text">
+         <string>口令只在你和对方之间共享，中继没有它。忘填口令等于不加密——不要与连接口令混用。</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
     <spacer name="verticalSpacer">
      <property name="orientation">
       <enum>Qt::Orientation::Vertical</enum>

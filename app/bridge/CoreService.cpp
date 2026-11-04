@@ -90,6 +90,43 @@ cli::ClientConfig CoreService::makeConfig(const ConnInfo& conn)
     // 声明本机标识（PROTOCOL.md §11.7）：空则由中继分配 client-N。
     cfg.requestedId = fromQt(conn.requestedId);
 
+    // 传输选项来自设置对话框（全局，不属于某次连接）：加密的口令式密钥
+    // 与"哪个中继"无关，压缩同理。每次建配置现读一次，改完设置下一次
+    // 操作就生效，不需要重启。
+    {
+        QSettings settings;
+        cfg.compress = settings.value(settings::kSenderCompress, settings::kSenderCompressDefault).toBool();
+
+        const bool wantEncrypt = settings.value(settings::kSecurityEncrypt, settings::kSecurityEncryptDefault).toBool();
+        const QString pass = settings.value(settings::kSecurityEncryptPass).toString();
+        // 勾了却没口令 = 没开（Setting::onSave 已经这样归一，这里再兜一次：
+        // 手改注册表、或旧版本存下的组合都会走到这条）。
+        if (wantEncrypt && !pass.isEmpty()) {
+            cfg.encryptPassphrase = fromQt(pass);
+        }
+        emit securityChanged(!cfg.encryptPassphrase.empty(), cfg.compress);
+    }
+
+    // 断线重连（ClientConfig::ReconnectPolicy）。
+    //
+    // 与界面里那个"自动接收失败重试"是**两层**，职责不同：
+    //   - 这一层（Client 内部）扛的是链路抖动：数据连接断了立刻重建，
+    //     控制连接断了按退避重连。**正在传的文件会接着传**，id 也不变。
+    //   - 那一层（MainWindow）扛的是"重连也救不回来"：会话彻底结束后按
+    //     用户配置的间隔/次数重新 startAutoReceive（新 Client、新会话）。
+    // 没有这一层时，一次 3 秒的抖动就要走"结束会话 + 重建"，代价是 id 换
+    // 一个、正在传的文件从头来。
+    //
+    // 次数给 3：再往上（2+4+8+16…秒）用户等待的时间比直接报错还长。
+    cfg.reconnect.enabled = true;
+    cfg.reconnect.delay = std::chrono::seconds(2);
+    cfg.reconnect.maxDelay = std::chrono::seconds(8);
+    cfg.reconnect.maxAttempts = 3;
+    cfg.onReconnecting = [this](int attempt, std::chrono::milliseconds delay) {
+        emit reconnecting(attempt, static_cast<int>(delay.count()));
+    };
+    cfg.onReconnected = [this] { emit reconnected(); };
+
     // 记下这组参数（GUI 线程），供 refreshPeers 判断会话是否对应表单地址。
     activeConnKey_ = conn.host + QStringLiteral(":") + QString::number(conn.port) + QStringLiteral(":") +
                      (conn.noAuth ? QStringLiteral("N") : QStringLiteral("P")) + QStringLiteral(":") + conn.password;

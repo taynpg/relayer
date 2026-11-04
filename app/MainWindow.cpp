@@ -356,6 +356,21 @@ void MainWindow::wireSignals()
     connect(core_, &relayer::app::CoreService::operationFinished, this, &MainWindow::onOperationFinished);
     connect(core_, &relayer::app::CoreService::sendFinished, this, &MainWindow::onSendFinished);
     connect(core_, &relayer::app::CoreService::assignedIdChanged, this, &MainWindow::onAssignedIdChanged);
+    connect(core_, &relayer::app::CoreService::reconnecting, this, [this](int attempt, int delayMs) {
+        log_->appendLog(QStringLiteral("[连接] 与中继断开，%1 秒后重连（第 %2 次）\n").arg(qMax(1, delayMs / 1000)).arg(attempt));
+    });
+    connect(core_, &relayer::app::CoreService::reconnected, this, [this] {
+        // 正在跑的操作会自己续上（发送按残片、接收等对方重发），所以这里
+        // 只是"链路回来了"的通知，不是"操作结束了"。
+        log_->appendLog(QStringLiteral("[连接] 已重连，未完成的操作会自己续上\n"));
+    });
+    connect(core_, &relayer::app::CoreService::securityChanged, this, [this](bool encrypted, bool compressed) {
+        // 每次建会话都记一条：这是用户确认"加密真的开着"的唯一界面反馈。
+        // 口令本身**不**进日志（日志会被贴进 issue）。
+        QString text = QStringLiteral("[传输] 压缩 %1").arg(compressed ? QStringLiteral("开") : QStringLiteral("关"));
+        text += QStringLiteral("，载荷加密 %1\n").arg(encrypted ? QStringLiteral("开") : QStringLiteral("关"));
+        log_->appendLog(text);
+    });
     connect(core_, &relayer::app::CoreService::fileReceived, this, [this](const QString& targetPath) {
         log_->appendLog(QStringLiteral("[接收完成] %1\n").arg(targetPath));
         // 常驻接收继续等下一个文件；重置空闲提示，让"等待文件……"

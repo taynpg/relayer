@@ -211,6 +211,21 @@ signals:
     // 自己被分配的身份。可能多次发出（见 ClientConfig::onIdAssigned 注释）。
     void assignedIdChanged(const QString& id);
 
+    // 本次会话实际生效的传输选项（来自设置对话框）。
+    //
+    // 为什么值得单独发一条：**"我以为加密了"是这类功能最坏的失败方式**。
+    // 用户勾了加密、口令却两边不一致，或者设置没保存上，界面上看不出任何
+    // 区别——错误只会在对端断开时以一句"解密失败"出现。所以每次建配置
+    // 就把实际生效的值报给界面，由主窗口写进日志。
+    void securityChanged(bool encrypted, bool compressed);
+
+    // 断线重连的过程（Attempt 从 1 开始，delayMs 是这次等多久）。
+    //
+    // 重连**不是失败**：操作还在跑，只是暂时没有链路。界面上要把它和
+    // "传输失败"分开写，否则用户会把"重连中"读成"传完了/传砸了"。
+    void reconnecting(int attempt, int delayMs);
+    void reconnected();
+
     // 常驻接收收完一个文件。操作本身不结束（busy 不翻转），会话继续
     // 等下一个文件——id 因此保持稳定，发送方的对端表不会过期。
     void fileReceived(const QString& targetPath);
