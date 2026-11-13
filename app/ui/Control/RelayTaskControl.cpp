@@ -1,5 +1,6 @@
 #include "RelayTaskControl.h"
 
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QDir>
 #include <QDirIterator>
@@ -7,6 +8,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QVBoxLayout>
@@ -72,6 +74,57 @@ enum Column {
 RelayTaskControl::RelayTaskControl(QWidget* parent) : QDialog(parent)
 {
     buildLayout();
+}
+
+// ---------------------------------------------------------------------------
+// 关闭语义
+//
+// 独立窗口带来的新问题：v1 是模态 exec()，传输期间用户根本没机会关它；
+// 现在可以了，于是"关窗口"和"停传输"必须分开表达。静默隐藏是最糟的默认
+// ——用户以为停了，后台还在搬字节，只有日志里能看到结论。
+// ---------------------------------------------------------------------------
+
+bool RelayTaskControl::confirmClose()
+{
+    if (!running_) {
+        return true;
+    }
+
+    QMessageBox box(QMessageBox::Question, QStringLiteral("传输还在进行"),
+                    QStringLiteral("这批文件还没传完。关闭窗口不会停止传输——它会继续在后台跑，"
+                                   "结论只出现在日志里。"),
+                    QMessageBox::NoButton, this);
+    auto* hideBtn = box.addButton(QStringLiteral("继续传输（隐藏窗口）"), QMessageBox::AcceptRole);
+    auto* stopBtn = box.addButton(QStringLiteral("停止并关闭"), QMessageBox::DestructiveRole);
+    auto* cancelBtn = box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+    box.setDefaultButton(cancelBtn);
+    box.exec();
+
+    if (box.clickedButton() == hideBtn) {
+        return true;
+    }
+    if (box.clickedButton() == stopBtn) {
+        stopBatch();
+        return true;
+    }
+    return false;
+}
+
+void RelayTaskControl::closeEvent(QCloseEvent* event)
+{
+    if (confirmClose()) {
+        event->accept();
+    } else {
+        event->ignore();
+    }
+}
+
+void RelayTaskControl::reject()
+{
+    // ESC 走这条，绕过 closeEvent，判断得接上同一套。
+    if (confirmClose()) {
+        QDialog::reject();
+    }
 }
 
 void RelayTaskControl::buildLayout()

@@ -129,11 +129,20 @@ void MainWindow::buildLayout()
     // 镜像 v1 relayFile.cpp initLayout：上（连接面板 + 选项卡）/ 下（文件浏览）。
     // 垂直 splitter 让下半部的浏览区可拖大——大目录浏览时这是高频操作。
     comparison_ = new ComparisonControl(this);
+
+    // 任务窗口：v1 的 Form/RelayTask 是个**独立对话框**（`new` 之后 `exec()`），
+    // 用户明确要这个形态。这里照做，但**不做模态**——v1 的 exec() 在传大文件
+    // 时把整个界面锁死，日志和对照表都看不了（v1 实测的痛点）。控件本身继承
+    // QDialog，所以只要不 addTab，它天然就是独立窗口；发送时由 startTasks 的
+    // 调用点唤起（见 sendTaskBatch）。
     taskControl_ = new relayer::app::RelayTaskControl(this);
     taskControl_->attachCoreService(core_);
+    taskControl_->setWindowTitle(QStringLiteral("传输任务"));
+    taskControl_->setMinimumSize(720, 320);
+    taskControl_->resize(960, 460);
+
     auto* tabWidget = new QTabWidget(this);
     tabWidget->addTab(log_, QStringLiteral("日志"));
-    tabWidget->addTab(taskControl_, QStringLiteral("任务"));
     tabWidget->addTab(comparison_, QStringLiteral("对照表"));
 
     auto* sTop = new QSplitter(Qt::Horizontal, this);
@@ -1184,6 +1193,13 @@ void MainWindow::sendBatch(const relayer::app::RelayTaskItems& items, const rela
     // 批次直接搭在常驻会话上发（不新建连接 → id 不变，接收也不中断），
     // 所以不再需要"接收让位"。
     taskControl_->startTasks(items, conn, defaultPeerId);
+
+    // 唤起任务窗口：它是独立对话框（v1 的形态），关掉之后不会自己再出现，
+    // 所以每批都抬到前面。收起过（hide）也要能拉回来，因此是 show + raise，
+    // 不是只 raise。
+    taskControl_->show();
+    taskControl_->raise();
+    taskControl_->activateWindow();
 }
 
 // 目标绝对路径：对照表的 relDir 就是**对端视角的绝对目录**（DESIGN.md

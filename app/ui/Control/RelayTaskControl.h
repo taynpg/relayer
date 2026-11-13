@@ -9,6 +9,7 @@
 #include "model/ProgressTracker.h"
 #include "model/TransferTask.h"
 
+class QCloseEvent;
 class QComboBox;
 class QLabel;
 class QPushButton;
@@ -163,6 +164,18 @@ public:
 
     bool running_ = false;
     bool stopping_ = false;
+
+protected:
+    // 这个控件是**独立窗口**（v1 的 Form/RelayTask 形态），用户会点右上角
+    // 的 X。批次进行中关闭窗口不等于停止传输，两者必须分清——否则用户以为
+    // 停了，实际还在后台搬字节。
+    void closeEvent(QCloseEvent* event) override;
+    // ESC 走 reject()，绕过 closeEvent，得单独接上同一套判断。
+    void reject() override;
+
+    // 关窗口前的确认：批次进行中时给"隐藏 / 停止并关闭 / 取消"三选一。
+    // 返回 true 表示可以关（调用方继续 accept/hide）。
+    [[nodiscard]] bool confirmClose();
 };
 
 }   // namespace relayer::app
