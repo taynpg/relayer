@@ -10,18 +10,22 @@
 - **`third_party/` 整目录入库**（含 xz/miniz/catch2/asio/fmt/spdlog/cereal/nlohmann），
   理由是"编译简单是重点，仓库大点没关系"。
 - **不着急出成果，慢工出细活**——宁可多写测试也不要留隐患。
-- **不做双连接（控制/数据两条 TCP）**。用户质疑过，评估后确认：v1 用两条线
-  主要是 FileSession 模型要第二条连接建 id 映射，HOL 只是附带；v2 用
-  sessionId 解复用已消掉那层。同样的收益用「小块 + 写队列优先级 + 写超时」
-  拿到，代价小一个数量级。理由与替代方案写在 `PROTOCOL.md §9.4.1`。
+- **控制连接 + 数据连接（两条 TCP）——2026-10 改口，现在就是这样**。曾评估
+  "单连接 + 小块 + 写队列优先级 + 写超时"够用（`DESIGN.md` §4.2 留着那次结论），
+  实机否掉了：只要还在同一条 TCP 上，大文件就把带宽占满，列举/取消仍然排队。
+  现在 `core/net/ControlLink`（常驻、请求号配对、多请求并发、各自超时）+
+  `core/net/TransferLink`（首次传输时建、之后保留），`cli::Client` 内部已换
+  过去，公共 API 一行未改。**别再提议合并回单连接**。
 - **默认分块 256 KiB（不是 4 MiB 上限）**。块大小只决定"控制帧最坏等多久"，
   吞吐由在飞字节数决定（`windowBytes=4 MiB` 换算成块数）。改块大小必须
   同时确认每块固定开销已被消掉，否则会吞吐腰斩。
-- **id 必须是稳定身份，客户端自己声明**（2026-10-23 拍板，设计见
-  `DESIGN.md` §3.2）。理由：对照表按 id 固定投递，id 漂移会发错人
+- **id 必须是稳定身份，客户端自己声明**（`DESIGN.md` §3.2，已实现 `2e343aa`；
+  `--id` 是**声明**不是断言）。理由：对照表按 id 固定投递，id 漂移会发错人
   （用户真实遇到过）。服务端只校验占用，撞名**拒绝连接并提示**——不自动
-  改名、不顶掉先到者（两种做法都会让表悄悄指向别人）。v2 现状仍是服务端
-  分配 `client-N`，该设计**未实现**；`--id` 现在只是断言不是声明。
+  改名、不顶掉先到者（两种做法都会让表悄悄指向别人）。
+- **数据连接的身份是 `<控制连接 id>~d`**，用 `kClaimId` 声明，重连后名字不变
+  （对端缓存的 id 才不过期）；它**不出现在在线列表**里——服务端按 `~d`
+  **后缀**判定（见坑区"命名约定"一条）。
 
 ## 架构约束
 
@@ -55,11 +59,13 @@
 
 **统一用 `cmk`**（2026-10-29 用户指定，别再手写 `cmake -G Ninja ...`）：
 
+- **版本 2.0.0**，`RELAYER_BUILD_GUI/SERVER/CLI/TESTS` 四个开关，产物在 `build/bin`。
+
 ```bash
 cmk build -t Debug     # build/，Debug，配置里已含 RELAYER_BUILD_TESTS=ON
 cmk build -t Release   # build-rel/，Release + RELAYER_WERROR + tests（提交前跑一次）
 cmk                    # 无参数 = 重放上次 build（日常增量）
-cd build && ctest --output-on-failure   # 7 项，约 90 秒
+cd build && ctest --output-on-failure   # 8 项，约 155 秒
 ```
 
 - cmk 配置 `.cmk/cmk_config` **已入库**（2026-10-29 用户要求，两个
@@ -97,18 +103,21 @@ cd build && ctest --output-on-failure   # 7 项，约 90 秒
     单一来源 `app/ui/SettingsKeys.h`）；E3.7 ReplaceArea 作用域（v1 的
     useCase/useRegex 是假选项，v2 做成真的）；E3.8 ProgressTracker（清单 #11）
   - ⬜ 剩余：E4 真实链路验收（两台机器经中继；本机 e2e 已 20+ 场景）
-- ✅ **阶段 F 的 GUI 入口（P2P 除外）全部补齐**（2026-10-23）：
-  远端列举（`kAskFileList`）/ 取回（`kAskFilePull`）/ 目录打包取回
-  （`kAskArchivePull` + 自动解包）/ 并发发送（`sendFileTask`，同对端串行）/
-  压缩解压 / 粗校验 / 时间戳校验 / **行级下载**（落该行本地目录，逐项串行）/
-  详细信息对话框 / **跨面板拖拽** / **访问对端目录**。
-  最后三项（行级下载、详细信息、拖拽）**只有编译与代码审查，无自动化测试**，
-  **验收要点已随过程文档删除**，只存在于 git 历史（`d6f8245` 之前的 HANDOFF）。
-- ⬜ P2P（用户明确不做）、G 发布
+测试基线（2026-11-13 实测）：`ctest` **8 项**全过，141 秒。common 22 用例 /
+1136 断言、filestore 118 / 1726、core 436 / 6047（合计 **576 用例 / 8909 断言**）；
+`e2e_quick` 111 秒、`gui_smoke` 13 秒。e2e 共 **27 个场景**（含 2 个 slow：
+200MB / 1GB，`--quick` 跳过；完整跑约 5 分钟）。
 
-测试基线：`ctest` 7 项全过（common / filestore / core / arch / protocol_doc /
-transition_doc / e2e_quick），51 秒。common 16/1111、filestore 117/1718、
-core 341/5482，合计 474 用例 / 8311 断言；e2e 10 场景（完整跑 295 秒）。
+**功能状态：齐了，缺真机验收。** 已实装：请求号配对（`core/protocol/Pairing`）、
+控制连接（`core/net/ControlLink`）、数据连接（`core/net/TransferLink`）、
+断线重连与按残片续传（`ClientConfig::ReconnectPolicy`，CLI 默认关、`--reconnect`
+打开；GUI 常开）、载荷加密（`--encrypt`，`protocol::PayloadCipher`）、块载荷
+压缩（`--compress`，逐帧 deflate）、远端列举/取回/文件操作、全路径访问（无共享根）。
+吞吐 200-300 MB/s（`73b1ad2` 六个原因叠加，之前 25-48 MB/s）。
+
+**缺的**：① E4 真机验收——两台真实机器经中继跑一遍，至今只在本机中继 + loopback
+验过；② 行级下载 / 详细信息 / 跨面板拖拽三项只有代码审查，没有自动化用例；
+③ P2P 直连（用户明确不做）、G 发布。
 
 **文档只有两份**（2026-10-26 收敛，提交 `d6f8245`）：
 `docs/PROTOCOL.md` 是线协议的唯一权威；`docs/DESIGN.md` 是架构、硬约束、
@@ -116,7 +125,7 @@ core 341/5482，合计 474 用例 / 8311 断言；e2e 10 场景（完整跑 295 
 git 历史里，别再重建。
 
 改代码前先读 `DESIGN.md` §2（硬约束）与 §4（否决清单）；要推翻某个决策，
-先在 §6 决策记录里补一条。
+先在 §6 决策记录里补一条（§4.2 就是"双连接"被推翻后的样子）。
 
 ## 定位
 
@@ -126,6 +135,15 @@ git 历史里，别再重建。
 
 ## 容易踩的坑
 
+- **命名约定要端到端核对"方向"**：数据连接叫 `<控制连接 id>~d`（**后缀**），
+  而过滤函数按 `id.front() == '~'` 判（**前缀**），两条规则永不相交 → 在线列表
+  里每个客户端多一条 `<id>~d`，两个客户端看起来像四个在线端（用户就是这么
+  报的）。常量名 `kInternalIdPrefix`、注释、文档 §11.7 全都写着"前缀"，读代码
+  完全看不出矛盾。**约定写了前后缀，就必须找到真正拼接那一行核对**
+  （`cli/src/Client.cpp` 的 `dataIdFor`），别相信常量名。
+- **"列表里没有 X" 必须配一条反证**：只断言输出不含 `~d`，在"数据连接压根
+  没建"时也是绿的（空转）。`online-list` 场景用"抢 `nodeA~d` 这个名字必须被
+  拒绝"来证明那条连接真的注册着。
 - **每块 open/close 一次文件 = 每块 ~9ms**（Windows）。接收端曾每块
   `openWrite` 残片，1024 块就是 9 秒，还会引发超时重传。写盘流要整段复用，
   在锁内 seek/write/flush；`finalize`/`abort` 前必须显式关闭（Windows 上
