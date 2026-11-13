@@ -36,6 +36,16 @@ public:
     explicit ConnectorControl(QWidget* parent = nullptr);
     ~ConnectorControl() override;
 
+    // sizeHint 的宽度必须不超过 setMaximumWidth(350)。QSplitter 初始布局
+    // 按 sizeHint 逐个累加定位子控件，而实际几何会被 maximumWidth 钳小——
+    // sizeHint 超出 max 时，下一个子控件的起点仍按未钳的值算，中间就留出
+    // 一段空洞（实测 137px，用户拖一下分割器才贴合）。让 hint 自己落到
+    // max 以内，空洞从根上消失。
+    QSize sizeHint() const override
+    {
+        return QSize(qMin(QDialog::sizeHint().width(), maximumWidth()), QDialog::sizeHint().height());
+    }
+
     ConnectorControl(const ConnectorControl&) = delete;
     ConnectorControl& operator=(const ConnectorControl&) = delete;
 

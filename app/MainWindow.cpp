@@ -138,7 +138,10 @@ void MainWindow::buildLayout()
     taskControl_ = new relayer::app::RelayTaskControl(this);
     taskControl_->attachCoreService(core_);
     taskControl_->setWindowTitle(QStringLiteral("传输任务"));
-    taskControl_->setMinimumSize(720, 320);
+    // 不设显式 minimumSize：它会**覆盖**布局算出的真实最小值（Qt 的规则是
+    // 显式 minimumSize 优先于 minimumSizeHint），窗口就能开到比内容还小，
+    // 底部按钮行被截掉一截——用户实测"默认尺寸盖住了分页行，拖一下才露出"。
+    // 保持 960x460 的默认打开尺寸即可；真实最小值交给布局自己说话。
     taskControl_->resize(960, 460);
 
     auto* tabWidget = new QTabWidget(this);
