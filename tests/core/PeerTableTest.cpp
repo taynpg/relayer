@@ -235,6 +235,41 @@ TEST_CASE("peer id validation", "[peer][id]")
 }
 
 // ===========================================================================
+// 内部连接（数据连接）的判定
+//
+// 这个函数唯一的用途是"在线列表把数据连接滤掉"。它此前**一处用例都没有**，
+// 而实现按首字符判 `~`、客户端拼的是后缀 `~d`，两条规则永不相交——过滤
+// 一直返回 false，界面上每个客户端多出一条 `<id>~d`，看起来像"在线对端
+// 多了一倍"。所以这里把两端真正会出现的 id 形状都钉住。
+// ===========================================================================
+
+TEST_CASE("internal peer id is recognised by the trailing marker", "[peer][id]")
+{
+    // 线上真实形状：控制连接叫 nodeA，数据连接叫 nodeA~d
+    REQUIRE(isInternalPeerId("nodeA~d"));
+    REQUIRE(isInternalPeerId("client-1~d"));
+    REQUIRE(isInternalPeerId(std::string("~d")));
+
+    // 普通身份一律不算内部连接（漏判会多列条目，误判会让人凭空消失）
+    REQUIRE_FALSE(isInternalPeerId("nodeA"));
+    REQUIRE_FALSE(isInternalPeerId("client-1"));
+    REQUIRE_FALSE(isInternalPeerId(""));
+
+    // 只有完整后缀才算：`~d` 出现在中间或只有一半都不行
+    REQUIRE_FALSE(isInternalPeerId("~dnodeA"));   // 标记在前（旧实现的错法）
+    REQUIRE_FALSE(isInternalPeerId("nodeA~"));
+    REQUIRE_FALSE(isInternalPeerId("nodeA~dd"));   // 结尾不是 `~d`
+    REQUIRE_FALSE(isInternalPeerId("~nodeA"));
+}
+
+TEST_CASE("internal peer id survives names that end in d", "[peer][id]")
+{
+    // 控制连接 id 本身以 d 结尾时，拼接结果是 `<...>d~d`，仍然是后缀命中
+    REQUIRE(isInternalPeerId("david~d"));
+    REQUIRE_FALSE(isInternalPeerId("david"));
+}
+
+// ===========================================================================
 // kAnswerId 载荷
 // ===========================================================================
 

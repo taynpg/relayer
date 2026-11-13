@@ -79,7 +79,7 @@ std::string fileNameOf(const std::string& path)
 
 // 数据连接的 id：`<控制连接 id>~d`。
 //
-// 服务端把 `~` 前缀保留给内部连接（session::kInternalIdPrefix），在线列表
+// 服务端把 `~d` 后缀保留给内部连接（session::kInternalIdSuffix），在线列表
 // 会把它过滤掉——用户看到的"在线对端"是人，不该多出一条自己的数据连接。
 //
 // 为什么不用服务端分配的 client-N：那个号每次重连都变，对端缓存的

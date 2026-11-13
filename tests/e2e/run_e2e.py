@@ -762,6 +762,52 @@ def fixed_id(workdir: Path, bin_dir: Path) -> None:
         c.shutdown()
 
 
+@scenario("online-list", "在线列表只列人：数据连接（<id>~d）不出现在列表里")
+def online_list(workdir: Path, bin_dir: Path) -> None:
+    """双连接下每个客户端占两个 id，列表要列"人"不是连接（PROTOCOL.md §11.7）。
+
+    两个半边缺一不可，否则用例会变成空转：
+      1. 列表里**没有** `<id>~d` —— 过滤生效；
+      2. 拿 `<id>~d` 去声明身份**被拒** —— 说明那条数据连接真的注册着。
+         没有第 2 条，"列表里没有 ~d"完全可能只是"它压根不存在"。
+
+    这个场景补的是一个活到实机才被发现的洞：服务端的过滤函数按**首字符**
+    判 `~`，而客户端拼的是**后缀** `~d`，两条规则永不相交，过滤一直返回
+    false——两个客户端看起来像四个在线端。core 里当时没有任何用例碰过它，
+    e2e 也没断言过列表内容。
+    """
+    c = Cluster(workdir, free_port(), bin_dir=bin_dir)
+    try:
+        c.start_server()
+        (c.dst / "a").mkdir(parents=True, exist_ok=True)
+        (c.dst / "b").mkdir(parents=True, exist_ok=True)
+
+        # 两个接收端：各自一条控制连接 + 一条数据连接（`<id>~d`）
+        recv_a = c.cli("recv-a", "recv", "--to-dir", str(c.dst / "a"), *c.cli_common(),
+                       "--id", "nodeA", "--hard-timeout", "60")
+        expect_eq(recv_a.wait_for(ASSIGNED_PREFIX, 20.0).split(ASSIGNED_PREFIX, 1)[1].strip(),
+                  "nodeA", "A 的 id")
+        recv_b = c.cli("recv-b", "recv", "--to-dir", str(c.dst / "b"), *c.cli_common(),
+                       "--id", "nodeB", "--hard-timeout", "60")
+        expect_eq(recv_b.wait_for(ASSIGNED_PREFIX, 20.0).split(ASSIGNED_PREFIX, 1)[1].strip(),
+                  "nodeB", "B 的 id")
+
+        lister = c.cli("lister", "list", *c.cli_common())
+        expect_eq(lister.wait_exit(60), 0, "list 退出码")
+        out = lister.tail(40)
+        expect("nodeA" in out, f"列表里没有 nodeA：\n{out}")
+        expect("nodeB" in out, f"列表里没有 nodeB：\n{out}")
+        expect("~d" not in out, f"数据连接被列进了在线表（两个人不该显示成四条）：\n{out}")
+
+        # 反证：数据连接确实存在，只是不显示——抢它的名字必须失败。
+        thief = c.cli("claim-data", "list", *c.cli_common(), "--id", "nodeA~d")
+        thief.wait_exit(60)
+        expect("already in use" in thief.tail(40),
+               f"nodeA~d 没被占用，说明数据连接根本没建，上一条断言是空转：\n{thief.tail(40)}")
+    finally:
+        c.shutdown()
+
+
 @scenario("encrypted-transfer", "载荷加密：两端同口令可传，内容一致")
 def encrypted_transfer(workdir: Path, bin_dir: Path) -> None:
     """PROTOCOL.md §6 的端到端验收。

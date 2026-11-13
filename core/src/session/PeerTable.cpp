@@ -147,7 +147,13 @@ bool isValidPeerId(std::string_view id) noexcept
 
 bool isInternalPeerId(std::string_view id) noexcept
 {
-    return !id.empty() && id.front() == kInternalIdPrefix.front();
+    // 判**后缀** `~d`：数据连接的名字是 `<控制连接 id>~d`（PROTOCOL.md
+    // §11.13）。按首字符判会永远落空，在线列表就会把每个客户端的数据连接
+    // 也列出来（看起来像"在线对端多了一倍"）。
+    if (id.size() < kInternalIdSuffix.size()) {
+        return false;
+    }
+    return id.compare(id.size() - kInternalIdSuffix.size(), kInternalIdSuffix.size(), kInternalIdSuffix) == 0;
 }
 
 // ---------------------------------------------------------------------------
